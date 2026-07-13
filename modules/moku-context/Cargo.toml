@@ -1,0 +1,14 @@
+[package]
+name = "moku-context"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+colored.workspace = true
+ignore.workspace = true
+arboard.workspace = true
+moku-core.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+async-trait.workspace = true

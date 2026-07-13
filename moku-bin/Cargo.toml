@@ -1,0 +1,37 @@
+[package]
+name = "moku-bin"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "moku"
+path = "src/main.rs"
+
+[dependencies]
+moku-core.workspace = true
+anyhow.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+clap.workspace = true
+color-eyre.workspace = true
+tracing.workspace = true
+tracing-error.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+directories.workspace = true
+async-trait.workspace = true
+arc-swap.workspace = true
+futures.workspace = true
+
+moku-launcher = { path = "../modules/moku-launcher" }
+moku-lock-screen = { path = "../modules/moku-lock-screen" }
+moku-todo = { path = "../modules/moku-todo" }
+moku-settings = { path = "../modules/moku-settings" }
+moku-dashboard = { path = "../modules/moku-dashboard" }
+moku-bookmark = { path = "../modules/moku-bookmark" }
+moku-context = { path = "../modules/moku-context" }
+moku-commit = { path = "../modules/moku-commit" }
+
+[dev-dependencies]
+tempfile.workspace = true

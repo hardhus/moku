@@ -1,0 +1,16 @@
+[package]
+name = "moku-commit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moku-core.workspace = true
+anyhow.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dotenvy.workspace = true
+tempfile.workspace = true
+async-trait.workspace = true

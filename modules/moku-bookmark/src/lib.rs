@@ -1,0 +1,400 @@
+use anyhow::Result;
+use arboard::Clipboard;
+use async_trait::async_trait;
+use crossterm::event::{Event, KeyCode, KeyEventKind};
+use ratatui::{Frame, layout::Rect, widgets::ListState};
+
+pub mod engine;
+pub mod filter;
+pub mod io;
+pub mod model;
+pub mod ui;
+
+use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
+
+use crate::engine::BookmarkEngine;
+use crate::filter::BookmarkFilter;
+use crate::io::BookmarkIO;
+use crate::model::Bookmark;
+use crate::ui::BookmarkUi;
+
+#[derive(PartialEq)]
+enum AppMode {
+    Normal,
+    Input,
+    Search,
+    DomainFilter(String),
+}
+
+pub struct BookmarkModule {
+    items: Vec<Bookmark>,
+    filtered_items: Vec<Bookmark>,
+    state: ListState,
+    input_buffer: String,
+    mode: AppMode,
+}
+
+impl Default for BookmarkModule {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            filtered_items: Vec::new(),
+            state: ListState::default(),
+            input_buffer: String::new(),
+            mode: AppMode::Normal,
+        }
+    }
+}
+
+impl BookmarkModule {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn refresh_filter(&mut self) {
+        match &self.mode {
+            AppMode::Search => {
+                self.filtered_items = BookmarkFilter::fuzzy(&self.items, &self.input_buffer);
+            }
+            AppMode::DomainFilter(domain) => {
+                self.filtered_items = BookmarkFilter::by_domain(&self.items, domain);
+            }
+            _ => {
+                self.filtered_items = self.items.clone();
+            }
+        }
+
+        if self.filtered_items.is_empty() {
+            self.state.select(None);
+        } else {
+            self.state.select(Some(0));
+        }
+    }
+
+    fn copy_selected_to_clipboard(&self, ctx: &mut AppContext) {
+        if let Some(i) = self.state.selected() {
+            let url = &self.filtered_items[i].url;
+            match Clipboard::new() {
+                Ok(mut clipboard) => {
+                    if let Err(e) = clipboard.set_text(url.clone()) {
+                        ctx.show_error(format!("Clipboard copy error: {}", e));
+                    } else {
+                        ctx.show_info(format!("Copied to clipboard: {}", url));
+                    }
+                }
+                Err(e) => ctx.show_error(format!("No clipboard access: {}", e)),
+            }
+        }
+    }
+
+    async fn paste_and_save_from_clipboard(&mut self, ctx: &mut AppContext) -> Result<bool> {
+        match Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Ok(text) = clipboard.get_text() {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        let new_bm = if let Some((title, url)) = trimmed.rsplit_once(" | ") {
+                            let mut bm = Bookmark::new(url.trim().to_string());
+                            bm.name = Some(title.trim().to_string());
+                            bm
+                        } else {
+                            Bookmark::new(trimmed.to_string())
+                        };
+
+                        self.items.push(new_bm);
+                        BookmarkEngine::save_all(ctx, &self.items).await?;
+                        ctx.show_info("Imported from clipboard 🔐");
+                        self.refresh_filter();
+                        return Ok(true);
+                    } else {
+                        ctx.show_warning("Clipboard is empty");
+                    }
+                }
+            }
+            Err(e) => ctx.show_error(format!("Clipboard error: {}", e)),
+        }
+        Ok(false)
+    }
+
+    fn command_up(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.filtered_items.len().saturating_sub(1)
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+
+    fn command_down(&mut self) {
+        let i = match self.state.selected() {
+            Some(i) => {
+                if i >= self.filtered_items.len().saturating_sub(1) {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.state.select(Some(i));
+    }
+}
+
+impl ModuleMeta for BookmarkModule {
+    fn id(&self) -> ModuleId {
+        ModuleId::BOOKMARK
+    }
+
+    fn title(&self) -> &'static str {
+        ModuleId::BOOKMARK.title()
+    }
+}
+
+#[async_trait]
+impl TuiModule for BookmarkModule {
+    async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
+        match BookmarkEngine::load_all(ctx).await {
+            Ok(loaded) => {
+                self.items = loaded;
+                self.refresh_filter();
+
+                if !self.filtered_items.is_empty() {
+                    self.state.select(Some(0));
+                }
+                Ok(())
+            }
+            Err(e) => {
+                ctx.show_error(format!("Load failed: {}", e));
+                Err(e)
+            }
+        }
+    }
+
+    async fn handle_event(&mut self, event: &Event, ctx: &mut AppContext) -> Result<bool> {
+        let mut changed = false;
+
+        // --- INPUT ve SEARCH MODE ---
+        if self.mode == AppMode::Input || self.mode == AppMode::Search {
+            if let Event::Key(key) = event {
+                if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+                    match key.code {
+                        KeyCode::Enter => {
+                            if self.mode == AppMode::Input {
+                                if let Ok(new_bm) =
+                                    BookmarkEngine::create_bookmark(self.input_buffer.clone())
+                                {
+                                    self.items.push(new_bm);
+                                    BookmarkEngine::save_all(ctx, &self.items).await?;
+                                    ctx.show_info("Saved successfully 🔐");
+                                }
+                            }
+                            self.mode = AppMode::Normal;
+                            self.input_buffer.clear();
+                            changed = true;
+                        }
+                        KeyCode::Esc => {
+                            self.mode = AppMode::Normal;
+                            self.input_buffer.clear();
+                            self.refresh_filter();
+                            changed = true;
+                        }
+                        KeyCode::Char(c) => {
+                            self.input_buffer.push(c);
+                            if self.mode == AppMode::Search {
+                                self.refresh_filter();
+                            }
+                            changed = true;
+                        }
+                        KeyCode::Backspace => {
+                            self.input_buffer.pop();
+                            if self.mode == AppMode::Search {
+                                self.refresh_filter();
+                            }
+                            changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return Ok(changed);
+        }
+
+        // --- DOMAIN FILTER MODE ---
+        if let AppMode::DomainFilter(_) = self.mode {
+            if let Event::Key(key) = event {
+                if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('r') => {
+                            self.mode = AppMode::Normal;
+                            self.refresh_filter();
+                            changed = true;
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            self.command_down();
+                            changed = true;
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            self.command_up();
+                            changed = true;
+                        }
+                        KeyCode::Char('c') => {
+                            self.copy_selected_to_clipboard(ctx);
+                            changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return Ok(changed);
+        }
+
+        // --- NORMAL MODE ---
+        let command = resolve_event(event, &ctx.config.load().keys, None);
+
+        match command {
+            Command::Quit | Command::Back => {
+                ctx.navigate_to(ModuleId::LAUNCHER);
+                return Ok(true);
+            }
+            Command::Up => {
+                self.command_up();
+                changed = true;
+            }
+            Command::Down => {
+                self.command_down();
+                changed = true;
+            }
+            Command::Delete => {
+                if let Some(i) = self.state.selected() {
+                    let target_url = &self.filtered_items[i].url;
+                    self.items.retain(|b| &b.url != target_url);
+                    BookmarkEngine::save_all(ctx, &self.items).await?;
+                    ctx.show_info("Deleted");
+                    self.refresh_filter();
+                    changed = true;
+                }
+            }
+            _ => {
+                if let Event::Key(key) = event {
+                    if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+                        match key.code {
+                            KeyCode::Char('a') => {
+                                self.mode = AppMode::Input;
+                                self.input_buffer.clear();
+                                changed = true;
+                            }
+                            KeyCode::Char('/') => {
+                                self.mode = AppMode::Search;
+                                self.input_buffer.clear();
+                                self.refresh_filter();
+                                changed = true;
+                            }
+                            KeyCode::Char('c') => {
+                                self.copy_selected_to_clipboard(ctx);
+                                changed = true;
+                            }
+                            KeyCode::Char('p') => {
+                                if self.paste_and_save_from_clipboard(ctx).await? {
+                                    changed = true;
+                                }
+                            }
+                            KeyCode::Char('f') => {
+                                if let Some(i) = self.state.selected() {
+                                    let domain = self.filtered_items[i].domain.clone();
+                                    self.mode = AppMode::DomainFilter(domain);
+                                    self.refresh_filter();
+                                    changed = true;
+                                }
+                            }
+                            KeyCode::Char('e') => {
+                                match BookmarkIO::export_json(&self.items, "moku_bookmarks.json") {
+                                    Ok(_) => {
+                                        ctx.show_info("Exported to moku_bookmarks.json 📤");
+                                        changed = true;
+                                    }
+                                    Err(e) => {
+                                        ctx.show_error(format!("Export failed: {}", e));
+                                    }
+                                }
+                            }
+                            KeyCode::Char('i') => {
+                                let file_to_import =
+                                    if std::path::Path::new("bookmarks.html").exists() {
+                                        "bookmarks.html"
+                                    } else {
+                                        "moku_bookmarks.json"
+                                    };
+
+                                match BookmarkIO::import_file(file_to_import) {
+                                    Ok(mut imported_items) => {
+                                        self.items.append(&mut imported_items);
+                                        BookmarkEngine::remove_duplicates(&mut self.items);
+                                        let _ = BookmarkEngine::save_all(ctx, &self.items).await;
+                                        self.refresh_filter();
+                                        ctx.show_info(format!(
+                                            "Imported and encrypted {} 📥",
+                                            file_to_import
+                                        ));
+                                        changed = true;
+                                    }
+                                    Err(e) => {
+                                        ctx.show_error(format!("Import failed: {}", e));
+                                    }
+                                }
+                            }
+                            KeyCode::Char('x') => {
+                                let removed_count =
+                                    BookmarkEngine::remove_duplicates(&mut self.items);
+                                if removed_count > 0 {
+                                    let _ = BookmarkEngine::save_all(ctx, &self.items).await;
+                                    self.refresh_filter();
+                                    ctx.show_info(format!(
+                                        "Removed {} duplicate(s) 🧹",
+                                        removed_count
+                                    ));
+                                    changed = true;
+                                } else {
+                                    ctx.show_warning("No duplicates found");
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
+        let (input_mode, search_mode) = match self.mode {
+            AppMode::Input => (true, false),
+            AppMode::Search => (false, true),
+            _ => (false, false),
+        };
+
+        let mode_name = match &self.mode {
+            AppMode::Input => "INPUT".to_string(),
+            AppMode::Search => "SEARCH".to_string(),
+            AppMode::DomainFilter(d) => format!("DOMAIN_FILTER: {}", d),
+            AppMode::Normal => "NORMAL".to_string(),
+        };
+
+        BookmarkUi::draw(
+            frame,
+            area,
+            theme,
+            &self.filtered_items,
+            &mut self.state,
+            &self.input_buffer,
+            input_mode,
+            search_mode,
+            &mode_name,
+        );
+    }
+}

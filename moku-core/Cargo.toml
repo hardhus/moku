@@ -1,0 +1,27 @@
+[package]
+name = "moku-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+toml.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+arc-swap.workspace = true
+
+sled.workspace = true
+zeroize.workspace = true
+argon2.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+secrecy.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
