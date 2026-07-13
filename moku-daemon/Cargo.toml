@@ -1,0 +1,23 @@
+[package]
+name = "moku-daemon"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "moku-daemon"
+path = "src/main.rs"
+
+[dependencies]
+moku-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+arc-swap.workspace = true
+futures.workspace = true
+auto-launch.workspace = true
+sysinfo.workspace = true
+
+moku-rss = { path = "../modules/moku-rss", default-features = false }

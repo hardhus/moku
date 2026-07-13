@@ -14,6 +14,18 @@ pub struct MokuConfig {
     pub themes: HashMap<String, ThemeColors>,
     /// Module settings are stored as a dynamic TOML table.
     pub modules: HashMap<String, toml::Value>,
+    /// Lua plugins enabled by the user.
+    #[serde(default)]
+    pub plugins: Vec<PluginEntry>,
+}
+
+/// Each entry in the `[[plugins]]` TOML array.
+/// `script` is a relative path to `dirs::get_plugins_dir()`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginEntry {
+    pub id: String,
+    pub title: String,
+    pub script: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -92,6 +104,7 @@ impl Default for MokuConfig {
             storage: StorageSettings::default(),
             modules: HashMap::new(),
             themes,
+            plugins: Vec::new(),
         }
     }
 }

@@ -3,8 +3,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 
-/// Returns the ProjectDirs struct which holds standard paths for the OS.
-/// Organization: com, Qualifier: hardhus, Application: moku
 pub fn get_project_dirs() -> Result<ProjectDirs> {
     let app_name = if cfg!(debug_assertions) {
         "moku_dev"
@@ -15,16 +13,21 @@ pub fn get_project_dirs() -> Result<ProjectDirs> {
         .context("Failed to determine user home directory or access to system paths was denied.")
 }
 
-/// Returns the standard configuration directory path.
 pub fn get_config_dir() -> Result<PathBuf> {
     let dirs = get_project_dirs()?;
     Ok(dirs.config_dir().to_path_buf())
 }
 
-/// Returns the local data directory path (for databases, logs, etc.).
 pub fn get_data_dir() -> Result<PathBuf> {
     let dirs = get_project_dirs()?;
     Ok(dirs.data_local_dir().to_path_buf())
+}
+
+/// Directory where the user places Lua plugin scripts.
+/// Lives under the config directory (in the same place as `config.toml`),
+/// so that the user manages both config and plugins in a single directory.
+pub fn get_plugins_dir() -> Result<PathBuf> {
+    Ok(get_config_dir()?.join("plugins"))
 }
 
 #[cfg(test)]
@@ -45,25 +48,25 @@ mod tests {
         let path_str = config_path.to_string_lossy().to_lowercase();
         let data_str = data_path.to_string_lossy().to_lowercase();
 
-        assert!(
-            path_str.contains("moku"),
-            "Config path does not contain application name: {}",
-            path_str
-        );
-        assert!(
-            data_str.contains("moku"),
-            "Data path does not contain application name: {}",
-            data_str
-        );
+        assert!(path_str.contains("moku"), "Config path missing app name: {}", path_str);
+        assert!(data_str.contains("moku"), "Data path missing app name: {}", data_str);
     }
 
     #[test]
     fn test_paths_are_absolute() {
         if let Ok(path) = get_config_dir() {
-            assert!(path.is_absolute(), "Config path must be absolute!");
+            assert!(path.is_absolute());
         }
         if let Ok(path) = get_data_dir() {
-            assert!(path.is_absolute(), "Data path must be absolute!");
+            assert!(path.is_absolute());
         }
+    }
+
+    #[test]
+    fn test_plugins_dir_is_under_config_dir() {
+        let config = get_config_dir().unwrap();
+        let plugins = get_plugins_dir().unwrap();
+        assert!(plugins.starts_with(config));
+        assert!(plugins.ends_with("plugins"));
     }
 }

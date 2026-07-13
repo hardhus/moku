@@ -3,7 +3,6 @@ use std::fmt::Display;
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a module.
-/// Uses static strings for zero-cost compile-time identification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModuleId(&'static str);
 
@@ -14,6 +13,7 @@ impl ModuleId {
     pub const BOOKMARK: Self = Self("bookmark");
     pub const SETTINGS: Self = Self("settings");
     pub const LOCK_SCREEN: Self = Self("lock_screen");
+    pub const RSS: Self = Self("rss");
 
     pub const fn new(id: &'static str) -> Self {
         Self(id)
@@ -31,13 +31,20 @@ impl ModuleId {
             Self::BOOKMARK => "Bookmark",
             Self::SETTINGS => "Settings",
             Self::LOCK_SCREEN => "Vault Security",
+            Self::RSS => "RSS Feed Reader",
             _ => self.0,
         }
     }
 
     /// Returns list of visible TUI modules in the Launcher.
     pub fn all_visible() -> Vec<ModuleId> {
-        vec![Self::DASHBOARD, Self::TODO, Self::BOOKMARK, Self::SETTINGS]
+        vec![
+            Self::DASHBOARD,
+            Self::TODO,
+            Self::BOOKMARK,
+            Self::SETTINGS,
+            Self::RSS,
+        ]
     }
 }
 
@@ -62,5 +69,6 @@ mod tests {
         assert_eq!(ModuleId::TODO.as_str(), "todo");
         assert_eq!(ModuleId::TODO.title(), "Todo List");
         assert!(ModuleId::all_visible().contains(&ModuleId::TODO));
+        assert!(ModuleId::all_visible().contains(&ModuleId::RSS));
     }
 }
