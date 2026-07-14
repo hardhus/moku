@@ -7,8 +7,13 @@ edition = "2024"
 name = "moku"
 path = "src/main.rs"
 
+[features]
+default = ["lua-plugins"]
+lua-plugins = ["dep:moku-lua"]
+
 [dependencies]
 moku-core.workspace = true
+moku-lua = { path = "../moku-lua", optional = true }
 anyhow.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true

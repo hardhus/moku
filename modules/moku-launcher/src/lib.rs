@@ -24,8 +24,11 @@ pub struct LauncherModule {
 }
 
 impl LauncherModule {
-    pub fn new() -> Self {
-        let modules = ModuleId::all_visible();
+    /// `extra_visible`: in addition to the static `ModuleId::all_visible()` list,
+    /// modules to be shown in the launcher (e.g. successfully loaded Lua plugins).
+    pub fn new(extra_visible: Vec<ModuleId>) -> Self {
+        let mut modules = ModuleId::all_visible();
+        modules.extend(extra_visible);
         let mut state = ListState::default();
         if !modules.is_empty() {
             state.select(Some(0));
@@ -75,7 +78,7 @@ impl LauncherModule {
 
 impl Default for LauncherModule {
     fn default() -> Self {
-        Self::new()
+        Self::new(Vec::new())
     }
 }
 
@@ -173,7 +176,7 @@ mod tests {
 
     #[test]
     fn test_launcher_selection_cycle() {
-        let mut launcher = LauncherModule::new();
+        let mut launcher = LauncherModule::new(Vec::new());
         let initial_len = launcher.registered_modules.len();
         assert!(
             initial_len > 0,
