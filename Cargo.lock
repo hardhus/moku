@@ -2135,11 +2135,12 @@ dependencies = [
 
 [[package]]
 name = "moku-bin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
+ "auto-launch",
  "clap",
  "color-eyre",
  "crossterm",
@@ -2149,6 +2150,7 @@ dependencies = [
  "moku-commit",
  "moku-context",
  "moku-core",
+ "moku-daemon",
  "moku-dashboard",
  "moku-launcher",
  "moku-lock-screen",
@@ -2157,6 +2159,7 @@ dependencies = [
  "moku-settings",
  "moku-todo",
  "ratatui",
+ "sysinfo",
  "tempfile",
  "tokio",
  "tracing",
@@ -2167,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "moku-bookmark"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2182,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "moku-commit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2198,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "moku-context"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2212,7 +2215,7 @@ dependencies = [
 
 [[package]]
 name = "moku-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2236,15 +2239,17 @@ dependencies = [
 
 [[package]]
 name = "moku-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "async-trait",
  "auto-launch",
- "clap",
+ "crossterm",
  "futures",
  "moku-core",
  "moku-rss",
+ "ratatui",
  "sysinfo",
  "tokio",
  "tracing",
@@ -2254,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "moku-dashboard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2267,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "moku-launcher"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2279,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "moku-lock-screen"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2290,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "moku-lua"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2303,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "moku-rss"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2315,12 +2320,13 @@ dependencies = [
  "ratatui",
  "reqwest",
  "serde",
+ "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "moku-settings"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2335,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "moku-todo"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",

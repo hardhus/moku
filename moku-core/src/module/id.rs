@@ -14,6 +14,7 @@ impl ModuleId {
     pub const SETTINGS: Self = Self("settings");
     pub const LOCK_SCREEN: Self = Self("lock_screen");
     pub const RSS: Self = Self("rss");
+    pub const DAEMON: Self = Self("daemon");
 
     pub const fn new(id: &'static str) -> Self {
         Self(id)
@@ -32,6 +33,7 @@ impl ModuleId {
             Self::SETTINGS => "Settings",
             Self::LOCK_SCREEN => "Vault Security",
             Self::RSS => "RSS Feed Reader",
+            Self::DAEMON => "Daemon Status",
             _ => self.0,
         }
     }
@@ -44,6 +46,7 @@ impl ModuleId {
             Self::BOOKMARK,
             Self::SETTINGS,
             Self::RSS,
+            Self::DAEMON,
         ]
     }
 }
@@ -70,5 +73,6 @@ mod tests {
         assert_eq!(ModuleId::TODO.title(), "Todo List");
         assert!(ModuleId::all_visible().contains(&ModuleId::TODO));
         assert!(ModuleId::all_visible().contains(&ModuleId::RSS));
+        assert!(ModuleId::all_visible().contains(&ModuleId::DAEMON));
     }
 }

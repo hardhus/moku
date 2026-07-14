@@ -1,6 +1,6 @@
 [package]
 name = "moku-rss"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [features]
@@ -16,6 +16,7 @@ reqwest.workspace = true
 feed-rs.workspace = true
 notify-rust.workspace = true
 tracing.workspace = true
+tokio = { workspace = true }
 
 ratatui = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }

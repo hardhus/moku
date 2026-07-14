@@ -1,6 +1,6 @@
 [package]
 name = "moku-bin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [[bin]]
@@ -28,6 +28,8 @@ directories.workspace = true
 async-trait.workspace = true
 arc-swap.workspace = true
 futures.workspace = true
+sysinfo.workspace = true
+auto-launch.workspace = true
 
 moku-launcher = { path = "../modules/moku-launcher" }
 moku-lock-screen = { path = "../modules/moku-lock-screen" }
@@ -38,6 +40,7 @@ moku-bookmark = { path = "../modules/moku-bookmark" }
 moku-context = { path = "../modules/moku-context" }
 moku-commit = { path = "../modules/moku-commit" }
 moku-rss = { path = "../modules/moku-rss" }
+moku-daemon = { path = "../moku-daemon" }
 
 [dev-dependencies]
 tempfile.workspace = true

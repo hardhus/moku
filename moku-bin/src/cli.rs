@@ -10,6 +10,10 @@ use moku_core::ModuleId;
     about = "A modular TUI productivity tool."
 )]
 pub struct Cli {
+    /// Initialize portable mode by creating `moku-data` next to the executable
+    #[arg(long, help = "Initialize portable mode by creating `moku-data` next to the executable")]
+    pub portable: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -30,6 +34,23 @@ pub enum Commands {
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Background daemon management.
+    Daemon {
+        #[command(subcommand)]
+        sub: Option<DaemonCommands>,
+    },
+}
+
+#[derive(Subcommand, Clone, PartialEq, Debug)]
+pub enum DaemonCommands {
+    /// Run the daemon worker in the foreground (used by autostart).
+    Run,
+    /// Show daemon status (checks PID file).
+    Status,
+    /// Register moku as a system autostart entry.
+    EnableAutostart,
+    /// Remove moku from system autostart.
+    DisableAutostart,
 }
 
 impl Cli {
@@ -39,6 +60,7 @@ impl Cli {
             Some(Commands::Context { .. }) => ModuleId::new("context"),
             Some(Commands::Commit) => ModuleId::new("commit"),
             Some(Commands::Rss { .. }) => ModuleId::RSS,
+            Some(Commands::Daemon { .. }) => ModuleId::DAEMON,
             None => ModuleId::LAUNCHER,
         }
     }
@@ -50,16 +72,18 @@ mod tests {
 
     #[test]
     fn test_target_module_resolution() {
-        let cli_none = Cli { command: None };
+        let cli_none = Cli { command: None, portable: false };
         assert_eq!(cli_none.target_module(), ModuleId::LAUNCHER);
 
         let cli_todo = Cli {
             command: Some(Commands::Todo),
+            portable: false,
         };
         assert_eq!(cli_todo.target_module(), ModuleId::TODO);
 
         let cli_commit = Cli {
             command: Some(Commands::Commit),
+            portable: false,
         };
         assert_eq!(cli_commit.target_module(), ModuleId::new("commit"));
 
@@ -68,12 +92,20 @@ mod tests {
                 path: ".".to_string(),
                 out: None,
             }),
+            portable: false,
         };
         assert_eq!(cli_context.target_module(), ModuleId::new("context"));
 
         let cli_rss = Cli {
             command: Some(Commands::Rss { args: vec![] }),
+            portable: false,
         };
         assert_eq!(cli_rss.target_module(), ModuleId::RSS);
+
+        let cli_daemon = Cli {
+            command: Some(Commands::Daemon { sub: None }),
+            portable: false,
+        };
+        assert_eq!(cli_daemon.target_module(), ModuleId::DAEMON);
     }
 }

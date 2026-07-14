@@ -13,12 +13,54 @@ pub fn get_project_dirs() -> Result<ProjectDirs> {
         .context("Failed to determine user home directory or access to system paths was denied.")
 }
 
+fn detect_portable_root() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        if let Ok(path) = std::env::var("MOKU_TEST_PORTABLE_ROOT") {
+            let p = PathBuf::from(path);
+            if p.is_dir() {
+                return Some(p);
+            }
+        }
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let portable = exe_dir.join("moku-data");
+    if portable.is_dir() {
+        Some(portable)
+    } else {
+        None
+    }
+}
+
+pub fn init_portable_mode() -> Result<()> {
+    let exe = std::env::current_exe().context("Failed to determine current executable path")?;
+    let exe_dir = exe
+        .parent()
+        .context("Failed to get directory of current executable")?;
+    let portable = exe_dir.join("moku-data");
+    if !portable.exists() {
+        std::fs::create_dir_all(&portable).context("Failed to create moku-data directory")?;
+        println!("✅ Portable mode initialized at: {:?}", portable);
+    } else {
+        println!("ℹ️ Portable mode already active at: {:?}", portable);
+    }
+    Ok(())
+}
+
 pub fn get_config_dir() -> Result<PathBuf> {
+    if let Some(root) = detect_portable_root() {
+        return Ok(root);
+    }
     let dirs = get_project_dirs()?;
     Ok(dirs.config_dir().to_path_buf())
 }
 
 pub fn get_data_dir() -> Result<PathBuf> {
+    if let Some(root) = detect_portable_root() {
+        return Ok(root);
+    }
     let dirs = get_project_dirs()?;
     Ok(dirs.data_local_dir().to_path_buf())
 }
@@ -48,8 +90,17 @@ mod tests {
         let path_str = config_path.to_string_lossy().to_lowercase();
         let data_str = data_path.to_string_lossy().to_lowercase();
 
-        assert!(path_str.contains("moku"), "Config path missing app name: {}", path_str);
-        assert!(data_str.contains("moku"), "Data path missing app name: {}", data_str);
+        // Standard or portable path should contain "moku"
+        assert!(
+            path_str.contains("moku"),
+            "Config path missing app name: {}",
+            path_str
+        );
+        assert!(
+            data_str.contains("moku"),
+            "Data path missing app name: {}",
+            data_str
+        );
     }
 
     #[test]
@@ -68,5 +119,31 @@ mod tests {
         let plugins = get_plugins_dir().unwrap();
         assert!(plugins.starts_with(config));
         assert!(plugins.ends_with("plugins"));
+    }
+
+    #[test]
+    fn test_detect_portable_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let portable_dir = temp.path().join("moku-data");
+
+        // Set env override for testing
+        unsafe {
+            std::env::set_var("MOKU_TEST_PORTABLE_ROOT", &portable_dir);
+        }
+
+        // When there is no moku-data, it should return None
+        assert!(detect_portable_root().is_none());
+
+        // Create the directory
+        std::fs::create_dir(&portable_dir).unwrap();
+
+        // Now it should detect it
+        assert!(detect_portable_root().is_some());
+        assert_eq!(detect_portable_root().unwrap(), portable_dir);
+
+        // Clean up env override
+        unsafe {
+            std::env::remove_var("MOKU_TEST_PORTABLE_ROOT");
+        }
     }
 }

@@ -1,61 +1,125 @@
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, Duration};
+
 use anyhow::Result;
 use arboard::Clipboard;
 use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Rect, Layout, Constraint},
     style::{Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap, Clear},
 };
 
 use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
 
-use crate::engine::{FeedItem, RssEngine};
+use crate::engine::{FeedItem, FeedSubscription, RssEngine};
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum Panel {
+    Feeds,
+    Items,
+}
+
+pub enum RssView {
+    Split {
+        active_panel: Panel,
+        feed_state: ListState,
+        item_state: ListState,
+    },
+    Detail {
+        item: FeedItem,
+    },
+    AddFeed {
+        input: String,
+    },
+}
 
 pub struct RssTuiModule {
+    feeds: Vec<FeedSubscription>,
     items: Vec<FeedItem>,
-    state: ListState,
+    view: RssView,
+    refresh_result: Arc<Mutex<Option<Result<Vec<FeedItem>, String>>>>,
+    is_refreshing: bool,
+    status_message: Option<(String, Instant)>,
 }
 
 impl RssTuiModule {
     pub fn new() -> Self {
-        Self { items: Vec::new(), state: ListState::default() }
-    }
+        let mut feed_state = ListState::default();
+        feed_state.select(Some(0));
+        let mut item_state = ListState::default();
+        item_state.select(Some(0));
 
-    fn next(&mut self) -> bool {
-        if self.items.is_empty() {
-            return false;
+        Self {
+            feeds: Vec::new(),
+            items: Vec::new(),
+            view: RssView::Split {
+                active_panel: Panel::Feeds,
+                feed_state,
+                item_state,
+            },
+            refresh_result: Arc::new(Mutex::new(None)),
+            is_refreshing: false,
+            status_message: None,
         }
-        let i = match self.state.selected() {
-            Some(i) => if i >= self.items.len() - 1 { 0 } else { i + 1 },
-            None => 0,
-        };
-        self.state.select(Some(i));
-        true
     }
 
-    fn previous(&mut self) -> bool {
-        if self.items.is_empty() {
-            return false;
+    fn show_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some((msg.into(), Instant::now()));
+    }
+}
+
+fn get_filtered_items(feeds: &[FeedSubscription], items: &[FeedItem], feed_idx: usize) -> Vec<FeedItem> {
+    if feed_idx == 0 {
+        items.to_vec()
+    } else if feed_idx - 1 < feeds.len() {
+        let feed = &feeds[feed_idx - 1];
+        items
+            .iter()
+            .filter(|item| matches_feed(item, feed))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn matches_feed(item: &FeedItem, feed: &FeedSubscription) -> bool {
+    if let Some(ref title) = feed.title {
+        if item.feed_title == *title {
+            return true;
         }
-        let i = match self.state.selected() {
-            Some(i) => if i == 0 { self.items.len() - 1 } else { i - 1 },
-            None => 0,
-        };
-        self.state.select(Some(i));
-        true
     }
-
-    fn copy_selected_link(&self, ctx: &mut AppContext) {
-        if let Some(i) = self.state.selected() {
-            let link = self.items[i].link.clone();
-            match Clipboard::new().and_then(|mut c| c.set_text(link.clone())) {
-                Ok(_) => ctx.show_info(format!("Copied: {link}")),
-                Err(e) => ctx.show_error(format!("Clipboard error: {e}")),
+    if let Ok(feed_url) = reqwest::Url::parse(&feed.url) {
+        if let Some(feed_host) = feed_url.host_str() {
+            let clean_host = feed_host.strip_prefix("www.").unwrap_or(feed_host);
+            if let Ok(item_url) = reqwest::Url::parse(&item.link) {
+                if let Some(item_host) = item_url.host_str() {
+                    return item_host.contains(clean_host) || clean_host.contains(item_host);
+                }
             }
+            return item.link.contains(clean_host);
         }
     }
+    false
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(r);
+
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(popup_layout[1])[1]
 }
 
 impl Default for RssTuiModule {
@@ -76,77 +140,512 @@ impl ModuleMeta for RssTuiModule {
 #[async_trait]
 impl TuiModule for RssTuiModule {
     async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
+        self.feeds = RssEngine::load_feeds(&ctx.storage).await;
         self.items = RssEngine::load_items(&ctx.storage).await;
-        if !self.items.is_empty() {
-            self.state.select(Some(0));
-        }
         Ok(())
     }
 
     async fn handle_event(&mut self, event: &Event, ctx: &mut AppContext) -> Result<bool> {
         let command = resolve_event(event, &ctx.config.load().keys, None);
+        let mut changed = false;
 
-        let mut changed = match command {
-            Command::Quit | Command::Back => {
-                ctx.navigate_to(ModuleId::LAUNCHER);
-                true
-            }
-            Command::Up => self.previous(),
-            Command::Down => self.next(),
-            _ => false,
+        // Check background refresh results in a separate block to avoid borrow conflict
+        let got_result = {
+            let mut slot = self.refresh_result.lock().unwrap();
+            slot.take()
         };
 
-        if let Event::Key(key) = event {
-            if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char('c') => {
-                        self.copy_selected_link(ctx);
-                        changed = true;
+        if let Some(res) = got_result {
+            self.is_refreshing = false;
+            match res {
+                Ok(all_items) => {
+                    self.items = all_items;
+                    self.show_status("Feeds refreshed successfully.");
+                }
+                Err(e) => {
+                    self.show_status(format!("Refresh error: {}", e));
+                }
+            }
+            changed = true;
+        }
+
+        // Destructure self to allow disjoint mutable borrows of fields
+        let RssTuiModule {
+            feeds,
+            items,
+            view,
+            refresh_result,
+            is_refreshing,
+            status_message,
+        } = self;
+
+        match view {
+            RssView::Split { active_panel, feed_state, item_state } => {
+                match command {
+                    Command::Quit | Command::Back => {
+                        ctx.navigate_to(ModuleId::LAUNCHER);
+                        return Ok(true);
                     }
-                    // NOTE: 'r' starts a synchronous/blocking network request here.
-                    // Since it is triggered by the user it is acceptable, but the TUI will
-                    // appear frozen during the fetch (a few seconds) — background task + channel notifications could be added later.
-                    KeyCode::Char('r') => {
-                        match RssEngine::fetch_all(&ctx.storage).await {
-                            Ok(new_items) => {
-                                ctx.show_info(format!("{} new items", new_items.len()));
-                                self.items = RssEngine::load_items(&ctx.storage).await;
-                                if !self.items.is_empty() {
-                                    self.state.select(Some(0));
+                    Command::Up => {
+                        if *active_panel == Panel::Feeds {
+                            if !feeds.is_empty() || feed_state.selected().is_some() {
+                                let i = match feed_state.selected() {
+                                    Some(i) => if i == 0 { feeds.len() } else { i - 1 },
+                                    None => 0,
+                                };
+                                feed_state.select(Some(i));
+                                let filtered_len = get_filtered_items(feeds, items, i).len();
+                                if filtered_len > 0 {
+                                    let item_sel = item_state.selected().unwrap_or(0);
+                                    item_state.select(Some(item_sel.min(filtered_len - 1)));
+                                } else {
+                                    item_state.select(None);
                                 }
+                                changed = true;
                             }
-                            Err(e) => ctx.show_error(format!("Refresh error: {e}")),
+                        } else {
+                            let feed_idx = feed_state.selected().unwrap_or(0);
+                            let filtered = get_filtered_items(feeds, items, feed_idx);
+                            if !filtered.is_empty() {
+                                let i = match item_state.selected() {
+                                    Some(i) => if i == 0 { filtered.len() - 1 } else { i - 1 },
+                                    None => 0,
+                                };
+                                item_state.select(Some(i));
+                                changed = true;
+                            }
                         }
-                        changed = true;
+                    }
+                    Command::Down => {
+                        if *active_panel == Panel::Feeds {
+                            let i = match feed_state.selected() {
+                                Some(i) => if i >= feeds.len() { 0 } else { i + 1 },
+                                None => 0,
+                            };
+                            feed_state.select(Some(i));
+                            let filtered_len = get_filtered_items(feeds, items, i).len();
+                            if filtered_len > 0 {
+                                let item_sel = item_state.selected().unwrap_or(0);
+                                item_state.select(Some(item_sel.min(filtered_len - 1)));
+                            } else {
+                                item_state.select(None);
+                            }
+                            changed = true;
+                        } else {
+                            let feed_idx = feed_state.selected().unwrap_or(0);
+                            let filtered = get_filtered_items(feeds, items, feed_idx);
+                            if !filtered.is_empty() {
+                                let i = match item_state.selected() {
+                                    Some(i) => if i >= filtered.len() - 1 { 0 } else { i + 1 },
+                                    None => 0,
+                                };
+                                item_state.select(Some(i));
+                                changed = true;
+                            }
+                        }
                     }
                     _ => {}
                 }
+
+                if let Event::Key(key) = event {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Tab => {
+                                *active_panel = match active_panel {
+                                    Panel::Feeds => Panel::Items,
+                                    Panel::Items => Panel::Feeds,
+                                };
+                                changed = true;
+                            }
+                            KeyCode::Char('r') => {
+                                if !*is_refreshing {
+                                    *is_refreshing = true;
+                                    *status_message = Some(("Refreshing feeds...".to_string(), Instant::now()));
+                                    let storage = Arc::clone(&ctx.storage);
+                                    let result_slot = Arc::clone(refresh_result);
+
+                                    tokio::spawn(async move {
+                                        let res = RssEngine::fetch_all(&storage).await;
+                                        if let Err(e) = res {
+                                            let mut slot = result_slot.lock().unwrap();
+                                            *slot = Some(Err(e.to_string()));
+                                        } else {
+                                            let all_items = RssEngine::load_items(&storage).await;
+                                            let mut slot = result_slot.lock().unwrap();
+                                            *slot = Some(Ok(all_items));
+                                        }
+                                    });
+                                    changed = true;
+                                }
+                            }
+                            KeyCode::Char('a') => {
+                                *view = RssView::AddFeed { input: String::new() };
+                                changed = true;
+                            }
+                            KeyCode::Char('d') => {
+                                if *active_panel == Panel::Feeds {
+                                    if let Some(i) = feed_state.selected() {
+                                        if i > 0 && i - 1 < feeds.len() {
+                                            let removed = feeds.remove(i - 1);
+                                            if let Err(e) = RssEngine::save_feeds(&ctx.storage, feeds).await {
+                                                *status_message = Some((format!("Delete error: {}", e), Instant::now()));
+                                            } else {
+                                                *status_message = Some((format!("Removed: {}", removed.url), Instant::now()));
+                                                feed_state.select(Some((i - 1).max(0)));
+                                            }
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('c') => {
+                                if *active_panel == Panel::Items {
+                                    let feed_idx = feed_state.selected().unwrap_or(0);
+                                    let filtered = get_filtered_items(feeds, items, feed_idx);
+                                    if let Some(i) = item_state.selected() {
+                                        if i < filtered.len() {
+                                            let link = &filtered[i].link;
+                                            match Clipboard::new().and_then(|mut c| c.set_text(link.to_string())) {
+                                                Ok(_) => *status_message = Some((format!("Copied: {}", link), Instant::now())),
+                                                Err(e) => *status_message = Some((format!("Clipboard error: {}", e), Instant::now())),
+                                            }
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Char('o') => {
+                                if *active_panel == Panel::Items {
+                                    let feed_idx = feed_state.selected().unwrap_or(0);
+                                    let filtered = get_filtered_items(feeds, items, feed_idx);
+                                    if let Some(i) = item_state.selected() {
+                                        if i < filtered.len() {
+                                            let link = &filtered[i].link;
+                                            #[cfg(target_os = "windows")]
+                                            let _ = std::process::Command::new("cmd")
+                                                .args(&["/C", "start", "", link])
+                                                .spawn();
+                                            #[cfg(not(target_os = "windows"))]
+                                            let _ = std::process::Command::new("xdg-open")
+                                                .arg(link)
+                                                .spawn();
+                                            *status_message = Some(("Opening in browser...".to_string(), Instant::now()));
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if *active_panel == Panel::Items {
+                                    let feed_idx = feed_state.selected().unwrap_or(0);
+                                    let filtered = get_filtered_items(feeds, items, feed_idx);
+                                    if let Some(i) = item_state.selected() {
+                                        if i < filtered.len() {
+                                            *view = RssView::Detail {
+                                                item: filtered[i].clone(),
+                                            };
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            RssView::Detail { item } => {
+                if let Event::Key(key) = event {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                let mut feed_state = ListState::default();
+                                feed_state.select(Some(0));
+                                let mut item_state = ListState::default();
+                                item_state.select(Some(0));
+                                *view = RssView::Split {
+                                    active_panel: Panel::Items,
+                                    feed_state,
+                                    item_state,
+                                };
+                                changed = true;
+                            }
+                            KeyCode::Char('c') => {
+                                match Clipboard::new().and_then(|mut c| c.set_text(item.link.clone())) {
+                                    Ok(_) => *status_message = Some((format!("Copied: {}", item.link), Instant::now())),
+                                    Err(e) => *status_message = Some((format!("Clipboard error: {}", e), Instant::now())),
+                                }
+                                changed = true;
+                            }
+                            KeyCode::Char('o') => {
+                                #[cfg(target_os = "windows")]
+                                let _ = std::process::Command::new("cmd")
+                                    .args(&["/C", "start", "", &item.link])
+                                    .spawn();
+                                #[cfg(not(target_os = "windows"))]
+                                let _ = std::process::Command::new("xdg-open")
+                                    .arg(&item.link)
+                                    .spawn();
+                                *status_message = Some(("Opening in browser...".to_string(), Instant::now()));
+                                changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            RssView::AddFeed { input } => {
+                if let Event::Key(key) = event {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Esc => {
+                                let mut feed_state = ListState::default();
+                                feed_state.select(Some(0));
+                                let mut item_state = ListState::default();
+                                item_state.select(Some(0));
+                                *view = RssView::Split {
+                                    active_panel: Panel::Feeds,
+                                    feed_state,
+                                    item_state,
+                                };
+                                changed = true;
+                            }
+                            KeyCode::Backspace => {
+                                input.pop();
+                                changed = true;
+                            }
+                            KeyCode::Enter => {
+                                let url = input.trim().to_string();
+                                if !url.is_empty() {
+                                    if !feeds.iter().any(|f| f.url == url) {
+                                        feeds.push(FeedSubscription { url, title: None });
+                                        if let Err(e) = RssEngine::save_feeds(&ctx.storage, feeds).await {
+                                            *status_message = Some((format!("Save failed: {}", e), Instant::now()));
+                                        } else {
+                                            *status_message = Some(("Feed added successfully.".to_string(), Instant::now()));
+                                        }
+                                    } else {
+                                        *status_message = Some(("Feed already exists.".to_string(), Instant::now()));
+                                    }
+                                }
+                                let mut feed_state = ListState::default();
+                                feed_state.select(Some(0));
+                                let mut item_state = ListState::default();
+                                item_state.select(Some(0));
+                                *view = RssView::Split {
+                                    active_panel: Panel::Feeds,
+                                    feed_state,
+                                    item_state,
+                                };
+                                changed = true;
+                            }
+                            KeyCode::Char(c) => {
+                                input.push(c);
+                                changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
+
         Ok(changed)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
-        let items: Vec<ListItem> = self
-            .items
-            .iter()
-            .map(|i| ListItem::new(format!("[{}] {}", i.feed_title, i.title)))
-            .collect();
+        // Scoped block to release mutex lock before drawing
+        let got_result = {
+            let mut slot = self.refresh_result.lock().unwrap();
+            slot.take()
+        };
+        if let Some(res) = got_result {
+            self.is_refreshing = false;
+            if let Ok(all_items) = res {
+                self.items = all_items;
+                self.show_status("Feeds refreshed successfully.");
+            }
+        }
 
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(" 📡 RSS | [r] Refresh | [c] Copy Link ")
+        // Clean status message if expired
+        if let Some((_, time)) = self.status_message {
+            if time.elapsed() > Duration::from_secs(3) {
+                self.status_message = None;
+            }
+        }
+
+        // Destructure self to allow disjoint field accesses
+        let RssTuiModule {
+            feeds,
+            items,
+            view,
+            refresh_result: _,
+            is_refreshing,
+            status_message,
+        } = self;
+
+        match view {
+            RssView::Split { active_panel, feed_state, item_state } => {
+                let chunks = Layout::vertical([
+                    Constraint::Min(0),
+                    Constraint::Length(1), // status message
+                    Constraint::Length(3), // help
+                ])
+                .split(area);
+
+                let panels = Layout::horizontal([
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(70),
+                ])
+                .split(chunks[0]);
+
+                // Feeds panel
+                let mut feed_items = vec![ListItem::new(" * All Feeds")];
+                for f in feeds.iter() {
+                    let label = f.title.as_deref().unwrap_or(&f.url);
+                    feed_items.push(ListItem::new(format!(" • {}", label)));
+                }
+
+                let feed_border_style = if *active_panel == Panel::Feeds {
+                    Style::default().fg(theme.selection_bg).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.border)
+                };
+
+                let feed_list = List::new(feed_items)
+                    .block(
+                        Block::default()
+                            .title(" 📡 Feeds ")
+                            .borders(Borders::ALL)
+                            .border_style(feed_border_style)
+                            .style(Style::default().bg(theme.base_bg)),
+                    )
+                    .style(Style::default().fg(theme.base_fg))
+                    .highlight_style(
+                        Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD)
+                    );
+
+                frame.render_stateful_widget(feed_list, panels[0], feed_state);
+
+                // Articles panel
+                let selected_feed_idx = feed_state.selected().unwrap_or(0);
+                let filtered = get_filtered_items(feeds, items, selected_feed_idx);
+
+                let item_items: Vec<ListItem> = filtered
+                    .iter()
+                    .map(|i| ListItem::new(format!("[{}] {}", i.feed_title, i.title)))
+                    .collect();
+
+                let item_border_style = if *active_panel == Panel::Items {
+                    Style::default().fg(theme.selection_bg).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.border)
+                };
+
+                let mut title = " 📰 Articles ".to_string();
+                if *is_refreshing {
+                    title.push_str("(Refreshing...) ");
+                }
+
+                let item_list = List::new(item_items)
+                    .block(
+                        Block::default()
+                            .title(title)
+                            .borders(Borders::ALL)
+                            .border_style(item_border_style)
+                            .style(Style::default().bg(theme.base_bg)),
+                    )
+                    .style(Style::default().fg(theme.base_fg))
+                    .highlight_style(
+                        Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD)
+                    )
+                    .highlight_symbol(">> ");
+
+                frame.render_stateful_widget(item_list, panels[1], item_state);
+
+                // Status message
+                if let Some((msg, _)) = status_message {
+                    let msg_p = Paragraph::new(format!(" {}", msg))
+                        .style(Style::default().fg(theme.selection_fg).add_modifier(Modifier::ITALIC));
+                    frame.render_widget(msg_p, chunks[1]);
+                }
+
+                // Help bar
+                let help_text = if *active_panel == Panel::Feeds {
+                    " [Tab] Switch | [a] Add Feed | [d] Delete Feed | [r] Refresh | [Esc] Back "
+                } else {
+                    " [Tab] Switch | [Enter] Read | [c] Copy Link | [o] Open Browser | [r] Refresh | [Esc] Back "
+                };
+                let help = Paragraph::new(help_text)
+                    .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
+                    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+                frame.render_widget(help, chunks[2]);
+            }
+            RssView::Detail { item } => {
+                let chunks = Layout::vertical([
+                    Constraint::Min(0),
+                    Constraint::Length(1), // status message
+                    Constraint::Length(3), // help
+                ])
+                .split(area);
+
+                let block = Block::default()
+                    .title(format!(" 📰 {} ", item.feed_title))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border))
-                    .style(Style::default().bg(theme.base_bg)),
-            )
-            .style(Style::default().fg(theme.base_fg))
-            .highlight_style(
-                Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol(">> ");
+                    .border_style(Style::default().fg(theme.border));
 
-        frame.render_stateful_widget(list, area, &mut self.state);
+                let inner_area = block.inner(chunks[0]);
+                frame.render_widget(block, chunks[0]);
+
+                let detail_text = format!(
+                    "Title:\n{}\n\nLink:\n{}\n",
+                    item.title, item.link
+                );
+
+                let p = Paragraph::new(detail_text)
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
+                frame.render_widget(p, inner_area);
+
+                // Status message
+                if let Some((msg, _)) = status_message {
+                    let msg_p = Paragraph::new(format!(" {}", msg))
+                        .style(Style::default().fg(theme.selection_fg).add_modifier(Modifier::ITALIC));
+                    frame.render_widget(msg_p, chunks[1]);
+                }
+
+                let help = Paragraph::new(" [c] Copy Link | [o] Open Browser | [Esc/q] Back ")
+                    .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
+                    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+                frame.render_widget(help, chunks[2]);
+            }
+            RssView::AddFeed { input } => {
+                let popup_area = centered_rect(60, 20, area);
+                frame.render_widget(Clear, popup_area);
+
+                let block = Block::default()
+                    .title(" 📡 Add New RSS Feed URL ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.selection_bg));
+
+                let inner_area = block.inner(popup_area);
+                frame.render_widget(block, popup_area);
+
+                let layout = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
+                ])
+                .split(inner_area);
+
+                let input_p = Paragraph::new(format!("> {}", input))
+                    .style(Style::default().fg(theme.base_fg));
+                frame.render_widget(input_p, layout[0]);
+
+                let help_p = Paragraph::new(" [Enter] Save | [Esc] Cancel ")
+                    .style(Style::default().fg(theme.base_fg).add_modifier(Modifier::DIM));
+                frame.render_widget(help_p, layout[2]);
+            }
+        }
     }
 }

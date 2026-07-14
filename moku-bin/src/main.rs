@@ -16,12 +16,42 @@ use moku_core::{
 };
 
 use crate::app_loop::run;
-use crate::cli::{Cli, Commands};
+use crate::cli::{Cli, Commands, DaemonCommands};
 use crate::registry::{build_cli_registry, build_tui_registry};
 use crate::utils::{init_errors, init_logging};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    if cli.portable {
+        moku_core::dirs::init_portable_mode().map_err(|e| eyre!(e))?;
+    }
+
+    if let Some(Commands::Daemon { sub: Some(sub_cmd) }) = &cli.command {
+        match sub_cmd {
+            DaemonCommands::Run => {
+                return moku_daemon::worker::run_worker()
+                    .await
+                    .map_err(|e| eyre!(e));
+            }
+            DaemonCommands::Status => {
+                return moku_daemon::status::print_status()
+                    .map_err(|e| eyre!(e));
+            }
+            DaemonCommands::EnableAutostart => {
+                let exe = std::env::current_exe().map_err(|e| eyre!(e))?;
+                return moku_daemon::autostart::set_autostart(true, &exe, &["daemon", "run"])
+                    .map_err(|e| eyre!(e));
+            }
+            DaemonCommands::DisableAutostart => {
+                let exe = std::env::current_exe().map_err(|e| eyre!(e))?;
+                return moku_daemon::autostart::set_autostart(false, &exe, &["daemon", "run"])
+                    .map_err(|e| eyre!(e));
+            }
+        }
+    }
+
     init_errors()?;
     let _guard = init_logging()?;
 
@@ -34,7 +64,6 @@ async fn main() -> Result<()> {
     };
     let config = Arc::new(ArcSwap::from_pointee(loaded_config.clone()));
 
-    let cli = Cli::parse();
 
     // session, security, and storage are now initialized once and shared
     // across both CLI and TUI execution paths. This allows CLI modules
