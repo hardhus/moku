@@ -36,6 +36,17 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // session, security, and storage are now initialized once and shared
+    // across both CLI and TUI execution paths. This allows CLI modules
+    // (such as RSS) to access the actual storage.
+    let session = Arc::new(VaultSession::new());
+    let security = Arc::new(SecurityManager::new().map_err(|e| eyre!(e))?);
+    let storage = Arc::new(
+        StorageManager::new(Arc::clone(&session))
+            .await
+            .map_err(|e| eyre!(e))?,
+    );
+
     let cli_registry = build_cli_registry();
     let target_module = cli.target_module();
 
@@ -48,12 +59,13 @@ async fn main() -> Result<()> {
                 }
                 a
             }
+            Some(Commands::Rss { args }) => args.clone(),
             _ => vec![],
         };
 
         let cli_ctx = CliContext {
             config: loaded_config,
-            storage: None,
+            storage: Some(Arc::clone(&storage)),
         };
 
         if let Err(e) = module.run(&args, &cli_ctx).await {
@@ -63,14 +75,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let target: ModuleId = cli.target_module();
-
-    let session = Arc::new(VaultSession::new());
-    let security = Arc::new(SecurityManager::new().map_err(|e| eyre!(e))?);
-    let storage = Arc::new(
-        StorageManager::new(Arc::clone(&session))
-            .await
-            .map_err(|e| eyre!(e))?,
-    );
 
     let registry = build_tui_registry(&*config.load());
 

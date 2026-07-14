@@ -25,6 +25,11 @@ pub enum Commands {
         out: Option<String>,
     },
     Commit,
+    /// Manage RSS subscriptions and list cached articles.
+    Rss {
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
 }
 
 impl Cli {
@@ -33,6 +38,7 @@ impl Cli {
             Some(Commands::Todo) => ModuleId::TODO,
             Some(Commands::Context { .. }) => ModuleId::new("context"),
             Some(Commands::Commit) => ModuleId::new("commit"),
+            Some(Commands::Rss { .. }) => ModuleId::RSS,
             None => ModuleId::LAUNCHER,
         }
     }
@@ -64,5 +70,10 @@ mod tests {
             }),
         };
         assert_eq!(cli_context.target_module(), ModuleId::new("context"));
+
+        let cli_rss = Cli {
+            command: Some(Commands::Rss { args: vec![] }),
+        };
+        assert_eq!(cli_rss.target_module(), ModuleId::RSS);
     }
 }

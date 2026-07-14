@@ -2103,6 +2103,7 @@ dependencies = [
  "moku-dashboard",
  "moku-launcher",
  "moku-lock-screen",
+ "moku-rss",
  "moku-settings",
  "moku-todo",
  "ratatui",

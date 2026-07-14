@@ -32,6 +32,7 @@ moku-dashboard = { path = "../modules/moku-dashboard" }
 moku-bookmark = { path = "../modules/moku-bookmark" }
 moku-context = { path = "../modules/moku-context" }
 moku-commit = { path = "../modules/moku-commit" }
+moku-rss = { path = "../modules/moku-rss" }
 
 [dev-dependencies]
 tempfile.workspace = true

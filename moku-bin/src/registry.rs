@@ -1,4 +1,4 @@
-use moku_core::TuiRegistry;
+use moku_core::{CliRegistry, TuiRegistry};
 
 pub fn build_tui_registry(config: &moku_core::MokuConfig) -> TuiRegistry {
     let mut r = TuiRegistry::new();
@@ -8,12 +8,14 @@ pub fn build_tui_registry(config: &moku_core::MokuConfig) -> TuiRegistry {
     r.insert(Box::new(moku_settings::SettingsModule::new(config)));
     r.insert(Box::new(moku_dashboard::DashboardModule::new()));
     r.insert(Box::new(moku_bookmark::BookmarkModule::new()));
+    r.insert(Box::new(moku_rss::RssTuiModule::new()));
     r
 }
 
-pub fn build_cli_registry() -> moku_core::CliRegistry {
-    let mut r = moku_core::CliRegistry::new();
+pub fn build_cli_registry() -> CliRegistry {
+    let mut r = CliRegistry::new();
     r.insert(Box::new(moku_context::ContextModule::new()));
     r.insert(Box::new(moku_commit::CommitModule::new()));
+    r.insert(Box::new(moku_rss::RssCliModule::new()));
     r
 }
