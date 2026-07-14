@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use sysinfo::{Pid, System};
 
 use moku_core::{
-    ConfigManager, DaemonContext, DaemonTask, ModuleMeta, StorageManager, VaultSession,
+    ConfigManager, DaemonContext, DaemonTask, StorageManager, VaultSession,
 };
 
 mod logging;

@@ -1,0 +1,22 @@
+[package]
+name = "moku-rss"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["tui"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:arboard"]
+
+[dependencies]
+moku-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+reqwest.workspace = true
+feed-rs.workspace = true
+notify-rust.workspace = true
+tracing.workspace = true
+
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+arboard = { workspace = true, optional = true }
