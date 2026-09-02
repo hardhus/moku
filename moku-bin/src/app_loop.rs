@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use color_eyre::Result;
@@ -9,7 +9,7 @@ use futures::StreamExt;
 
 use moku_core::{
     AppContext, ModuleId, MokuConfig, Router, SecurityManager, StorageManager, ToastManager,
-    TuiRegistry, VaultSession,
+    TuiRegistry, VaultSession, keys_match,
 };
 
 #[derive(Clone, Copy)]
@@ -37,6 +37,8 @@ pub async fn run(
 
     let mut events = EventStream::new();
     let mut toast_tick = tokio::time::interval(Duration::from_millis(500));
+    let mut auto_lock_tick = tokio::time::interval(Duration::from_secs(1));
+    let mut last_activity = Instant::now();
     let mut dirty = true;
 
     loop {
@@ -70,6 +72,7 @@ pub async fn run(
                     Some(Err(_)) => continue,
                     None => break,
                 };
+                last_activity = Instant::now();
 
                 match state {
                     AppState::Locked { after_unlock } => {
@@ -87,10 +90,24 @@ pub async fn run(
                         }
                     }
                     AppState::Unlocked => {
-                        dirty |= router
-                            .dispatch_event(&mut registry, &ev, &mut ctx)
-                            .await
-                            .map_err(|e| eyre!(e))?;
+                        // Global lock hotkey, intercepted before normal
+                        // dispatch so it works from any screen.
+                        let lock_key = ctx.config.load().keys.lock_vault.clone();
+                        if let crossterm::event::Event::Key(key) = &ev
+                            && ctx.session.is_unlocked()
+                            && keys_match(*key, &lock_key)
+                        {
+                            ctx.session.lock();
+                            state = enter_module(&mut registry, &mut router, &mut ctx, ModuleId::LAUNCHER)
+                                .await
+                                .map_err(|e| eyre!(e))?;
+                            dirty = true;
+                        } else {
+                            dirty |= router
+                                .dispatch_event(&mut registry, &ev, &mut ctx)
+                                .await
+                                .map_err(|e| eyre!(e))?;
+                        }
                     }
                 }
             }
@@ -98,6 +115,19 @@ pub async fn run(
                 let before = toasts.len();
                 toasts.update();
                 if toasts.len() != before {
+                    dirty = true;
+                }
+            }
+            _ = auto_lock_tick.tick() => {
+                let timeout = ctx.config.load().storage.auto_lock_timeout;
+                if timeout > 0
+                    && ctx.session.is_unlocked()
+                    && last_activity.elapsed() >= Duration::from_secs(timeout)
+                {
+                    ctx.session.lock();
+                    state = enter_module(&mut registry, &mut router, &mut ctx, ModuleId::LAUNCHER)
+                        .await
+                        .map_err(|e| eyre!(e))?;
                     dirty = true;
                 }
             }

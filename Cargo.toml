@@ -42,6 +42,7 @@ notify-rust = "4.11"
 colored = "3"
 ignore = "0.4"
 arboard = "3"
+rpassword = "7"
 
 tempfile = "3"
 

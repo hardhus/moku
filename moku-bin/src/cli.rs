@@ -49,6 +49,37 @@ pub enum Commands {
         #[command(subcommand)]
         sub: Option<DaemonCommands>,
     },
+    /// View or change per-module storage encryption settings.
+    Config {
+        #[command(subcommand)]
+        sub: ConfigCommands,
+    },
+}
+
+#[derive(Subcommand, Clone, PartialEq, Debug)]
+pub enum ConfigCommands {
+    /// Show the effective (config-resolved) encryption setting for every
+    /// module that supports it.
+    ShowEncrypt,
+    /// Set (or clear) a per-module encryption override in config.toml,
+    /// then migrate that module's existing stored data to match. Prompts
+    /// for the vault password if migrating to encrypted (or if any
+    /// existing record needs decrypting) and the vault isn't unlocked.
+    SetEncrypt {
+        /// Module id: todo, bookmark, or rss.
+        module: String,
+        /// "true" or "false".
+        #[arg(action = clap::ArgAction::Set)]
+        value: bool,
+    },
+    /// Re-run migration for one module (or all supported modules, if
+    /// omitted) against its currently configured encryption setting,
+    /// without changing config — useful to reconcile drift after editing
+    /// config.toml by hand.
+    Migrate {
+        /// Module id: todo, bookmark, or rss. All supported modules if omitted.
+        module: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
@@ -75,6 +106,10 @@ impl Cli {
             Some(Commands::Commit) => ModuleId::COMMIT,
             Some(Commands::Rss { .. }) => ModuleId::RSS,
             Some(Commands::Daemon { .. }) => ModuleId::DAEMON,
+            // Always handled by an early return in main.rs before this
+            // matters for registry dispatch; SETTINGS is the closest
+            // semantic match since it's a config-editing command.
+            Some(Commands::Config { .. }) => ModuleId::SETTINGS,
             None => ModuleId::LAUNCHER,
         }
     }

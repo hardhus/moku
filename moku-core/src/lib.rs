@@ -16,6 +16,6 @@ pub use keys::{Command, keys_match, resolve_event};
 pub use module::{CliModule, CliRegistry, DaemonTask, ModuleId, ModuleMeta, TuiModule, TuiRegistry};
 pub use router::Router;
 pub use security::{SafeKey, SecurityManager, VaultSession};
-pub use storage::{StorageManager, resolve_encryption};
+pub use storage::{MigrationReport, StorageManager, resolve_encryption};
 pub use theme::MokuTheme;
 pub use toast::{ToastManager, ToastType};

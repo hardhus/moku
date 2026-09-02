@@ -13,6 +13,14 @@ use super::envelope::{CURRENT_SCHEMA_VERSION, EncryptionStatus, StorageEnvelope,
 
 const EXTERNAL_STORAGE_THRESHOLD: usize = 50 * 1024;
 
+/// Result of `StorageManager::migrate_module_encryption`.
+#[derive(Debug, Default)]
+pub struct MigrationReport {
+    pub migrated: usize,
+    pub skipped: usize,
+    pub errors: Vec<(String, String)>,
+}
+
 /// Hybrid encrypted storage manager.
 /// Key resolution is deferred to `VaultSession` to avoid recreating the manager on unlock.
 pub struct StorageManager {
@@ -195,6 +203,66 @@ impl StorageManager {
         Ok(serde_json::from_slice(&decrypted_data)?)
     }
 
+    /// Re-saves every record under `module_id` so its on-disk
+    /// `EncryptionStatus` matches `target_encrypted`. Records already in
+    /// the target state are left untouched — idempotent, safe to call
+    /// repeatedly (e.g. after a config change, to reconcile drift).
+    pub async fn migrate_module_encryption(
+        &self,
+        module_id: &str,
+        target_encrypted: bool,
+    ) -> Result<MigrationReport> {
+        if target_encrypted && self.session.current().is_none() {
+            anyhow::bail!("Vault must be unlocked to migrate '{module_id}' to encrypted");
+        }
+
+        let db = self.get_or_open_db(module_id)?;
+        let keys: Vec<String> = tokio::task::spawn_blocking(move || {
+            db.iter()
+                .filter_map(|entry| entry.ok())
+                .map(|(k, _)| String::from_utf8_lossy(&k).to_string())
+                .collect::<Vec<_>>()
+        })
+        .await?;
+
+        let mut report = MigrationReport {
+            migrated: 0,
+            skipped: 0,
+            errors: Vec::new(),
+        };
+
+        for key in keys {
+            match self.migrate_one_key(module_id, &key, target_encrypted).await {
+                Ok(true) => report.migrated += 1,
+                Ok(false) => report.skipped += 1,
+                Err(e) => report.errors.push((key, e.to_string())),
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Returns `Ok(true)` if `key` was re-saved, `Ok(false)` if it already
+    /// matched `target_encrypted`.
+    async fn migrate_one_key(&self, module_id: &str, key: &str, target_encrypted: bool) -> Result<bool> {
+        let db = self.get_or_open_db(module_id)?;
+        let key_string = key.to_string();
+        let raw = tokio::task::spawn_blocking(move || db.get(&key_string))
+            .await??
+            .ok_or_else(|| anyhow!("Key disappeared during migration: {key}"))?;
+        let envelope: StorageEnvelope =
+            serde_json::from_slice(&raw).context("Envelope corrupted")?;
+
+        let currently_encrypted = envelope.status == EncryptionStatus::Encrypted;
+        if currently_encrypted == target_encrypted {
+            return Ok(false);
+        }
+
+        let value: serde_json::Value = self.load(module_id, key).await?;
+        self.save(module_id, key, &value, target_encrypted).await?;
+        Ok(true)
+    }
+
     async fn prepare_module_paths(&self, module_id: &str) -> Result<(PathBuf, PathBuf)> {
         let module_root = self.vault_root.join(module_id);
         let db_path = module_root.join("db");
@@ -375,5 +443,77 @@ mod tests {
 
         let final_check: String = manager.load("atomic_test", "key1").await.unwrap();
         assert_eq!(final_check, initial_data);
+    }
+
+    #[tokio::test]
+    async fn test_migrate_plaintext_to_encrypted() {
+        let temp = tempdir().unwrap();
+        let manager = StorageManager::new_with_root(unlocked_session().await, temp.path().to_path_buf())
+            .await
+            .unwrap();
+
+        manager.save("mod1", "a", &"one".to_string(), false).await.unwrap();
+        manager.save("mod1", "b", &"two".to_string(), false).await.unwrap();
+
+        let report = manager.migrate_module_encryption("mod1", true).await.unwrap();
+        assert_eq!(report.migrated, 2);
+        assert_eq!(report.skipped, 0);
+        assert!(report.errors.is_empty());
+
+        // Data survives the round trip and reads back as still-encrypted.
+        let a: String = manager.load("mod1", "a").await.unwrap();
+        assert_eq!(a, "one");
+    }
+
+    #[tokio::test]
+    async fn test_migrate_requires_unlocked_vault_for_encrypted_target() {
+        let temp = tempdir().unwrap();
+        let manager = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
+            .await
+            .unwrap();
+
+        manager.save("mod1", "a", &"one".to_string(), false).await.unwrap();
+
+        let result = manager.migrate_module_encryption("mod1", true).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unlocked"));
+    }
+
+    #[tokio::test]
+    async fn test_migrate_is_idempotent() {
+        let temp = tempdir().unwrap();
+        let manager = StorageManager::new_with_root(unlocked_session().await, temp.path().to_path_buf())
+            .await
+            .unwrap();
+
+        manager.save("mod1", "a", &"one".to_string(), true).await.unwrap();
+
+        // Already encrypted, target is encrypted: nothing to do.
+        let report = manager.migrate_module_encryption("mod1", true).await.unwrap();
+        assert_eq!(report.migrated, 0);
+        assert_eq!(report.skipped, 1);
+    }
+
+    #[tokio::test]
+    async fn test_migrate_encrypted_to_plaintext_readable_after_relock() {
+        let temp = tempdir().unwrap();
+        let session = Arc::new(VaultSession::new());
+        let key = SecurityManager::derive_key("test_pass", &[9u8; 16]).await.unwrap();
+        session.unlock(key);
+        let manager = StorageManager::new_with_root(Arc::clone(&session), temp.path().to_path_buf())
+            .await
+            .unwrap();
+
+        manager.save("mod1", "a", &"one".to_string(), true).await.unwrap();
+
+        let report = manager.migrate_module_encryption("mod1", false).await.unwrap();
+        assert_eq!(report.migrated, 1);
+
+        // Once migrated to plaintext, the record must be readable even
+        // with the vault locked again — proving it's genuinely plaintext
+        // on disk now, not still encrypted.
+        session.lock();
+        let a: String = manager.load("mod1", "a").await.unwrap();
+        assert_eq!(a, "one");
     }
 }

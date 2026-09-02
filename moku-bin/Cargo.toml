@@ -30,6 +30,8 @@ arc-swap.workspace = true
 futures.workspace = true
 sysinfo.workspace = true
 auto-launch.workspace = true
+rpassword.workspace = true
+toml.workspace = true
 
 moku-launcher = { path = "../modules/moku-launcher" }
 moku-lock-screen = { path = "../modules/moku-lock-screen" }

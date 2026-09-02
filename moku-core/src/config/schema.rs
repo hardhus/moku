@@ -43,6 +43,10 @@ pub struct KeyBindings {
     pub select: String,
     pub up: String,
     pub down: String,
+    /// Global hotkey that locks the vault immediately, from anywhere in
+    /// the unlocked TUI. Intercepted centrally in moku-bin/src/app_loop.rs
+    /// before normal event dispatch.
+    pub lock_vault: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -131,6 +135,7 @@ impl Default for KeyBindings {
             select: "enter".to_string(),
             up: "k".to_string(),
             down: "j".to_string(),
+            lock_vault: "ctrl-l".to_string(),
         }
     }
 }

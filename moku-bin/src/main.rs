@@ -7,6 +7,7 @@ use color_eyre::eyre::eyre;
 
 mod app_loop;
 mod cli;
+mod config_cmd;
 mod registry;
 mod tui;
 mod utils;
@@ -102,6 +103,20 @@ async fn main() -> Result<()> {
             .await
             .map_err(|e| eyre!(e))?,
     );
+
+    if let Some(Commands::Config { sub }) = &cli.command {
+        // Matches the error-reporting convention used by CLI module
+        // dispatch below (eprintln + exit) rather than letting the Err
+        // propagate through main()'s own Result — main.rs never otherwise
+        // returns an Err this way, and doing so here triggered a runaway
+        // panic/eyre-hook interaction (see tui::restore() in utils.rs)
+        // when the terminal was never put into raw/alternate-screen mode.
+        if let Err(e) = config_cmd::handle(sub, &config, &session, &security, &storage).await {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     let cli_registry = build_cli_registry();
     let target_module = cli.target_module();
