@@ -2330,7 +2330,7 @@ dependencies = [
  "crossterm",
  "feed-rs",
  "moku-core",
- "notify-rust",
+ "moku-notify",
  "ratatui",
  "reqwest",
  "serde",
