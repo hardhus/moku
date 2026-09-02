@@ -7,6 +7,39 @@ use moku_core::{ConfigManager, DaemonContext, DaemonTask, StorageManager, VaultS
 
 use crate::task_status::{TaskStatus, write_statuses};
 
+/// Applies one task's tick outcome to its `TaskStatus` entry in `statuses`,
+/// inserting a new entry if this is the task's first recorded tick.
+/// Pure/synchronous so it's directly unit-testable without tokio or I/O.
+fn record_tick_result(
+    statuses: &mut Vec<TaskStatus>,
+    task_id: &str,
+    result: &Result<usize>,
+    now_secs: Option<u64>,
+) {
+    match statuses.iter_mut().find(|s| s.id == task_id) {
+        Some(entry) => {
+            entry.last_run_secs = now_secs;
+            match result {
+                Ok(count) => {
+                    entry.last_item_count = *count;
+                    entry.last_error = None;
+                }
+                Err(e) => {
+                    entry.last_error = Some(e.to_string());
+                }
+            }
+        }
+        None => {
+            statuses.push(TaskStatus {
+                id: task_id.to_string(),
+                last_run_secs: now_secs,
+                last_item_count: result.as_ref().ok().copied().unwrap_or(0),
+                last_error: result.as_ref().err().map(|e| e.to_string()),
+            });
+        }
+    }
+}
+
 /// Run the background service daemon.
 pub async fn run_worker() -> Result<()> {
     let _guard = crate::logging::init()?;
@@ -64,26 +97,7 @@ pub async fn run_worker() -> Result<()> {
                 }
 
                 let mut lock = statuses.lock().await;
-                let entry = lock.iter_mut().find(|s| s.id == task_id);
-                if let Some(entry) = entry {
-                    entry.last_run_secs = now_secs;
-                    match &result {
-                        Ok(count) => {
-                            entry.last_item_count = *count;
-                            entry.last_error = None;
-                        }
-                        Err(e) => {
-                            entry.last_error = Some(e.to_string());
-                        }
-                    }
-                } else {
-                    lock.push(TaskStatus {
-                        id: task_id.clone(),
-                        last_run_secs: now_secs,
-                        last_item_count: result.as_ref().ok().cloned().unwrap_or(0),
-                        last_error: result.as_ref().err().map(|e| e.to_string()),
-                    });
-                }
+                record_tick_result(&mut lock, &task_id, &result, now_secs);
                 let _ = write_statuses(&data_dir, &lock);
                 drop(lock);
 
@@ -103,4 +117,83 @@ pub async fn run_worker() -> Result<()> {
 
     crate::pid::remove();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_record_first_tick_success_inserts_entry() {
+        let mut statuses = Vec::new();
+        record_tick_result(&mut statuses, "rss", &Ok(5), Some(1000));
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].id, "rss");
+        assert_eq!(statuses[0].last_run_secs, Some(1000));
+        assert_eq!(statuses[0].last_item_count, 5);
+        assert_eq!(statuses[0].last_error, None);
+    }
+
+    #[test]
+    fn test_record_first_tick_error_inserts_entry_with_error() {
+        let mut statuses = Vec::new();
+        let result: Result<usize> = Err(anyhow::anyhow!("fetch failed"));
+        record_tick_result(&mut statuses, "rss", &result, Some(1000));
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].last_item_count, 0);
+        assert_eq!(statuses[0].last_error.as_deref(), Some("fetch failed"));
+    }
+
+    #[test]
+    fn test_record_subsequent_success_updates_existing_entry_and_clears_error() {
+        let mut statuses = vec![TaskStatus {
+            id: "rss".to_string(),
+            last_run_secs: Some(1000),
+            last_item_count: 0,
+            last_error: Some("previous failure".to_string()),
+        }];
+
+        record_tick_result(&mut statuses, "rss", &Ok(3), Some(2000));
+
+        assert_eq!(statuses.len(), 1, "must update in place, not duplicate");
+        assert_eq!(statuses[0].last_run_secs, Some(2000));
+        assert_eq!(statuses[0].last_item_count, 3);
+        assert_eq!(statuses[0].last_error, None);
+    }
+
+    #[test]
+    fn test_record_subsequent_error_keeps_last_item_count_and_sets_error() {
+        let mut statuses = vec![TaskStatus {
+            id: "rss".to_string(),
+            last_run_secs: Some(1000),
+            last_item_count: 7,
+            last_error: None,
+        }];
+        let result: Result<usize> = Err(anyhow::anyhow!("timeout"));
+
+        record_tick_result(&mut statuses, "rss", &result, Some(2000));
+
+        assert_eq!(statuses[0].last_item_count, 7, "count is only touched on Ok");
+        assert_eq!(statuses[0].last_error.as_deref(), Some("timeout"));
+        assert_eq!(statuses[0].last_run_secs, Some(2000));
+    }
+
+    #[test]
+    fn test_record_only_touches_matching_task_id() {
+        let mut statuses = vec![TaskStatus {
+            id: "other".to_string(),
+            last_run_secs: Some(1),
+            last_item_count: 9,
+            last_error: None,
+        }];
+
+        record_tick_result(&mut statuses, "rss", &Ok(1), Some(2000));
+
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].id, "other");
+        assert_eq!(statuses[0].last_item_count, 9, "untouched");
+        assert_eq!(statuses[1].id, "rss");
+    }
 }
