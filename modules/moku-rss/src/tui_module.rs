@@ -336,15 +336,7 @@ impl TuiModule for RssTuiModule {
                                     let filtered = get_filtered_items(feeds, items, feed_idx);
                                     if let Some(i) = item_state.selected() {
                                         if i < filtered.len() {
-                                            let link = &filtered[i].link;
-                                            #[cfg(target_os = "windows")]
-                                            let _ = std::process::Command::new("cmd")
-                                                .args(&["/C", "start", "", link])
-                                                .spawn();
-                                            #[cfg(not(target_os = "windows"))]
-                                            let _ = std::process::Command::new("xdg-open")
-                                                .arg(link)
-                                                .spawn();
+                                            let _ = moku_core::util::open_url(&filtered[i].link);
                                             *status_message = Some(("Opening in browser...".to_string(), Instant::now()));
                                             changed = true;
                                         }
@@ -394,14 +386,7 @@ impl TuiModule for RssTuiModule {
                                 changed = true;
                             }
                             KeyCode::Char('o') => {
-                                #[cfg(target_os = "windows")]
-                                let _ = std::process::Command::new("cmd")
-                                    .args(&["/C", "start", "", &item.link])
-                                    .spawn();
-                                #[cfg(not(target_os = "windows"))]
-                                let _ = std::process::Command::new("xdg-open")
-                                    .arg(&item.link)
-                                    .spawn();
+                                let _ = moku_core::util::open_url(&item.link);
                                 *status_message = Some(("Opening in browser...".to_string(), Instant::now()));
                                 changed = true;
                             }

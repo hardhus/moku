@@ -8,6 +8,7 @@ pub mod security;
 pub mod storage;
 pub mod theme;
 pub mod toast;
+pub mod util;
 
 pub use config::{ConfigManager, MokuConfig};
 pub use context::{AppContext, CliContext, DaemonContext};
