@@ -20,6 +20,7 @@ pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
     r.insert(Box::new(moku_rss::RssTuiModule::new()));
     r.insert(Box::new(DaemonStatusModule::new()));
     r.insert(Box::new(moku_vault_daemon::VaultManagerModule::new()));
+    r.insert(Box::new(moku_satz::NotesModule::new()));
 
     for module in loaded_plugins {
         r.insert(module);
@@ -85,5 +86,6 @@ pub fn build_cli_registry() -> CliRegistry {
     r.insert(Box::new(moku_context::ContextModule::new()));
     r.insert(Box::new(moku_commit::CommitModule::new()));
     r.insert(Box::new(moku_rss::RssCliModule::new()));
+    r.insert(Box::new(moku_satz::NotesCliModule::new()));
     r
 }

@@ -44,6 +44,7 @@ moku-commit = { path = "../modules/moku-commit" }
 moku-rss = { path = "../modules/moku-rss" }
 moku-daemon = { path = "../moku-daemon" }
 moku-vault-daemon = { path = "../moku-vault-daemon" }
+moku-satz = { path = "../modules/moku-satz" }
 
 [dev-dependencies]
 tempfile.workspace = true

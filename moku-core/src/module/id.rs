@@ -18,6 +18,7 @@ impl ModuleId {
     pub const CONTEXT: Self = Self("context");
     pub const COMMIT: Self = Self("commit");
     pub const VAULT: Self = Self("vault");
+    pub const NOTES: Self = Self("notes");
 
     pub const fn new(id: &'static str) -> Self {
         Self(id)
@@ -38,6 +39,7 @@ impl ModuleId {
             Self::RSS => "RSS Feed Reader",
             Self::DAEMON => "Daemon Status",
             Self::VAULT => "Encrypted Vaults",
+            Self::NOTES => "Notes",
             _ => self.0,
         }
     }
@@ -52,6 +54,7 @@ impl ModuleId {
             Self::RSS,
             Self::DAEMON,
             Self::VAULT,
+            Self::NOTES,
         ]
     }
 }

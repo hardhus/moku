@@ -60,6 +60,15 @@ pub enum Commands {
         #[command(subcommand)]
         sub: VaultCommands,
     },
+    /// Manage a satz-powered Markdown notes vault (index/stats/list/
+    /// resolve/daily/fmt/graph).
+    #[command(disable_help_flag = true)]
+    Notes {
+        // Same disable_help_flag rationale as Rss: lets NotesCliModule's
+        // own clap subcommand parser generate real per-subcommand help.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
@@ -159,6 +168,7 @@ impl Cli {
             Some(Commands::Config { .. }) => ModuleId::SETTINGS,
             // Same as Config: always intercepted early in main.rs.
             Some(Commands::Vault { .. }) => ModuleId::SETTINGS,
+            Some(Commands::Notes { .. }) => ModuleId::NOTES,
             None => ModuleId::LAUNCHER,
         }
     }
