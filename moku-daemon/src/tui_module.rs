@@ -55,6 +55,9 @@ impl ModuleMeta for DaemonStatusModule {
     fn title(&self) -> &'static str {
         ModuleId::DAEMON.title()
     }
+    fn encrypt_by_default(&self) -> bool {
+        false // reads task-status.json, not vault-encrypted storage
+    }
 }
 
 #[async_trait]
