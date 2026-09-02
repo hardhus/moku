@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn test_no_args_defaults_to_list() {
         let parsed = parse(&[]).unwrap();
-        assert!(matches!(parsed.cmd, None));
+        assert!(parsed.cmd.is_none());
     }
 
     #[test]
