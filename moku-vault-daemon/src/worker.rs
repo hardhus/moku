@@ -19,9 +19,8 @@ fn read_password_from_stdin() -> Result<String> {
 
 /// Runs the mount worker for one volume: unlocks its independent vault,
 /// opens the engine, mounts it at `mountpoint`, and blocks until the
-/// process is asked to stop. There is no graceful control-channel
-/// handshake yet (plan §3, a later phase) — today that's Ctrl+C in the
-/// foreground case, or a hard kill from `moku vault unmount`.
+/// process is asked to stop — via Ctrl+C, the control channel
+/// (`crate::control`), or (as a last resort) a hard kill.
 pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     let password = read_password_from_stdin()?;
     let volume_dir = registry::volume_dir(volume_id)?;
@@ -32,12 +31,26 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
         security.unlock_vault(password).await.map_err(|e| anyhow!("failed to unlock volume '{volume_id}': {e}"))?;
     let keys = derive_volume_keys(&master_key);
 
+    // A pid file present but not alive means the previous mount ended
+    // uncleanly (crash, hard kill) — mount_and_wait's final
+    // engine.flush_usage() never ran, so the cached usage counter may be
+    // stale. Detected before we overwrite the pid file with our own.
+    let previous_session_unclean = match crate::pid::read(volume_id) {
+        Some(stale_pid) => !status::pid_is_alive(stale_pid),
+        None => false,
+    };
+
     let engine = VolumeEngine::open_volume(
         volume_dir.join(registry::DATA_DIR),
         keys,
         volume_dir.join(registry::USAGE_FILE),
         cfg.size_limit_bytes,
     )?;
+
+    if previous_session_unclean {
+        engine.reconcile_usage().context("failed to reconcile usage after an unclean previous session")?;
+        engine.flush_usage().context("failed to persist reconciled usage")?;
+    }
 
     crate::pid::write(volume_id, std::process::id())?;
 
