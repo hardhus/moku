@@ -94,12 +94,12 @@ impl RssEngine {
             Ok(())
         };
 
-        // sled only allows one process to hold a module's DB open at a time.
-        // The daemon doesn't need continuous access between ticks, so it
-        // releases the lock here (even on error) — otherwise the RSS TUI
-        // can never open this DB (to add/edit feeds) while the daemon runs.
-        let _ = storage.close_db(STORAGE_NS);
-
+        // Releasing sled's process-level lock after a tick is the daemon
+        // worker's job now (DaemonTask::storage_module_ids, released
+        // generically in moku-daemon/src/worker.rs) — not done here, since
+        // this function is also called from the TUI's manual refresh,
+        // which should keep the DB cached for the rest of its session like
+        // every other RSS storage call.
         save_result?;
         Ok(newly_found_favorite)
     }

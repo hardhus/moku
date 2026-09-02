@@ -1,14 +1,25 @@
 use anyhow::Result;
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+/// Refreshes only the given PID's process entry (no full system scan).
+pub(crate) fn refresh_single(pid: u32) -> System {
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    sys
+}
+
+pub fn pid_is_alive(pid: u32) -> bool {
+    refresh_single(pid).process(Pid::from_u32(pid)).is_some()
+}
 
 pub fn is_running() -> bool {
     match crate::pid::read() {
         None => false,
-        Some(pid_val) => {
-            let mut sys = System::new_all();
-            sys.refresh_all();
-            sys.process(Pid::from_u32(pid_val)).is_some()
-        }
+        Some(pid_val) => pid_is_alive(pid_val),
     }
 }
 
@@ -18,9 +29,7 @@ pub fn print_status() -> Result<()> {
             println!("⚫ Moku Daemon is not running (no pid file).");
         }
         Some(pid_val) => {
-            let mut sys = System::new_all();
-            sys.refresh_all();
-            if sys.process(Pid::from_u32(pid_val)).is_some() {
+            if pid_is_alive(pid_val) {
                 println!("🟢 Moku Daemon is running (PID: {pid_val}).");
             } else {
                 println!("⚫ Moku Daemon is not running (stale pid file found, cleaning up).");
@@ -37,8 +46,7 @@ pub fn stop_daemon() -> Result<()> {
             println!("Daemon is not running (no PID file).");
         }
         Some(pid_val) => {
-            let mut sys = System::new_all();
-            sys.refresh_all();
+            let sys = refresh_single(pid_val);
             if let Some(process) = sys.process(Pid::from_u32(pid_val)) {
                 process.kill();
                 println!("Stopping daemon (PID: {pid_val})...");

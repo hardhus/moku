@@ -56,6 +56,13 @@ pub async fn run_worker() -> Result<()> {
 
                 let result = task.tick(&ctx).await;
 
+                // sled only allows one process to hold a module's DB open
+                // at a time; release it here so the TUI/CLI can open the
+                // same DB between ticks (see DaemonTask::storage_module_ids).
+                for mid in task.storage_module_ids() {
+                    let _ = ctx.storage.close_db(mid);
+                }
+
                 let mut lock = statuses.lock().await;
                 let entry = lock.iter_mut().find(|s| s.id == task_id);
                 if let Some(entry) = entry {

@@ -32,13 +32,7 @@ impl DaemonStatusModule {
 
     fn refresh_status(&mut self) {
         self.pid = crate::pid::read();
-        self.is_running = self.pid
-            .map(|p| {
-                let mut sys = sysinfo::System::new_all();
-                sys.refresh_all();
-                sys.process(sysinfo::Pid::from_u32(p)).is_some()
-            })
-            .unwrap_or(false);
+        self.is_running = self.pid.map(crate::status::pid_is_alive).unwrap_or(false);
         self.last_checked = Instant::now();
     }
 
@@ -118,8 +112,7 @@ impl TuiModule for DaemonStatusModule {
                     }
                     KeyCode::Char('k') => {
                         if let Some(pid_val) = self.pid {
-                            let mut sys = sysinfo::System::new_all();
-                            sys.refresh_all();
+                            let sys = crate::status::refresh_single(pid_val);
                             if let Some(process) = sys.process(sysinfo::Pid::from_u32(pid_val)) {
                                 process.kill();
                                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -161,7 +154,11 @@ impl TuiModule for DaemonStatusModule {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
-        // Auto-refresh every 5 seconds
+        // Best-effort: refresh if this screen happens to redraw (e.g. a
+        // toast tick) and the data looks stale. NOT a real timer — in the
+        // dirty-flag draw loop, nothing requests a redraw purely to run
+        // this check, so it may not fire for a while if nothing else
+        // changes. Use [r] to force a refresh.
         if self.last_checked.elapsed() > Duration::from_secs(5) {
             self.refresh_status();
         }
