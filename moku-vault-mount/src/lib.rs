@@ -12,3 +12,9 @@ mod winfsp_shim;
 
 #[cfg(windows)]
 pub use winfsp_shim::mount_and_wait;
+
+#[cfg(unix)]
+mod fuse_shim;
+
+#[cfg(unix)]
+pub use fuse_shim::mount_and_wait;

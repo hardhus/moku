@@ -23,6 +23,14 @@ winfsp = { version = "0.13", features = ["delayload"] }
 
 [build-dependencies]
 
+# FUSE shim — developed and cross-compile-checked from this (Windows) dev
+# environment but not runtime-tested here; there is no FUSE/Linux machine
+# available this session (plan Faz 6). Verify with:
+#   cargo check --target x86_64-unknown-linux-gnu -p moku-vault-mount
+[target.'cfg(unix)'.dependencies]
+fuser = "0.18"
+libc = "0.2"
+
 [dev-dependencies]
 moku-core.workspace = true
 tokio.workspace = true

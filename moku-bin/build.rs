@@ -9,6 +9,10 @@ fn main() {
     // WinFsp's installer doesn't add itself to PATH — instead of only
     // when a vault is actually mounted, via WinFsp's own registry-based
     // lookup at that point (see winfsp::init::load_system_winfsp).
-    #[cfg(windows)]
-    winfsp::build::winfsp_link_delayload();
+    // See moku-vault-mount/build.rs for why this checks the compile
+    // TARGET (via CARGO_CFG_TARGET_OS) rather than `#[cfg(windows)]`,
+    // which would reflect the host instead.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        winfsp::build::winfsp_link_delayload();
+    }
 }
