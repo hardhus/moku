@@ -25,3 +25,4 @@ serde_json.workspace = true
 serde.workspace = true
 
 moku-rss = { path = "../modules/moku-rss", default-features = false }
+moku-notify = { path = "../moku-notify" }

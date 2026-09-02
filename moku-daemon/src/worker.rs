@@ -15,6 +15,11 @@ pub async fn run_worker() -> Result<()> {
     }
     crate::pid::write()?;
 
+    // Windows'ta AUMID/ikon kaydını daemon başlarken bir kez dene — hata
+    // olsa bile devam eder, sadece log'a düşer. send() zaten ilk
+    // bildirimde aynı işi tembel yapardı, bu sadece erken görünürlük için.
+    moku_notify::ensure_registered();
+
     let data_dir = moku_core::dirs::get_data_dir()?;
     let loaded_config = ConfigManager::load().await.unwrap_or_default();
     let config = Arc::new(ArcSwap::from_pointee(loaded_config));
