@@ -1,5 +1,5 @@
 [workspace]
-members = ["moku-bin", "moku-core", "moku-daemon", "moku-lua", "modules/*"]
+members = ["moku-bin", "moku-core", "moku-daemon", "moku-lua", "moku-notify", "xtask", "modules/*"]
 
 resolver = "2"
 
@@ -62,6 +62,13 @@ rand = "0.8"
 regex = "1.10"
 
 mlua = { version = "0.11", features = ["lua54", "vendored", "send"] }
+
+# Bildirim ikon üretimi (sadece xtask kullanır, runtime'a girmez)
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+# Windows AUMID kaydı (sadece moku-notify, sadece Windows hedefinde)
+winreg = "0.52"
+windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_Foundation"] }
 
 # Internal Crates
 moku-core = { path = "./moku-core" }
