@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+moku-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+notify-rust.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg.workspace = true
+windows.workspace = true
