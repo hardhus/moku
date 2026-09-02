@@ -2287,6 +2287,7 @@ dependencies = [
  "moku-rss",
  "moku-settings",
  "moku-todo",
+ "moku-vault-daemon",
  "ratatui",
  "rpassword",
  "sysinfo",
@@ -2499,6 +2500,20 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "moku-vault-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "moku-core",
+ "moku-vault-fs",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

@@ -54,6 +54,36 @@ pub enum Commands {
         #[command(subcommand)]
         sub: ConfigCommands,
     },
+    /// Manage encrypted, mountable volumes (create/list/status/resize).
+    /// Mount/unmount are added in a later phase.
+    Vault {
+        #[command(subcommand)]
+        sub: VaultCommands,
+    },
+}
+
+#[derive(Subcommand, Clone, PartialEq, Debug)]
+pub enum VaultCommands {
+    /// Create a new encrypted volume of the given size.
+    Create {
+        name: String,
+        /// Human-readable size, e.g. "10GB" or "512MiB".
+        #[arg(long)]
+        size: String,
+        /// Use a password independent from moku's own vault password.
+        #[arg(long)]
+        custom_password: bool,
+    },
+    /// List all encrypted volumes with their usage and mount status.
+    List,
+    /// Show one volume's status in detail.
+    Status { name: String },
+    /// Change a volume's size limit (takes effect on its next mount).
+    Resize {
+        name: String,
+        #[arg(long)]
+        size: String,
+    },
 }
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
@@ -110,6 +140,8 @@ impl Cli {
             // matters for registry dispatch; SETTINGS is the closest
             // semantic match since it's a config-editing command.
             Some(Commands::Config { .. }) => ModuleId::SETTINGS,
+            // Same as Config: always intercepted early in main.rs.
+            Some(Commands::Vault { .. }) => ModuleId::SETTINGS,
             None => ModuleId::LAUNCHER,
         }
     }

@@ -1,0 +1,16 @@
+[package]
+name = "moku-vault-daemon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moku-core.workspace = true
+moku-vault-fs = { path = "../moku-vault-fs" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+sysinfo.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
