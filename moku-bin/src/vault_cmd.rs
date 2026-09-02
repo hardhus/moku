@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anyhow::{Result, anyhow, bail};
 
-use moku_vault_daemon::{PasswordMode, pid, registry, size, status, worker};
+use moku_vault_daemon::{PasswordMode, control, pid, registry, size, status, worker};
 
 use crate::cli::VaultCommands;
 
@@ -117,10 +117,23 @@ async fn unmount(name: &str) -> Result<()> {
         return Ok(());
     }
 
-    // No graceful control-channel handshake yet (that's a later phase) —
-    // this is a hard kill, which on some FUSE/WinFsp versions risks
-    // leaving a stuck mount point behind. Acceptable for now; flagged in
-    // the plan as an open risk to close before this feature is finished.
+    // Preferred path: ask the worker to stop over its control channel, so
+    // it reaches mount_and_wait's own clean unmount + usage flush, then
+    // wait for it to actually exit. Only fall back to a hard kill (which
+    // skips both of those and risks a stuck mount point on some FUSE/
+    // WinFsp versions) if the graceful request can't be delivered or the
+    // worker doesn't exit within a few seconds.
+    if control::send_stop(&cfg.id).await.is_ok() {
+        for _ in 0..25 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if !status::pid_is_alive(worker_pid) {
+                pid::remove(&cfg.id);
+                println!("✅ Unmounted '{}'.", cfg.display_name);
+                return Ok(());
+            }
+        }
+    }
+
     #[cfg(windows)]
     let _ = std::process::Command::new("taskkill").args(["/PID", &worker_pid.to_string(), "/F"]).output();
     #[cfg(not(windows))]
@@ -128,7 +141,7 @@ async fn unmount(name: &str) -> Result<()> {
 
     std::thread::sleep(std::time::Duration::from_millis(400));
     pid::remove(&cfg.id);
-    println!("✅ Unmounted '{}'.", cfg.display_name);
+    println!("✅ Unmounted '{}' (forced).", cfg.display_name);
     Ok(())
 }
 

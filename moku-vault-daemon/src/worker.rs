@@ -41,10 +41,20 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     crate::pid::write(volume_id, std::process::id())?;
 
     let (stop_tx, stop_rx) = std::sync::mpsc::channel();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = stop_tx.send(());
-    });
+    {
+        let tx = stop_tx.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = tx.send(());
+        });
+    }
+    {
+        let tx = stop_tx.clone();
+        let id = volume_id.to_string();
+        tokio::spawn(async move {
+            let _ = crate::control::listen_for_stop(&id, tx).await;
+        });
+    }
 
     let mountpoint = mountpoint.to_string();
     // `mount_and_wait` blocks synchronously for the whole mount lifetime.

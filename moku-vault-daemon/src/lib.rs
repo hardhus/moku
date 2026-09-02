@@ -1,3 +1,4 @@
+pub mod control;
 pub mod pid;
 pub mod registry;
 pub mod size;
