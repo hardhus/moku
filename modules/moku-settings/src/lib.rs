@@ -18,7 +18,8 @@ use moku_core::{
 };
 
 use crate::tabs::{
-    SettingsTab, context::ContextTab, general::GeneralTab, keybindings::KeybindingsTab,
+    SettingsTab, commit::CommitTab, context::ContextTab, general::GeneralTab,
+    keybindings::KeybindingsTab, storage::StorageTab,
 };
 
 pub struct SettingsModule {
@@ -33,6 +34,8 @@ impl SettingsModule {
             tabs: vec![
                 Box::new(GeneralTab::new(config)),
                 Box::new(ContextTab::new(config)),
+                Box::new(CommitTab::new(config)),
+                Box::new(StorageTab::new(config)),
                 Box::new(KeybindingsTab::new()),
             ],
             selected_tab: 0,

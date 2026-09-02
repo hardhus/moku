@@ -2,9 +2,11 @@ use anyhow::Result;
 use crossterm::event::Event;
 use ratatui::{Frame, layout::Rect};
 
+pub mod commit;
 pub mod context;
 pub mod general;
 pub mod keybindings;
+pub mod storage;
 
 use moku_core::{AppContext, MokuConfig};
 
