@@ -2593,9 +2593,12 @@ name = "moku-vault-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "crossterm",
  "moku-core",
  "moku-vault-fs",
  "moku-vault-mount",
+ "ratatui",
  "serde",
  "serde_json",
  "sysinfo",

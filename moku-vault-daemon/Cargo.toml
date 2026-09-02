@@ -12,6 +12,9 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 sysinfo.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

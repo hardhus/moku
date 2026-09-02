@@ -19,6 +19,7 @@ pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
     r.insert(Box::new(moku_bookmark::BookmarkModule::new()));
     r.insert(Box::new(moku_rss::RssTuiModule::new()));
     r.insert(Box::new(DaemonStatusModule::new()));
+    r.insert(Box::new(moku_vault_daemon::VaultManagerModule::new()));
 
     for module in loaded_plugins {
         r.insert(module);

@@ -1,8 +1,7 @@
-use std::io::Write;
-
 use anyhow::{Result, anyhow, bail};
 
-use moku_vault_daemon::{PasswordMode, control, pid, registry, size, status, worker};
+use moku_vault_daemon::worker::StopOutcome;
+use moku_vault_daemon::{PasswordMode, registry, size, status, worker};
 
 use crate::cli::VaultCommands;
 
@@ -81,67 +80,19 @@ async fn mount(name: &str, mountpoint: &str) -> Result<()> {
     };
     let password = rpassword::prompt_password(prompt_label).map_err(|e| anyhow!("Failed to read password: {e}"))?;
 
-    let exe = std::env::current_exe().map_err(|e| anyhow!("failed to resolve current executable: {e}"))?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("vault").arg("mount-worker").arg(&cfg.id).arg("--mountpoint").arg(mountpoint);
-    cmd.stdin(std::process::Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    let mut child = cmd.spawn().map_err(|e| anyhow!("failed to spawn mount worker: {e}"))?;
-
-    // Password crosses the process boundary only via the child's stdin
-    // pipe — never as a CLI arg (visible in Task Manager/`ps`) or env var
-    // (visible in /proc/<pid>/environ). Dropping the handle closes the
-    // pipe (EOF), telling the worker the whole password has been sent.
-    {
-        let mut stdin = child.stdin.take().expect("stdin was requested as piped");
-        stdin.write_all(password.as_bytes()).map_err(|e| anyhow!("failed to send password to mount worker: {e}"))?;
-    }
-
-    println!("✅ Mounting '{}' at {} (worker PID: {})...", cfg.display_name, mountpoint, child.id());
+    let pid = worker::spawn_mount_process(&cfg.id, mountpoint, &password)?;
+    println!("✅ Mounting '{}' at {} (worker PID: {})...", cfg.display_name, mountpoint, pid);
     Ok(())
 }
 
 async fn unmount(name: &str) -> Result<()> {
     let cfg = registry::find_volume(name).await?;
-    let Some(worker_pid) = pid::read(&cfg.id) else {
-        println!("'{}' is not mounted.", cfg.display_name);
-        return Ok(());
-    };
-    if !status::pid_is_alive(worker_pid) {
-        println!("'{}' has a stale mount record; cleaning up.", cfg.display_name);
-        pid::remove(&cfg.id);
-        return Ok(());
+    match worker::stop_mount_process(&cfg.id).await? {
+        StopOutcome::NotMounted => println!("'{}' is not mounted.", cfg.display_name),
+        StopOutcome::StaleCleanedUp => println!("'{}' had a stale mount record; cleaned up.", cfg.display_name),
+        StopOutcome::Graceful => println!("✅ Unmounted '{}'.", cfg.display_name),
+        StopOutcome::Forced => println!("✅ Unmounted '{}' (forced).", cfg.display_name),
     }
-
-    // Preferred path: ask the worker to stop over its control channel, so
-    // it reaches mount_and_wait's own clean unmount + usage flush, then
-    // wait for it to actually exit. Only fall back to a hard kill (which
-    // skips both of those and risks a stuck mount point on some FUSE/
-    // WinFsp versions) if the graceful request can't be delivered or the
-    // worker doesn't exit within a few seconds.
-    if control::send_stop(&cfg.id).await.is_ok() {
-        for _ in 0..25 {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            if !status::pid_is_alive(worker_pid) {
-                pid::remove(&cfg.id);
-                println!("✅ Unmounted '{}'.", cfg.display_name);
-                return Ok(());
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    let _ = std::process::Command::new("taskkill").args(["/PID", &worker_pid.to_string(), "/F"]).output();
-    #[cfg(not(windows))]
-    let _ = std::process::Command::new("kill").arg(worker_pid.to_string()).output();
-
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    pid::remove(&cfg.id);
-    println!("✅ Unmounted '{}' (forced).", cfg.display_name);
     Ok(())
 }
 
