@@ -67,6 +67,11 @@ impl ModuleMeta for LockScreenModule {
     fn title(&self) -> &'static str {
         ModuleId::LOCK_SCREEN.title()
     }
+    fn encrypt_by_default(&self) -> bool {
+        // Must never gate on vault unlock itself — that would make the
+        // vault unreachable to unlock.
+        false
+    }
 }
 
 #[async_trait]

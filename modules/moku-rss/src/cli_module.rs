@@ -27,6 +27,9 @@ impl ModuleMeta for RssCliModule {
     fn title(&self) -> &'static str {
         ModuleId::RSS.title()
     }
+    fn encrypt_by_default(&self) -> bool {
+        false // see RssTuiModule::encrypt_by_default
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -80,14 +83,14 @@ impl CliModule for RssCliModule {
                     return Ok(());
                 }
                 feeds.push(FeedSubscription { url: url.clone(), title: None, favorite: false });
-                RssEngine::save_feeds(storage, &feeds).await?;
+                RssEngine::save_feeds(storage, &ctx.config, &feeds).await?;
                 println!("✅ Added: {url}");
             }
             RssCmd::Remove { url } => {
                 let mut feeds = RssEngine::load_feeds(storage).await;
                 let before = feeds.len();
                 feeds.retain(|f| f.url != url);
-                RssEngine::save_feeds(storage, &feeds).await?;
+                RssEngine::save_feeds(storage, &ctx.config, &feeds).await?;
                 if feeds.len() < before {
                     println!("🧹 Removed: {url}");
                 } else {

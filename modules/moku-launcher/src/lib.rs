@@ -89,6 +89,9 @@ impl ModuleMeta for LauncherModule {
     fn title(&self) -> &'static str {
         ModuleId::LAUNCHER.title()
     }
+    fn encrypt_by_default(&self) -> bool {
+        false // pure navigation menu, owns no storage
+    }
 }
 
 #[async_trait]

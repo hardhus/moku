@@ -20,17 +20,19 @@ impl BookmarkEngine {
         }
     }
 
-    /// Atomically encrypts and saves the bookmark list to disk.
+    /// Atomically saves the bookmark list to disk (encrypted unless
+    /// overridden — see moku_core::resolve_encryption).
     pub async fn save_all(ctx: &AppContext, items: &[Bookmark]) -> Result<()> {
+        let encrypt = moku_core::resolve_encryption(&ctx.config.load(), ModuleId::BOOKMARK.as_str(), true);
         ctx.storage
             .save(
                 ModuleId::BOOKMARK.as_str(),
                 "bookmarks_encrypted",
                 &items.to_vec(),
-                true,
+                encrypt,
             )
             .await
-            .context("Failed to encrypt or write bookmark data to storage.")
+            .context("Failed to write bookmark data to storage.")
     }
 
     /// Creates a new bookmark instance.

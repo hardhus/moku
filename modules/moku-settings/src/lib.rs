@@ -60,6 +60,9 @@ impl ModuleMeta for SettingsModule {
     fn title(&self) -> &'static str {
         ModuleId::SETTINGS.title()
     }
+    fn encrypt_by_default(&self) -> bool {
+        false // edits config.toml, not vault-encrypted storage
+    }
 }
 
 #[async_trait]

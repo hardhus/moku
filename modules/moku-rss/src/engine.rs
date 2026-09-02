@@ -30,21 +30,34 @@ impl RssEngine {
         storage.load(STORAGE_NS, FEEDS_KEY).await.unwrap_or_default()
     }
 
-    pub async fn save_feeds(storage: &moku_core::StorageManager, feeds: &[FeedSubscription]) -> Result<()> {
-        storage.save(STORAGE_NS, FEEDS_KEY, &feeds.to_vec(), false).await
+    pub async fn save_feeds(
+        storage: &moku_core::StorageManager,
+        config: &moku_core::MokuConfig,
+        feeds: &[FeedSubscription],
+    ) -> Result<()> {
+        let encrypt = moku_core::resolve_encryption(config, STORAGE_NS, false);
+        storage.save(STORAGE_NS, FEEDS_KEY, &feeds.to_vec(), encrypt).await
     }
 
     pub async fn load_items(storage: &moku_core::StorageManager) -> Vec<FeedItem> {
         storage.load(STORAGE_NS, ITEMS_KEY).await.unwrap_or_default()
     }
 
-    async fn save_items(storage: &moku_core::StorageManager, items: &[FeedItem]) -> Result<()> {
-        storage.save(STORAGE_NS, ITEMS_KEY, &items.to_vec(), false).await
+    async fn save_items(
+        storage: &moku_core::StorageManager,
+        config: &moku_core::MokuConfig,
+        items: &[FeedItem],
+    ) -> Result<()> {
+        let encrypt = moku_core::resolve_encryption(config, STORAGE_NS, false);
+        storage.save(STORAGE_NS, ITEMS_KEY, &items.to_vec(), encrypt).await
     }
 
     /// Fetches all subscribed feeds, appends new items to the persistent list,
     /// and returns items for which notifications should be sent (previously unseen and from favorite feeds).
-    pub async fn fetch_all(storage: &moku_core::StorageManager) -> Result<Vec<FeedItem>> {
+    pub async fn fetch_all(
+        storage: &moku_core::StorageManager,
+        config: &moku_core::MokuConfig,
+    ) -> Result<Vec<FeedItem>> {
         let feeds = Self::load_feeds(storage).await;
         let mut items = Self::load_items(storage).await;
         let known_ids: std::collections::HashSet<String> =
@@ -89,7 +102,7 @@ impl RssEngine {
         let save_result = if !newly_found_all.is_empty() {
             items.sort_by(|a, b| b.published_at.cmp(&a.published_at));
             items.truncate(MAX_ITEMS);
-            Self::save_items(storage, &items).await
+            Self::save_items(storage, config, &items).await
         } else {
             Ok(())
         };

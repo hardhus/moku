@@ -130,14 +130,21 @@ async fn enter_module(
     ctx: &mut AppContext,
     target: ModuleId,
 ) -> anyhow::Result<AppState> {
-    let needs_vault = ctx
-        .config
-        .load()
-        .modules
-        .get(target.as_str())
-        .and_then(|v| v.get("encrypt"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // The module's own opinion on whether it owns encrypted storage at all
+    // (Launcher/Dashboard/Settings/etc. always say no — they don't call
+    // StorageManager::save, so gating their entry on vault unlock would be
+    // wrong regardless of config). Falls back to `true` if the module
+    // isn't registered (shouldn't normally happen), matching ModuleMeta's
+    // own default.
+    let module_default_encrypt = registry
+        .get_mut(target)
+        .map(|m| m.encrypt_by_default())
+        .unwrap_or(true);
+    let needs_vault = moku_core::resolve_encryption(
+        &ctx.config.load(),
+        target.as_str(),
+        module_default_encrypt,
+    );
 
     if needs_vault && !ctx.session.is_unlocked() {
         if let Some(m) = registry.get_mut(ModuleId::LOCK_SCREEN) {

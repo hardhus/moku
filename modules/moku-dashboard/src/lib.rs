@@ -71,6 +71,10 @@ impl ModuleMeta for DashboardModule {
     fn title(&self) -> &'static str {
         ModuleId::DASHBOARD.title()
     }
+
+    fn encrypt_by_default(&self) -> bool {
+        false // read-only system stats, owns no storage
+    }
 }
 
 #[async_trait]

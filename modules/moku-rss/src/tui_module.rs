@@ -135,6 +135,15 @@ impl ModuleMeta for RssTuiModule {
     fn title(&self) -> &'static str {
         ModuleId::RSS.title()
     }
+    fn encrypt_by_default(&self) -> bool {
+        // The daemon also writes RSS storage unattended (headless, vault
+        // never unlocked) — RSS storage is never encrypted by default,
+        // matching modules/moku-rss/src/engine.rs's own resolve_encryption
+        // call. Kept in sync across all three RSS ModuleMeta impls
+        // (TUI/CLI/daemon task) for consistency, even though only this
+        // TUI one is actually consulted by the vault-unlock entry gate.
+        false
+    }
 }
 
 #[async_trait]
@@ -262,10 +271,11 @@ impl TuiModule for RssTuiModule {
                                     *is_refreshing = true;
                                     *status_message = Some(("Refreshing feeds...".to_string(), Instant::now()));
                                     let storage = Arc::clone(&ctx.storage);
+                                    let config = Arc::clone(&ctx.config);
                                     let result_slot = Arc::clone(refresh_result);
 
                                     tokio::spawn(async move {
-                                        let res = RssEngine::fetch_all(&storage).await;
+                                        let res = RssEngine::fetch_all(&storage, &config.load()).await;
                                         if let Err(e) = res {
                                             let mut slot = result_slot.lock().unwrap();
                                             *slot = Some(Err(e.to_string()));
@@ -287,7 +297,7 @@ impl TuiModule for RssTuiModule {
                                     if let Some(i) = feed_state.selected() {
                                         if i > 0 && i - 1 < feeds.len() {
                                             feeds[i - 1].favorite = !feeds[i - 1].favorite;
-                                            if let Err(e) = RssEngine::save_feeds(&ctx.storage, feeds).await {
+                                            if let Err(e) = RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await {
                                                 *status_message = Some((format!("Save error: {}", e), Instant::now()));
                                             } else {
                                                 let msg = if feeds[i - 1].favorite { "Added to favorites ★" } else { "Removed from favorites" };
@@ -303,7 +313,7 @@ impl TuiModule for RssTuiModule {
                                     if let Some(i) = feed_state.selected() {
                                         if i > 0 && i - 1 < feeds.len() {
                                             let removed = feeds.remove(i - 1);
-                                            if let Err(e) = RssEngine::save_feeds(&ctx.storage, feeds).await {
+                                            if let Err(e) = RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await {
                                                 *status_message = Some((format!("Delete error: {}", e), Instant::now()));
                                             } else {
                                                 *status_message = Some((format!("Removed: {}", removed.url), Instant::now()));
@@ -420,7 +430,7 @@ impl TuiModule for RssTuiModule {
                                 if !url.is_empty() {
                                     if !feeds.iter().any(|f| f.url == url) {
                                         feeds.push(FeedSubscription { url, title: None, favorite: false });
-                                        if let Err(e) = RssEngine::save_feeds(&ctx.storage, feeds).await {
+                                        if let Err(e) = RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await {
                                             *status_message = Some((format!("Save failed: {}", e), Instant::now()));
                                         } else {
                                             *status_message = Some(("Feed added successfully.".to_string(), Instant::now()));

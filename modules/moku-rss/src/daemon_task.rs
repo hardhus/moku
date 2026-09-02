@@ -29,6 +29,9 @@ impl ModuleMeta for RssDaemonTask {
     fn title(&self) -> &'static str {
         ModuleId::RSS.title()
     }
+    fn encrypt_by_default(&self) -> bool {
+        false // see RssTuiModule::encrypt_by_default
+    }
 }
 
 #[async_trait]
@@ -38,7 +41,7 @@ impl DaemonTask for RssDaemonTask {
     }
 
     async fn tick(&mut self, ctx: &DaemonContext) -> Result<usize> {
-        let new_items = RssEngine::fetch_all(&ctx.storage).await?;
+        let new_items = RssEngine::fetch_all(&ctx.storage, &ctx.config.load()).await?;
 
         for item in &new_items {
             moku_notify::send(NotificationRequest {

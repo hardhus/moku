@@ -43,9 +43,10 @@ impl TodoModule {
     }
 
     async fn save(&self, ctx: &mut AppContext) {
+        let encrypt = moku_core::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true);
         if let Err(e) = ctx
             .storage
-            .save(ModuleId::TODO.as_str(), "items", &self.items, true)
+            .save(ModuleId::TODO.as_str(), "items", &self.items, encrypt)
             .await
         {
             ctx.show_error(format!("Save error: {}", e));
