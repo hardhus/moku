@@ -9,6 +9,11 @@ pub enum NotificationAction {
     OpenUrl(String),
 }
 
+// Sadece xdg.rs (Linux/BSD backend) çağırıyor; Windows/macOS derlemesinde
+// gerçekten kullanılmıyor (leftover değil — platform-özel çağıran o
+// derlemelere hiç girmiyor). Uyarı sadece bu iki platformda susturuluyor,
+// Linux'ta gerçek bir dead-code oluşursa yine yakalanır.
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 pub(crate) fn execute(action: &NotificationAction) {
     match action {
         NotificationAction::OpenUrl(url) => {
