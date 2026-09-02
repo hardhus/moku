@@ -86,12 +86,21 @@ impl RssEngine {
             }
         }
 
-        if !newly_found_all.is_empty() {
+        let save_result = if !newly_found_all.is_empty() {
             items.sort_by(|a, b| b.published_at.cmp(&a.published_at));
             items.truncate(MAX_ITEMS);
-            Self::save_items(storage, &items).await?;
-        }
+            Self::save_items(storage, &items).await
+        } else {
+            Ok(())
+        };
 
+        // sled only allows one process to hold a module's DB open at a time.
+        // The daemon doesn't need continuous access between ticks, so it
+        // releases the lock here (even on error) — otherwise the RSS TUI
+        // can never open this DB (to add/edit feeds) while the daemon runs.
+        let _ = storage.close_db(STORAGE_NS);
+
+        save_result?;
         Ok(newly_found_favorite)
     }
 }

@@ -65,6 +65,22 @@ impl StorageManager {
         Ok(db)
     }
 
+    /// Drops the cached handle for `module_id`, releasing sled's exclusive
+    /// process-level file lock on that module's DB. sled only allows one
+    /// process to hold a given DB open at a time, so a long-lived process
+    /// (the daemon) that doesn't need continuous access to a module should
+    /// call this after each use — otherwise any other process (e.g. a TUI)
+    /// trying to open the same module's DB fails with "Failed to open sled
+    /// DB" for as long as the first process keeps it cached.
+    pub fn close_db(&self, module_id: &str) -> Result<()> {
+        let mut cache = self
+            .db_cache
+            .write()
+            .map_err(|_| anyhow!("RWLock Write Error"))?;
+        cache.remove(module_id);
+        Ok(())
+    }
+
     pub async fn save<T: Serialize + Send + Sync + 'static>(
         &self,
         module_id: &str,
