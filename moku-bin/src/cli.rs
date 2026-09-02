@@ -84,6 +84,23 @@ pub enum VaultCommands {
         #[arg(long)]
         size: String,
     },
+    /// Mount a volume as a real drive/folder. Prompts for its password.
+    Mount {
+        name: String,
+        /// Drive letter ("X:") or an empty NTFS folder path.
+        #[arg(long)]
+        mountpoint: String,
+    },
+    /// Unmount a volume.
+    Unmount { name: String },
+    /// Internal: runs the actual mount in a dedicated child process,
+    /// spawned by `Mount`. Reads the password from stdin. Not for direct use.
+    #[command(hide = true)]
+    MountWorker {
+        name: String,
+        #[arg(long)]
+        mountpoint: String,
+    },
 }
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]

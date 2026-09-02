@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 moku-core.workspace = true
 moku-vault-fs = { path = "../moku-vault-fs" }
+moku-vault-mount = { path = "../moku-vault-mount" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

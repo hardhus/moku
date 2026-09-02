@@ -109,13 +109,19 @@ impl VolumeEngine {
             return Err(VaultFsError::NotADirectory);
         }
         let entries = self.pathmap.read_dir_plain(&self.name_key, &backing).map_err(VaultFsError::from)?;
-        Ok(entries
+        let mut entries: Vec<DirEntry> = entries
             .into_iter()
             .map(|(name, _p, is_dir)| DirEntry {
                 name,
                 kind: if is_dir { FileKind::Directory } else { FileKind::File },
             })
-            .collect())
+            .collect();
+        // Sorted, stable order — OS mount shims paginate directory
+        // listings by comparing names against a marker (plan §2), which
+        // only produces a well-defined, non-overlapping sequence of pages
+        // if the underlying order is fixed across calls.
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
     }
 
     pub fn mkdir(&self, parent: &VirtualPath, name: &str) -> VResult<Attr> {
@@ -319,6 +325,17 @@ mod tests {
         let n = eng.read(fh2, 0, &mut buf).unwrap();
         assert_eq!(n, 11);
         assert_eq!(&buf, b"hello vault");
+    }
+
+    #[test]
+    fn test_read_dir_is_sorted_by_name() {
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        for name in ["zeta.md", "alpha.md", "mu.md"] {
+            eng.create(&VirtualPath::root(), name).unwrap();
+        }
+        let names: Vec<String> = eng.read_dir(&VirtualPath::root()).unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["alpha.md", "mu.md", "zeta.md"]);
     }
 
     #[test]

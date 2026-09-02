@@ -47,3 +47,8 @@ moku-vault-daemon = { path = "../moku-vault-daemon" }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winfsp = { version = "0.13", features = ["delayload"] }
+
+[build-dependencies]

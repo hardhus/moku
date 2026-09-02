@@ -1,0 +1,29 @@
+[package]
+name = "moku-vault-mount"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moku-vault-fs = { path = "../moku-vault-fs" }
+anyhow.workspace = true
+
+# WinFsp shim — only compiled (and only depended on) when targeting
+# Windows. The FUSE/Unix shim lands in a later pass (see plan §2/§3); this
+# crate is Windows-first because that's what's actually installable and
+# testable in this environment (WinFsp SDK confirmed present).
+[target.'cfg(windows)'.dependencies]
+winfsp = { version = "0.13", features = ["system", "windows-62"] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winfsp = { version = "0.13", features = ["delayload"] }
+
+[build-dependencies]
+
+[dev-dependencies]
+moku-core.workspace = true
+tokio.workspace = true
+tempfile.workspace = true

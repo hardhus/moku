@@ -1,6 +1,8 @@
+use std::io::Write;
+
 use anyhow::{Result, anyhow, bail};
 
-use moku_vault_daemon::{PasswordMode, registry, size, status};
+use moku_vault_daemon::{PasswordMode, pid, registry, size, status, worker};
 
 use crate::cli::VaultCommands;
 
@@ -60,7 +62,74 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
             );
             Ok(())
         }
+        VaultCommands::Mount { name, mountpoint } => mount(name, mountpoint).await,
+        VaultCommands::Unmount { name } => unmount(name).await,
+        VaultCommands::MountWorker { name, mountpoint } => worker::run(name, mountpoint).await,
     }
+}
+
+async fn mount(name: &str, mountpoint: &str) -> Result<()> {
+    let cfg = registry::find_volume(name).await?;
+    if status::is_mounted(&cfg.id) {
+        println!("'{}' is already mounted.", cfg.display_name);
+        return Ok(());
+    }
+
+    let prompt_label = match cfg.password_mode {
+        PasswordMode::Default => "Moku vault password: ",
+        PasswordMode::Custom => "Volume password: ",
+    };
+    let password = rpassword::prompt_password(prompt_label).map_err(|e| anyhow!("Failed to read password: {e}"))?;
+
+    let exe = std::env::current_exe().map_err(|e| anyhow!("failed to resolve current executable: {e}"))?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("vault").arg("mount-worker").arg(&cfg.id).arg("--mountpoint").arg(mountpoint);
+    cmd.stdin(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let mut child = cmd.spawn().map_err(|e| anyhow!("failed to spawn mount worker: {e}"))?;
+
+    // Password crosses the process boundary only via the child's stdin
+    // pipe — never as a CLI arg (visible in Task Manager/`ps`) or env var
+    // (visible in /proc/<pid>/environ). Dropping the handle closes the
+    // pipe (EOF), telling the worker the whole password has been sent.
+    {
+        let mut stdin = child.stdin.take().expect("stdin was requested as piped");
+        stdin.write_all(password.as_bytes()).map_err(|e| anyhow!("failed to send password to mount worker: {e}"))?;
+    }
+
+    println!("✅ Mounting '{}' at {} (worker PID: {})...", cfg.display_name, mountpoint, child.id());
+    Ok(())
+}
+
+async fn unmount(name: &str) -> Result<()> {
+    let cfg = registry::find_volume(name).await?;
+    let Some(worker_pid) = pid::read(&cfg.id) else {
+        println!("'{}' is not mounted.", cfg.display_name);
+        return Ok(());
+    };
+    if !status::pid_is_alive(worker_pid) {
+        println!("'{}' has a stale mount record; cleaning up.", cfg.display_name);
+        pid::remove(&cfg.id);
+        return Ok(());
+    }
+
+    // No graceful control-channel handshake yet (that's a later phase) —
+    // this is a hard kill, which on some FUSE/WinFsp versions risks
+    // leaving a stuck mount point behind. Acceptable for now; flagged in
+    // the plan as an open risk to close before this feature is finished.
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill").args(["/PID", &worker_pid.to_string(), "/F"]).output();
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("kill").arg(worker_pid.to_string()).output();
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    pid::remove(&cfg.id);
+    println!("✅ Unmounted '{}'.", cfg.display_name);
+    Ok(())
 }
 
 fn prompt_new_password(mode: PasswordMode) -> Result<String> {
