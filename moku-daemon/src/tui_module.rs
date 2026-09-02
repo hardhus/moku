@@ -1,4 +1,4 @@
-use std::time::{Instant, Duration};
+use std::time::{Instant, Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
     layout::{Rect, Layout, Constraint},
     style::{Modifier, Style},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, List, ListItem},
 };
 use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
 
@@ -95,10 +95,14 @@ impl TuiModule for DaemonStatusModule {
                             self.show_temp_message("Daemon is already running.");
                         } else {
                             if let Ok(exe) = std::env::current_exe() {
-                                let _ = std::process::Command::new(exe)
-                                    .arg("daemon")
-                                    .arg("run")
-                                    .spawn();
+                                let mut cmd = std::process::Command::new(exe);
+                                cmd.arg("daemon").arg("run");
+                                #[cfg(windows)]
+                                {
+                                    use std::os::windows::process::CommandExt;
+                                    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                                }
+                                let _ = cmd.spawn();
                                 tokio::time::sleep(Duration::from_millis(200)).await;
                                 self.refresh_status();
                                 if self.is_running {
@@ -157,6 +161,11 @@ impl TuiModule for DaemonStatusModule {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
+        // Auto-refresh every 5 seconds
+        if self.last_checked.elapsed() > Duration::from_secs(5) {
+            self.refresh_status();
+        }
+
         if let Some(msg_time) = self.message_time {
             if msg_time.elapsed() > Duration::from_secs(3) {
                 self.message = None;
@@ -165,46 +174,95 @@ impl TuiModule for DaemonStatusModule {
         }
 
         let chunks = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(3), // Title
+            Constraint::Length(5), // Daemon status panel
+            Constraint::Min(0),    // Tasks panel
+            Constraint::Length(1), // Message status line
+            Constraint::Length(3), // Help bar
         ])
         .split(area);
 
+        // 1. Title Header
         let header = Paragraph::new(" MOKU DAEMON MANAGER ")
             .style(Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD))
             .alignment(ratatui::layout::Alignment::Center)
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
         frame.render_widget(header, chunks[0]);
 
+        // 2. Status Panel
         let status_str = if self.is_running {
-            format!("🟢 RUNNING (PID: {})", self.pid.unwrap_or(0))
+            format!(" [RUNNING] (PID: {})", self.pid.unwrap_or(0))
         } else {
-            "⚫ STOPPED".to_string()
+            " [STOPPED]".to_string()
         };
-
-        let last_check_str = format!("Last Checked: {:?}", self.last_checked.elapsed());
-
+        let last_check_str = format!("Last Checked: {}s ago", self.last_checked.elapsed().as_secs());
         let info_text = format!(
-            "\n  Daemon Status:  {}\n\n  {}\n\n  The daemon runs periodic tasks in the background (like RSS feeds).\n  It runs unencrypted so it doesn't need to unlock your vault.\n",
+            "  Daemon Status: {}\n  {}\n  The daemon runs unencrypted tasks in the background.",
             status_str, last_check_str
         );
-
         let info = Paragraph::new(info_text)
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+            .block(Block::default().title(" Status ").borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
         frame.render_widget(info, chunks[1]);
 
+        // 3. Tasks Panel
+        let data_dir = moku_core::dirs::get_data_dir().ok();
+        let task_statuses = data_dir
+            .as_deref()
+            .map(|d| crate::task_status::read_statuses(d))
+            .unwrap_or_default();
+
+        let task_items: Vec<ListItem> = if task_statuses.is_empty() {
+            vec![ListItem::new("  No task data available. Is the daemon running?")]
+        } else {
+            task_statuses
+                .iter()
+                .map(|t| {
+                    let last = t.last_run_secs
+                        .map(format_relative_time)
+                        .unwrap_or_else(|| "never".to_string());
+                    let status = match &t.last_error {
+                        None => format!("OK (processed: {})", t.last_item_count),
+                        Some(e) => format!("ERR: {}", &e[..e.len().min(40)]),
+                    };
+                    ListItem::new(format!("  • [{}]  Last Run: {}  Status: {}", t.id.to_uppercase(), last, status))
+                })
+                .collect()
+        };
+
+        let tasks_list = List::new(task_items)
+            .block(Block::default().title(" Background Tasks ").borders(Borders::ALL).border_style(Style::default().fg(theme.border)))
+            .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
+        frame.render_widget(tasks_list, chunks[2]);
+
+        // 4. Message Line
         let msg_content = self.message.clone().unwrap_or_default();
         let msg_widget = Paragraph::new(format!(" {}", msg_content))
             .style(Style::default().fg(theme.selection_fg).add_modifier(Modifier::ITALIC));
-        frame.render_widget(msg_widget, chunks[2]);
+        frame.render_widget(msg_widget, chunks[3]);
 
+        // 5. Help Bar
         let help_text = " [s] Start | [k] Stop | [r] Refresh | [e] Enable Autostart | [d] Disable Autostart | [Esc] Back ";
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
-        frame.render_widget(help, chunks[3]);
+        frame.render_widget(help, chunks[4]);
+    }
+}
+
+fn format_relative_time(unix_secs: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let diff = now.saturating_sub(unix_secs);
+    if diff < 10 {
+        "just now".to_string()
+    } else if diff < 60 {
+        format!("{}s ago", diff)
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else {
+        format!("{}h ago", diff / 3600)
     }
 }

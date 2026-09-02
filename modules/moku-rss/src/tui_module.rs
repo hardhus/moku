@@ -282,6 +282,22 @@ impl TuiModule for RssTuiModule {
                                 *view = RssView::AddFeed { input: String::new() };
                                 changed = true;
                             }
+                            KeyCode::Char('f') => {
+                                if *active_panel == Panel::Feeds {
+                                    if let Some(i) = feed_state.selected() {
+                                        if i > 0 && i - 1 < feeds.len() {
+                                            feeds[i - 1].favorite = !feeds[i - 1].favorite;
+                                            if let Err(e) = RssEngine::save_feeds(&ctx.storage, feeds).await {
+                                                *status_message = Some((format!("Save error: {}", e), Instant::now()));
+                                            } else {
+                                                let msg = if feeds[i - 1].favorite { "Added to favorites ★" } else { "Removed from favorites" };
+                                                *status_message = Some((msg.to_string(), Instant::now()));
+                                            }
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
                             KeyCode::Char('d') => {
                                 if *active_panel == Panel::Feeds {
                                     if let Some(i) = feed_state.selected() {
@@ -418,7 +434,7 @@ impl TuiModule for RssTuiModule {
                                 let url = input.trim().to_string();
                                 if !url.is_empty() {
                                     if !feeds.iter().any(|f| f.url == url) {
-                                        feeds.push(FeedSubscription { url, title: None });
+                                        feeds.push(FeedSubscription { url, title: None, favorite: false });
                                         if let Err(e) = RssEngine::save_feeds(&ctx.storage, feeds).await {
                                             *status_message = Some((format!("Save failed: {}", e), Instant::now()));
                                         } else {
@@ -503,7 +519,8 @@ impl TuiModule for RssTuiModule {
                 let mut feed_items = vec![ListItem::new(" * All Feeds")];
                 for f in feeds.iter() {
                     let label = f.title.as_deref().unwrap_or(&f.url);
-                    feed_items.push(ListItem::new(format!(" • {}", label)));
+                    let star = if f.favorite { " ★" } else { "" };
+                    feed_items.push(ListItem::new(format!(" • {}{}", label, star)));
                 }
 
                 let feed_border_style = if *active_panel == Panel::Feeds {
@@ -572,7 +589,7 @@ impl TuiModule for RssTuiModule {
 
                 // Help bar
                 let help_text = if *active_panel == Panel::Feeds {
-                    " [Tab] Switch | [a] Add Feed | [d] Delete Feed | [r] Refresh | [Esc] Back "
+                    " [Tab] Switch | [a] Add Feed | [d] Delete Feed | [f] Favorite | [r] Refresh | [Esc] Back "
                 } else {
                     " [Tab] Switch | [Enter] Read | [c] Copy Link | [o] Open Browser | [r] Refresh | [Esc] Back "
                 };

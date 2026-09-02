@@ -43,6 +43,10 @@ pub enum Commands {
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
 pub enum DaemonCommands {
+    /// Start the daemon in the background (no terminal window). Returns immediately.
+    Start,
+    /// Stop the running background daemon.
+    Stop,
     /// Run the daemon worker in the foreground (used by autostart).
     Run,
     /// Show daemon status (checks PID file).
@@ -107,5 +111,17 @@ mod tests {
             portable: false,
         };
         assert_eq!(cli_daemon.target_module(), ModuleId::DAEMON);
+
+        let cli_daemon_start = Cli {
+            command: Some(Commands::Daemon { sub: Some(DaemonCommands::Start) }),
+            portable: false,
+        };
+        assert_eq!(cli_daemon_start.target_module(), ModuleId::DAEMON);
+
+        let cli_daemon_stop = Cli {
+            command: Some(Commands::Daemon { sub: Some(DaemonCommands::Stop) }),
+            portable: false,
+        };
+        assert_eq!(cli_daemon_stop.target_module(), ModuleId::DAEMON);
     }
 }

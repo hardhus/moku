@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct FeedSubscription {
     pub url: String,
     pub title: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -41,14 +43,15 @@ impl RssEngine {
     }
 
     /// Fetches all subscribed feeds, appends new items to the persistent list,
-    /// and returns items for which notifications should be sent (previously unseen).
+    /// and returns items for which notifications should be sent (previously unseen and from favorite feeds).
     pub async fn fetch_all(storage: &moku_core::StorageManager) -> Result<Vec<FeedItem>> {
         let feeds = Self::load_feeds(storage).await;
         let mut items = Self::load_items(storage).await;
         let known_ids: std::collections::HashSet<String> =
             items.iter().map(|i| i.id.clone()).collect();
 
-        let mut newly_found = Vec::new();
+        let mut newly_found_all = Vec::new();
+        let mut newly_found_favorite = Vec::new();
 
         for feed in &feeds {
             let fetched = match fetch_one(&feed.url).await {
@@ -75,18 +78,21 @@ impl RssEngine {
                     link: entry.link,
                     published_at: entry.published_at,
                 };
-                newly_found.push(item.clone());
+                if feed.favorite {
+                    newly_found_favorite.push(item.clone());
+                }
+                newly_found_all.push(item.clone());
                 items.push(item);
             }
         }
 
-        if !newly_found.is_empty() {
+        if !newly_found_all.is_empty() {
             items.sort_by(|a, b| b.published_at.cmp(&a.published_at));
             items.truncate(MAX_ITEMS);
             Self::save_items(storage, &items).await?;
         }
 
-        Ok(newly_found)
+        Ok(newly_found_favorite)
     }
 }
 

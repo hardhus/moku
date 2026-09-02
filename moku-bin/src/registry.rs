@@ -29,32 +29,54 @@ pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
 
 #[cfg(feature = "lua-plugins")]
 fn load_lua_plugins(config: &MokuConfig) -> Vec<Box<dyn TuiModule>> {
-    let Ok(plugins_dir) = moku_core::dirs::get_plugins_dir() else {
-        return Vec::new();
-    };
+    let mut loaded = Vec::new();
 
-    config
-        .plugins
-        .iter()
-        .filter_map(|entry| {
-            // Plugin id/title are read from config at runtime; since ModuleId
-            // requires a 'static str, we extend the lifetime for the program duration
-            // using Box::leak. This is a common Rust pattern done once at program start
-            // and INTENDED to remain in memory (clap and similar libraries do this too)
-            // — hot-reload is out of scope for v1.
+    if let Ok(plugins_dir) = moku_core::dirs::get_plugins_dir() {
+        for entry in &config.plugins {
             let id = ModuleId::new(Box::leak(entry.id.clone().into_boxed_str()));
             let title: &'static str = Box::leak(entry.title.clone().into_boxed_str());
             let script_path = plugins_dir.join(&entry.script);
 
             match moku_lua::LuaModule::load(id, title, &script_path) {
-                Ok(module) => Some(Box::new(module) as Box<dyn TuiModule>),
+                Ok(module) => loaded.push(Box::new(module) as Box<dyn TuiModule>),
                 Err(e) => {
                     tracing::warn!("Failed to load plugin '{}': {e}", entry.id);
-                    None
                 }
             }
-        })
-        .collect()
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(cwd) = std::env::current_dir() {
+            let examples_dir = cwd.join("plugins").join("examples");
+            if examples_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(examples_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map_or(false, |ext| ext == "lua") {
+                            let file_stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+                            if config.plugins.iter().any(|p| p.id == file_stem) {
+                                continue;
+                            }
+                            
+                            let id = ModuleId::new(Box::leak(format!("example_{}", file_stem).into_boxed_str()));
+                            let title: &'static str = Box::leak(format!("Example {}", file_stem.to_uppercase()).into_boxed_str());
+
+                            match moku_lua::LuaModule::load(id, title, &path) {
+                                Ok(module) => loaded.push(Box::new(module) as Box<dyn TuiModule>),
+                                Err(e) => {
+                                    tracing::warn!("Failed to load dev example plugin '{:?}': {e}", path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    loaded
 }
 
 pub fn build_cli_registry() -> CliRegistry {

@@ -2250,6 +2250,8 @@ dependencies = [
  "moku-core",
  "moku-rss",
  "ratatui",
+ "serde",
+ "serde_json",
  "sysinfo",
  "tokio",
  "tracing",

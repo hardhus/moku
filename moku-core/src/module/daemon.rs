@@ -10,5 +10,5 @@ use crate::module::ModuleMeta;
 #[async_trait]
 pub trait DaemonTask: ModuleMeta {
     fn interval(&self) -> Duration;
-    async fn tick(&mut self, ctx: &DaemonContext) -> Result<()>;
+    async fn tick(&mut self, ctx: &DaemonContext) -> Result<usize>;
 }

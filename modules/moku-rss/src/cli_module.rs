@@ -45,7 +45,7 @@ impl CliModule for RssCliModule {
                     println!("This feed is already added: {url}");
                     return Ok(());
                 }
-                feeds.push(FeedSubscription { url: url.clone(), title: None });
+                feeds.push(FeedSubscription { url: url.clone(), title: None, favorite: false });
                 RssEngine::save_feeds(storage, &feeds).await?;
                 println!("✅ Added: {url}");
             }
@@ -73,7 +73,24 @@ impl CliModule for RssCliModule {
                     }
                 }
             }
-            Some(other) => bail!("Unknown subcommand: {other} (add | remove | list)"),
+            Some("test-notify") => {
+                println!("Testing Windows Toast notification via notify-rust...");
+                use notify_rust::Notification;
+
+                let aumid = "Microsoft.Windows.Explorer";
+                println!("Sending test notification using app_id = {}", aumid);
+                match Notification::new()
+                    .app_id(aumid)
+                    .summary("Moku Test Notification")
+                    .body("If you see this, notifications are working successfully!")
+                    .timeout(notify_rust::Timeout::Milliseconds(5000))
+                    .show()
+                {
+                    Ok(_) => println!("✅ Notification sent successfully!"),
+                    Err(e) => println!("❌ Notification failed: {:?}", e),
+                }
+            }
+            Some(other) => bail!("Unknown subcommand: {other} (add | remove | list | test-notify)"),
         }
         Ok(())
     }

@@ -30,6 +30,33 @@ async fn main() -> Result<()> {
 
     if let Some(Commands::Daemon { sub: Some(sub_cmd) }) = &cli.command {
         match sub_cmd {
+            DaemonCommands::Start => {
+                if moku_daemon::status::is_running() {
+                    println!("Daemon is already running.");
+                    return Ok(());
+                }
+                let exe = std::env::current_exe().map_err(|e| eyre!(e))?;
+                let mut cmd = std::process::Command::new(&exe);
+                cmd.arg("daemon").arg("run");
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+                }
+                match cmd.spawn() {
+                    Ok(child) => {
+                        println!("Daemon started in background (PID: {})", child.id());
+                    }
+                    Err(e) => {
+                        return Err(eyre!("Failed to spawn daemon: {}", e));
+                    }
+                }
+                return Ok(());
+            }
+            DaemonCommands::Stop => {
+                return moku_daemon::status::stop_daemon()
+                    .map_err(|e| eyre!(e));
+            }
             DaemonCommands::Run => {
                 return moku_daemon::worker::run_worker()
                     .await
