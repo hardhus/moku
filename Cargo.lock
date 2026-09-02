@@ -2404,6 +2404,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "async-trait",
+ "clap",
  "crossterm",
  "feed-rs",
  "moku-core",

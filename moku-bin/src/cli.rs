@@ -20,7 +20,10 @@ pub struct Cli {
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
 pub enum Commands {
+    /// Open the Todo List module.
     Todo,
+    /// Scan a codebase and compile its contents into a single AI-ready context blob.
+    #[command(alias = "ctx")]
     Context {
         #[arg(default_value = ".")]
         path: String,
@@ -28,10 +31,17 @@ pub enum Commands {
         #[arg(short, long)]
         out: Option<String>,
     },
+    /// Generate a commit message from the staged diff with AI.
+    #[command(alias = "co")]
     Commit,
     /// Manage RSS subscriptions and list cached articles.
+    #[command(disable_help_flag = true)]
     Rss {
-        #[arg(trailing_var_arg = true)]
+        // disable_help_flag lets -h/--help pass through into `args` instead
+        // of being intercepted here, so RssCliModule's own clap subcommand
+        // parser (add/remove/list/test-notify) can generate real help for
+        // them instead of this catch-all showing just `[ARGS]...`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Background daemon management.
@@ -61,8 +71,8 @@ impl Cli {
     pub fn target_module(&self) -> ModuleId {
         match &self.command {
             Some(Commands::Todo) => ModuleId::TODO,
-            Some(Commands::Context { .. }) => ModuleId::new("context"),
-            Some(Commands::Commit) => ModuleId::new("commit"),
+            Some(Commands::Context { .. }) => ModuleId::CONTEXT,
+            Some(Commands::Commit) => ModuleId::COMMIT,
             Some(Commands::Rss { .. }) => ModuleId::RSS,
             Some(Commands::Daemon { .. }) => ModuleId::DAEMON,
             None => ModuleId::LAUNCHER,
@@ -89,7 +99,7 @@ mod tests {
             command: Some(Commands::Commit),
             portable: false,
         };
-        assert_eq!(cli_commit.target_module(), ModuleId::new("commit"));
+        assert_eq!(cli_commit.target_module(), ModuleId::COMMIT);
 
         let cli_context = Cli {
             command: Some(Commands::Context {
@@ -98,7 +108,7 @@ mod tests {
             }),
             portable: false,
         };
-        assert_eq!(cli_context.target_module(), ModuleId::new("context"));
+        assert_eq!(cli_context.target_module(), ModuleId::CONTEXT);
 
         let cli_rss = Cli {
             command: Some(Commands::Rss { args: vec![] }),
@@ -123,5 +133,17 @@ mod tests {
             portable: false,
         };
         assert_eq!(cli_daemon_stop.target_module(), ModuleId::DAEMON);
+    }
+
+    #[test]
+    fn test_context_alias_ctx() {
+        let cli = Cli::try_parse_from(["moku", "ctx", "."]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Context { .. })));
+    }
+
+    #[test]
+    fn test_commit_alias_co() {
+        let cli = Cli::try_parse_from(["moku", "co"]).unwrap();
+        assert_eq!(cli.command, Some(Commands::Commit));
     }
 }

@@ -11,6 +11,7 @@ tui = ["dep:ratatui", "dep:crossterm", "dep:arboard"]
 moku-core.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+clap.workspace = true
 serde.workspace = true
 reqwest.workspace = true
 feed-rs.workspace = true

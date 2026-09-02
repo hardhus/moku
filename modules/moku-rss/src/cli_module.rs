@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
+use clap::{Parser, Subcommand};
 
 use moku_core::{CliContext, CliModule, ModuleId, ModuleMeta};
 
@@ -28,6 +29,27 @@ impl ModuleMeta for RssCliModule {
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(name = "rss", no_binary_name = true)]
+struct RssArgs {
+    #[command(subcommand)]
+    cmd: Option<RssCmd>,
+}
+
+#[derive(Subcommand, Debug)]
+enum RssCmd {
+    /// Subscribe to a new feed URL.
+    Add { url: String },
+    /// Unsubscribe from a feed URL.
+    #[command(alias = "rm")]
+    Remove { url: String },
+    /// List subscribed feeds (default when no subcommand is given).
+    #[command(alias = "ls")]
+    List,
+    /// Send a branded test notification.
+    TestNotify,
+}
+
 #[async_trait]
 impl CliModule for RssCliModule {
     async fn run(&self, args: &[String], ctx: &CliContext) -> Result<()> {
@@ -35,13 +57,25 @@ impl CliModule for RssCliModule {
             bail!("RSS commands require storage access (internal error: CliContext.storage is empty).");
         };
 
-        match args.first().map(String::as_str) {
-            Some("add") => {
-                let Some(url) = args.get(1) else {
-                    bail!("Usage: moku rss add <url>");
-                };
+        let parsed = match RssArgs::try_parse_from(args) {
+            Ok(p) => p,
+            Err(e) if e.exit_code() == 0 => {
+                // --help / --version: print clap's own formatted output and succeed.
+                print!("{e}");
+                return Ok(());
+            }
+            Err(e) => {
+                // Real parse error: fold into the same error-reporting path
+                // as everything else in the app (clap's message already
+                // includes usage info) instead of printing twice.
+                bail!("{e}");
+            }
+        };
+
+        match parsed.cmd.unwrap_or(RssCmd::List) {
+            RssCmd::Add { url } => {
                 let mut feeds = RssEngine::load_feeds(storage).await;
-                if feeds.iter().any(|f| &f.url == url) {
+                if feeds.iter().any(|f| f.url == url) {
                     println!("This feed is already added: {url}");
                     return Ok(());
                 }
@@ -49,13 +83,10 @@ impl CliModule for RssCliModule {
                 RssEngine::save_feeds(storage, &feeds).await?;
                 println!("✅ Added: {url}");
             }
-            Some("remove") => {
-                let Some(url) = args.get(1) else {
-                    bail!("Usage: moku rss remove <url>");
-                };
+            RssCmd::Remove { url } => {
                 let mut feeds = RssEngine::load_feeds(storage).await;
                 let before = feeds.len();
-                feeds.retain(|f| &f.url != url);
+                feeds.retain(|f| f.url != url);
                 RssEngine::save_feeds(storage, &feeds).await?;
                 if feeds.len() < before {
                     println!("🧹 Removed: {url}");
@@ -63,7 +94,7 @@ impl CliModule for RssCliModule {
                     println!("Feed not found: {url}");
                 }
             }
-            Some("list") | None => {
+            RssCmd::List => {
                 let feeds = RssEngine::load_feeds(storage).await;
                 if feeds.is_empty() {
                     println!("No subscribed feeds yet. To add: moku rss add <url>");
@@ -73,7 +104,7 @@ impl CliModule for RssCliModule {
                     }
                 }
             }
-            Some("test-notify") => {
+            RssCmd::TestNotify => {
                 println!("Moku markalı test bildirimi gönderiliyor...");
                 moku_notify::send(moku_notify::NotificationRequest {
                     title: "Moku Test Bildirimi".to_string(),
@@ -84,8 +115,65 @@ impl CliModule for RssCliModule {
                 });
                 println!("✅ Gönderildi (hata varsa log dosyasında görünür).");
             }
-            Some(other) => bail!("Unknown subcommand: {other} (add | remove | list | test-notify)"),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> std::result::Result<RssArgs, clap::Error> {
+        RssArgs::try_parse_from(args)
+    }
+
+    #[test]
+    fn test_no_args_defaults_to_list() {
+        let parsed = parse(&[]).unwrap();
+        assert!(matches!(parsed.cmd, None));
+    }
+
+    #[test]
+    fn test_add_parses_url() {
+        let parsed = parse(&["add", "https://example.com/feed.xml"]).unwrap();
+        match parsed.cmd {
+            Some(RssCmd::Add { url }) => assert_eq!(url, "https://example.com/feed.xml"),
+            _ => panic!("expected Add"),
+        }
+    }
+
+    #[test]
+    fn test_remove_alias_rm() {
+        let parsed = parse(&["rm", "https://example.com/feed.xml"]).unwrap();
+        assert!(matches!(parsed.cmd, Some(RssCmd::Remove { .. })));
+    }
+
+    #[test]
+    fn test_list_alias_ls() {
+        let parsed = parse(&["ls"]).unwrap();
+        assert!(matches!(parsed.cmd, Some(RssCmd::List)));
+    }
+
+    #[test]
+    fn test_test_notify_parses() {
+        let parsed = parse(&["test-notify"]).unwrap();
+        assert!(matches!(parsed.cmd, Some(RssCmd::TestNotify)));
+    }
+
+    #[test]
+    fn test_unknown_subcommand_is_error() {
+        assert!(parse(&["bogus"]).is_err());
+    }
+
+    #[test]
+    fn test_add_missing_url_is_error() {
+        assert!(parse(&["add"]).is_err());
+    }
+
+    #[test]
+    fn test_help_exits_zero() {
+        let err = parse(&["--help"]).unwrap_err();
+        assert_eq!(err.exit_code(), 0);
     }
 }

@@ -15,6 +15,8 @@ impl ModuleId {
     pub const LOCK_SCREEN: Self = Self("lock_screen");
     pub const RSS: Self = Self("rss");
     pub const DAEMON: Self = Self("daemon");
+    pub const CONTEXT: Self = Self("context");
+    pub const COMMIT: Self = Self("commit");
 
     pub const fn new(id: &'static str) -> Self {
         Self(id)
@@ -74,5 +76,15 @@ mod tests {
         assert!(ModuleId::all_visible().contains(&ModuleId::TODO));
         assert!(ModuleId::all_visible().contains(&ModuleId::RSS));
         assert!(ModuleId::all_visible().contains(&ModuleId::DAEMON));
+    }
+
+    #[test]
+    fn test_cli_only_module_ids_not_in_launcher() {
+        // context/commit are CLI-only and deliberately hidden from the
+        // TUI launcher menu.
+        assert_eq!(ModuleId::CONTEXT.as_str(), "context");
+        assert_eq!(ModuleId::COMMIT.as_str(), "commit");
+        assert!(!ModuleId::all_visible().contains(&ModuleId::CONTEXT));
+        assert!(!ModuleId::all_visible().contains(&ModuleId::COMMIT));
     }
 }

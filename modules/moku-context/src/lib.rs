@@ -27,7 +27,7 @@ impl Default for ContextModule {
 
 impl ModuleMeta for ContextModule {
     fn id(&self) -> ModuleId {
-        ModuleId::new("context")
+        ModuleId::CONTEXT
     }
 
     fn title(&self) -> &'static str {

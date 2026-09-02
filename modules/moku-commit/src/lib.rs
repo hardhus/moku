@@ -25,7 +25,7 @@ impl Default for CommitModule {
 
 impl ModuleMeta for CommitModule {
     fn id(&self) -> ModuleId {
-        ModuleId::new("commit")
+        ModuleId::COMMIT
     }
 
     fn title(&self) -> &'static str {
