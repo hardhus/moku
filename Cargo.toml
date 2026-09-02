@@ -1,5 +1,5 @@
 [workspace]
-members = ["moku-bin", "moku-core", "moku-daemon", "moku-lua", "moku-notify", "xtask", "modules/*"]
+members = ["moku-bin", "moku-core", "moku-daemon", "moku-lua", "moku-notify", "moku-vault-fs", "xtask", "modules/*"]
 
 resolver = "2"
 

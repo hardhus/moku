@@ -1,0 +1,25 @@
+[package]
+name = "moku-vault-fs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moku-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+secrecy.workspace = true
+zeroize.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+
+# Deterministic filename encryption (RFC 5297) — scoped here only, not
+# promoted to workspace.dependencies, since nothing else in the workspace
+# needs it (same pattern as winreg/windows for moku-notify).
+aes-siv = "0.7"
+hkdf = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile.workspace = true
