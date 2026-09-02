@@ -1,33 +1,38 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
 
 use moku_core::MokuTheme;
 
+use crate::model::{MODE_DOMAIN_FILTER_PREFIX, MODE_INPUT, MODE_SEARCH};
+
 /// Renders the status bar at the bottom based on the current application state.
 pub fn draw_status_bar(frame: &mut Frame, area: Rect, theme: &MokuTheme, mode_name: &str) {
     // Select colors and help text based on the current mode
-    let (mode_bg, help_text) = match mode_name {
-        "SEARCH" => (
+    let (mode_bg, help_text) = if mode_name == MODE_SEARCH {
+        (
             theme.warning,
-            " [/] Type | [ENTER] Apply Filter | [ESC] Exit Search ",
-        ),
-        "INPUT" => (
+            " [/] Type | [Enter] Apply Filter | [Esc] Exit Search ",
+        )
+    } else if mode_name == MODE_INPUT {
+        (
             theme.info,
-            " [ENTER] Save | [ESC] Cancel | URL format is required ",
-        ),
-        mode if mode.starts_with("DOMAIN_FILTER") => (
-            Color::Magenta,
-            " [r] Reset Filter | [ESC] Normal Mode | [c] Copy ",
-        ),
-        _ => (
+            " [Enter] Save | [Esc] Cancel | URL format is required ",
+        )
+    } else if mode_name.starts_with(MODE_DOMAIN_FILTER_PREFIX) {
+        (
+            theme.warning,
+            " [r] Reset Filter | [Esc] Normal Mode | [c] Copy ",
+        )
+    } else {
+        (
             theme.selection_bg,
             " [j/k] Navigate | [/] Search | [a] Add | [p] Paste | [c] Copy | [e/i] Exp/Imp | [x] Clear | [f] Domain ",
-        ),
+        )
     };
 
     // Construct the status bar using styled spans

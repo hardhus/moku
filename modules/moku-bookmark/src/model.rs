@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+/// Shared mode-label strings. `lib.rs` builds the mode-name string shown
+/// in the status bar/input title from these; `ui/status.rs` and
+/// `ui/input.rs` match against the same constants, so the two can never
+/// drift out of sync (as `"INPUT"` vs. `"ADD URL"` previously did).
+pub const MODE_NORMAL: &str = "Normal";
+pub const MODE_SEARCH: &str = "Search";
+pub const MODE_INPUT: &str = "Add Bookmark";
+pub const MODE_DOMAIN_FILTER_PREFIX: &str = "Domain Filter";
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Bookmark {
     pub url: String,

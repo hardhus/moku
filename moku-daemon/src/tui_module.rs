@@ -180,7 +180,7 @@ impl TuiModule for DaemonStatusModule {
         .split(area);
 
         // 1. Title Header
-        let header = Paragraph::new(" MOKU DAEMON MANAGER ")
+        let header = Paragraph::new(" Daemon Manager ")
             .style(Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD))
             .alignment(ratatui::layout::Alignment::Center)
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
@@ -188,9 +188,9 @@ impl TuiModule for DaemonStatusModule {
 
         // 2. Status Panel
         let status_str = if self.is_running {
-            format!(" [RUNNING] (PID: {})", self.pid.unwrap_or(0))
+            format!(" [Running] (PID: {})", self.pid.unwrap_or(0))
         } else {
-            " [STOPPED]".to_string()
+            " [Stopped]".to_string()
         };
         let last_check_str = format!("Last Checked: {}s ago", self.last_checked.elapsed().as_secs());
         let info_text = format!(
@@ -222,7 +222,7 @@ impl TuiModule for DaemonStatusModule {
                         None => format!("OK (processed: {})", t.last_item_count),
                         Some(e) => format!("ERR: {}", &e[..e.len().min(40)]),
                     };
-                    ListItem::new(format!("  • [{}]  Last Run: {}  Status: {}", t.id.to_uppercase(), last, status))
+                    ListItem::new(format!("  • [{}]  Last Run: {}  Status: {}", title_case(&t.id), last, status))
                 })
                 .collect()
         };
@@ -261,5 +261,27 @@ fn format_relative_time(unix_secs: u64) -> String {
         format!("{}m ago", diff / 60)
     } else {
         format!("{}h ago", diff / 3600)
+    }
+}
+
+/// Capitalizes the first character of an id string for display (e.g.
+/// "rss" -> "Rss"), matching this app's Title Case badge convention.
+fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_title_case() {
+        assert_eq!(title_case("rss"), "Rss");
+        assert_eq!(title_case(""), "");
+        assert_eq!(title_case("a"), "A");
     }
 }

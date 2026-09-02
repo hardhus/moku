@@ -15,7 +15,7 @@ use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule,
 use crate::engine::BookmarkEngine;
 use crate::filter::BookmarkFilter;
 use crate::io::BookmarkIO;
-use crate::model::Bookmark;
+use crate::model::{Bookmark, MODE_DOMAIN_FILTER_PREFIX, MODE_INPUT, MODE_NORMAL, MODE_SEARCH};
 use crate::ui::BookmarkUi;
 
 #[derive(PartialEq)]
@@ -379,10 +379,10 @@ impl TuiModule for BookmarkModule {
         };
 
         let mode_name = match &self.mode {
-            AppMode::Input => "INPUT".to_string(),
-            AppMode::Search => "SEARCH".to_string(),
-            AppMode::DomainFilter(d) => format!("DOMAIN_FILTER: {}", d),
-            AppMode::Normal => "NORMAL".to_string(),
+            AppMode::Input => MODE_INPUT.to_string(),
+            AppMode::Search => MODE_SEARCH.to_string(),
+            AppMode::DomainFilter(d) => format!("{}: {}", MODE_DOMAIN_FILTER_PREFIX, d),
+            AppMode::Normal => MODE_NORMAL.to_string(),
         };
 
         BookmarkUi::draw(

@@ -88,12 +88,17 @@ impl Default for MokuConfig {
         let mut themes = HashMap::new();
         themes.insert("system".to_string(), ThemeColors::default());
 
-        // Keep these theme definitions in code as a safety net
+        // Keep these theme definitions in code as a safety net.
+        // base_bg is intentionally left at ThemeColors::default()'s "Reset"
+        // — no built-in theme forces an opaque background over a
+        // transparent terminal; the "hacker" look comes entirely from
+        // base_fg/success. Users who want an opaque theme can still set
+        // base_bg explicitly in their own [themes.custom] table.
         themes.insert(
             "hacker".to_string(),
             ThemeColors {
                 base_fg: "Green".to_string(),
-                base_bg: "Black".to_string(),
+                success: "Green".to_string(),
                 ..ThemeColors::default()
             },
         );

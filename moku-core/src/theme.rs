@@ -11,9 +11,11 @@ pub struct MokuTheme {
     pub info: Color,
     pub warning: Color,
     pub error: Color,
+    pub success: Color,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct ThemeColors {
     pub base_fg: String,
     pub base_bg: String,
@@ -23,6 +25,7 @@ pub struct ThemeColors {
     pub info: String,
     pub warning: String,
     pub error: String,
+    pub success: String,
 }
 
 impl MokuTheme {
@@ -36,6 +39,7 @@ impl MokuTheme {
             info: parse_color(&colors.info),
             warning: parse_color(&colors.warning),
             error: parse_color(&colors.error),
+            success: parse_color(&colors.success),
         }
     }
 }
@@ -57,6 +61,7 @@ impl Default for ThemeColors {
             info: "Blue".to_string(),
             warning: "Yellow".to_string(),
             error: "Red".to_string(),
+            success: "Green".to_string(),
         }
     }
 }

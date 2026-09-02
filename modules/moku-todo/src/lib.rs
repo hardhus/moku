@@ -6,7 +6,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
@@ -244,7 +244,7 @@ impl TuiModule for TodoModule {
             .iter()
             .map(|i| {
                 let (symbol, color) = if i.completed {
-                    ("[x]", Color::Green)
+                    ("[x]", theme.success)
                 } else {
                     ("[ ]", theme.base_fg)
                 };
