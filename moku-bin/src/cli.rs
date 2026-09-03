@@ -79,6 +79,16 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run and inspect HTTP requests from a TOML collection file
+    /// (run/show/new) — usable as CI test automation.
+    #[command(disable_help_flag = true)]
+    Http {
+        // Same disable_help_flag rationale as Rss/Notes/Secrets: lets
+        // HttpCliModule's own clap subcommand parser generate real
+        // per-subcommand help.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
@@ -180,6 +190,7 @@ impl Cli {
             Some(Commands::Vault { .. }) => ModuleId::SETTINGS,
             Some(Commands::Notes { .. }) => ModuleId::NOTES,
             Some(Commands::Secrets { .. }) => ModuleId::SECRETS,
+            Some(Commands::Http { .. }) => ModuleId::HTTP,
             None => ModuleId::LAUNCHER,
         }
     }

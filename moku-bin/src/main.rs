@@ -147,6 +147,7 @@ async fn main() -> Result<()> {
             Some(Commands::Rss { args }) => args.clone(),
             Some(Commands::Notes { args }) => args.clone(),
             Some(Commands::Secrets { args }) => args.clone(),
+            Some(Commands::Http { args }) => args.clone(),
             _ => vec![],
         };
 

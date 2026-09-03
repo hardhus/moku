@@ -2435,6 +2435,7 @@ dependencies = [
  "moku-core",
  "moku-daemon",
  "moku-dashboard",
+ "moku-http",
  "moku-launcher",
  "moku-lock-screen",
  "moku-lua",
@@ -2561,6 +2562,26 @@ dependencies = [
  "ratatui",
  "serde",
  "sysinfo",
+]
+
+[[package]]
+name = "moku-http"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "crossterm",
+ "moku-core",
+ "moku-secrets",
+ "ratatui",
+ "reqwest",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

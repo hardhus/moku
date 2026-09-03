@@ -481,3 +481,6 @@ FodyWeavers.xsd
 !plugins/
 !plugins/examples/
 !plugins/examples/*.lua
+
+# Local-only backlog of future feature ideas — deliberately never committed
+/BACKLOG.local.md
