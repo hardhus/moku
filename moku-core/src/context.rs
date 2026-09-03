@@ -88,6 +88,13 @@ impl AppContext {
 pub struct CliContext {
     pub config: MokuConfig,
     pub storage: Option<Arc<StorageManager>>,
+    /// Present for CLI modules that may need to prompt for the vault
+    /// password (e.g. an `encrypt_by_default` module's first read/write in
+    /// a given invocation) — mirrors `moku-bin/src/config_cmd.rs`'s
+    /// `ensure_unlocked_if_needed` pattern, generalized so any CLI module
+    /// can do the same instead of only the `config` command.
+    pub session: Option<Arc<VaultSession>>,
+    pub security: Option<Arc<SecurityManager>>,
 }
 
 /// Context for periodic tasks in the moku-daemon.

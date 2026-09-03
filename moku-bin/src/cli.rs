@@ -69,6 +69,16 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Manage a vault-backed password/secrets store (generate/add/list/
+    /// show/totp/remove/export/import).
+    #[command(disable_help_flag = true)]
+    Secrets {
+        // Same disable_help_flag rationale as Rss/Notes: lets
+        // SecretsCliModule's own clap subcommand parser generate real
+        // per-subcommand help.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
@@ -169,6 +179,7 @@ impl Cli {
             // Same as Config: always intercepted early in main.rs.
             Some(Commands::Vault { .. }) => ModuleId::SETTINGS,
             Some(Commands::Notes { .. }) => ModuleId::NOTES,
+            Some(Commands::Secrets { .. }) => ModuleId::SECRETS,
             None => ModuleId::LAUNCHER,
         }
     }

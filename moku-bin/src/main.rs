@@ -146,12 +146,15 @@ async fn main() -> Result<()> {
             }
             Some(Commands::Rss { args }) => args.clone(),
             Some(Commands::Notes { args }) => args.clone(),
+            Some(Commands::Secrets { args }) => args.clone(),
             _ => vec![],
         };
 
         let cli_ctx = CliContext {
             config: loaded_config,
             storage: Some(Arc::clone(&storage)),
+            session: Some(Arc::clone(&session)),
+            security: Some(Arc::clone(&security)),
         };
 
         if let Err(e) = module.run(&args, &cli_ctx).await {

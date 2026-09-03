@@ -1,0 +1,25 @@
+[package]
+name = "moku-secrets"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moku-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+rand.workspace = true
+zeroize.workspace = true
+rpassword.workspace = true
+tokio.workspace = true
+
+# TOTP code generation for entries with a stored seed — scoped here, not
+# promoted to workspace.dependencies since nothing else needs it.
+totp-rs = { version = "5", features = ["otpauth"] }
+
+[dev-dependencies]
+tempfile.workspace = true
