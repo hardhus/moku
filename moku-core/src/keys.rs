@@ -127,7 +127,13 @@ fn check_hardcoded(key: &KeyEvent) -> Command {
         KeyCode::Char('d') if relevant.is_empty() => Command::Delete,
         KeyCode::Char(' ') if relevant.is_empty() => Command::Toggle,
         KeyCode::Char('r') if relevant.is_empty() => Command::Refresh,
-        KeyCode::Char('/') if relevant.is_empty() => Command::Search,
+        // Some layouts (e.g. Turkish Q) produce '/' via Shift+7. On Windows,
+        // crossterm reports the physical Shift bit even though it was
+        // already consumed to produce the '/' character itself, so
+        // `relevant.is_empty()` alone misses that case — accept Shift too.
+        KeyCode::Char('/') if relevant.is_empty() || relevant == KeyModifiers::SHIFT => {
+            Command::Search
+        }
         _ => Command::None,
     }
 }
@@ -228,6 +234,20 @@ mod tests {
         let command = resolve_event(&event, &defaults, Some(&overrides));
 
         assert_eq!(command, Command::Custom("sort".to_string()));
+    }
+
+    #[test]
+    fn test_slash_via_shift_also_triggers_search() {
+        // Turkish Q layout produces '/' via Shift+7; Windows/crossterm can
+        // report the physical Shift bit even though it already produced the
+        // shifted character, so both the bare and Shift-modified '/' must
+        // resolve to Command::Search.
+        let defaults = KeyBindings::default();
+        let plain = make_key(KeyCode::Char('/'), KeyModifiers::empty());
+        assert_eq!(resolve_event(&plain, &defaults, None), Command::Search);
+
+        let shifted = make_key(KeyCode::Char('/'), KeyModifiers::SHIFT);
+        assert_eq!(resolve_event(&shifted, &defaults, None), Command::Search);
     }
 
     #[test]

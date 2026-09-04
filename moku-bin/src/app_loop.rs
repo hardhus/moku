@@ -170,6 +170,28 @@ async fn enter_module(
     ctx: &mut AppContext,
     target: ModuleId,
 ) -> anyhow::Result<AppState> {
+    // Vault Security is directly selectable from the launcher menu, but its
+    // own `encrypt_by_default()` is hardcoded false (it must never gate on
+    // its own unlock). That means the generic check below would never route
+    // it through AppState::Locked, so a successful unlock would have
+    // nowhere to "return" to — the module never navigates away on its own
+    // (see its doc comment), so it would just keep re-showing the password
+    // prompt. Route it through the same Locked/after_unlock machinery the
+    // auto-triggered path already uses, targeting the launcher.
+    if target == ModuleId::LOCK_SCREEN {
+        if ctx.session.is_unlocked() {
+            ctx.show_info("Vault is already unlocked.");
+            router.switch_to(ModuleId::LAUNCHER);
+            return Ok(AppState::Unlocked);
+        }
+        if let Some(m) = registry.get_mut(ModuleId::LOCK_SCREEN) {
+            m.init(ctx).await?;
+        }
+        return Ok(AppState::Locked {
+            after_unlock: ModuleId::LAUNCHER,
+        });
+    }
+
     // The module's own opinion on whether it owns encrypted storage at all
     // (Launcher/Dashboard/Settings/etc. always say no — they don't call
     // StorageManager::save, so gating their entry on vault unlock would be
@@ -180,11 +202,8 @@ async fn enter_module(
         .get_mut(target)
         .map(|m| m.encrypt_by_default())
         .unwrap_or(true);
-    let needs_vault = moku_core::resolve_encryption(
-        &ctx.config.load(),
-        target.as_str(),
-        module_default_encrypt,
-    );
+    let needs_vault =
+        moku_core::resolve_encryption(&ctx.config.load(), target.as_str(), module_default_encrypt);
 
     if needs_vault && !ctx.session.is_unlocked() {
         if let Some(m) = registry.get_mut(ModuleId::LOCK_SCREEN) {
