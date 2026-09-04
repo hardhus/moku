@@ -230,6 +230,23 @@ impl LauncherModule {
     }
 }
 
+const MAX_SELECTION_INDENT: usize = 4;
+const SELECTION_INDENT_STEP: usize = 2;
+
+/// Leading-space count for the row at `pos` (its position within whatever
+/// list is currently displayed — full or filtered), given the selected
+/// row's position `selected_pos`. Peaks at `MAX_SELECTION_INDENT` on the
+/// selected row itself, tapers by `SELECTION_INDENT_STEP` per row of
+/// distance, floors at 0. `None` selection (empty list) means no indent
+/// anywhere.
+fn selected_indent(pos: usize, selected_pos: Option<usize>) -> usize {
+    let Some(selected_pos) = selected_pos else {
+        return 0;
+    };
+    let distance = pos.abs_diff(selected_pos);
+    MAX_SELECTION_INDENT.saturating_sub(distance.saturating_mul(SELECTION_INDENT_STEP))
+}
+
 /// Orders `all_visible` (+ `extra_visible` appended) according to
 /// `saved_order` (a list of `ModuleId::as_str()` values, most-preferred
 /// first). Ids in `saved_order` that no longer correspond to a currently
@@ -392,23 +409,29 @@ impl TuiModule for LauncherModule {
             );
         frame.render_widget(header, rows[0]);
 
-        // 2. Module list — item numbering always reflects the item's real
-        // (absolute) position in `registered_modules`, even while
-        // filtered, so numbers don't appear to shuffle as the user types.
+        // 2. Module list — no icons or numbers (mixed-width emoji glyphs
+        // render at inconsistent terminal cell widths across icons/fonts,
+        // which is what caused the earlier per-row misalignment; plain
+        // ASCII titles render at a fully consistent width everywhere).
+        // Selection is shown by color (highlight_style below) AND by a
+        // graduated indent that peaks on the selected row and tapers off
+        // over its immediate neighbors, all center-aligned.
         let display_indices: Vec<usize> = match &self.filter {
             Some(f) => f.matches.clone(),
             None => (0..self.registered_modules.len()).collect(),
         };
+        let selected_pos = match &self.filter {
+            Some(f) => f.list_state.selected(),
+            None => self.state.selected(),
+        };
         let items: Vec<ListItem> = display_indices
             .iter()
-            .map(|&idx| {
+            .enumerate()
+            .map(|(pos, &idx)| {
                 let id = self.registered_modules[idx];
-                ListItem::new(format!(
-                    "{:>2}. {} {}",
-                    idx + 1,
-                    meta::icon_for(id),
-                    id.title()
-                ))
+                let indent = selected_indent(pos, selected_pos);
+                let text = format!("{}{}", " ".repeat(indent), id.title());
+                ListItem::new(Line::from(text).alignment(Alignment::Center))
             })
             .collect();
         let list = List::new(items)
@@ -426,7 +449,7 @@ impl TuiModule for LauncherModule {
                     .bg(theme.selection_bg)
                     .add_modifier(Modifier::BOLD),
             )
-            .highlight_symbol(">> ");
+            .highlight_symbol("");
 
         if let Some(f) = &mut self.filter {
             frame.render_stateful_widget(list, rows[1], &mut f.list_state);
@@ -708,20 +731,87 @@ mod tests {
     }
 
     #[test]
-    fn test_draw_after_reorder_shows_swapped_position_numbers() {
+    fn test_selected_indent_peaks_at_selection_and_tapers_off() {
+        assert_eq!(selected_indent(3, Some(3)), MAX_SELECTION_INDENT);
+        assert_eq!(
+            selected_indent(2, Some(3)),
+            MAX_SELECTION_INDENT - SELECTION_INDENT_STEP
+        );
+        assert_eq!(
+            selected_indent(4, Some(3)),
+            MAX_SELECTION_INDENT - SELECTION_INDENT_STEP
+        );
+        assert_eq!(selected_indent(0, Some(3)), 0); // distance 3, floored at 0
+        assert_eq!(selected_indent(9, Some(3)), 0); // far away, floored at 0
+        assert_eq!(selected_indent(0, None), 0); // nothing selected
+    }
+
+    /// Column offset of the first occurrence of `title` in the rendered
+    /// buffer (scanning row by row). Ratatui's own `Alignment::Center`
+    /// splits its auto-padding around whatever string it's given, so a
+    /// row's manually-prepended indent spaces shift where the *visible*
+    /// title text lands rather than adding a literally-matchable N-space
+    /// prefix — this measures the real rendered position instead of
+    /// assuming a fixed padding string.
+    fn title_start_x(launcher: &mut LauncherModule, title: &str) -> Option<usize> {
+        let (width, height) = (100usize, 30usize);
+        let backend = TestBackend::new(width as u16, height as u16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| {
+                launcher.draw(frame, Rect::new(0, 0, width as u16, height as u16), &theme)
+            })
+            .unwrap();
+        let content = terminal.backend().buffer().content.clone();
+        (0..height).find_map(|y| {
+            let row: String = content[y * width..(y + 1) * width]
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            row.find(title)
+        })
+    }
+
+    #[test]
+    fn test_draw_selected_row_title_shifts_right_relative_to_unselected() {
         let mut launcher = launcher();
+        let title = launcher.registered_modules[0].title().to_string();
+
         launcher.state.select(Some(0));
-        launcher.move_selected(1);
+        let x_selected =
+            title_start_x(&mut launcher, &title).expect("title visible while selected");
+
+        launcher.state.select(Some(6)); // distance 6 from index 0 => zero indent
+        let x_far =
+            title_start_x(&mut launcher, &title).expect("title visible while far from selection");
+
+        assert!(
+            x_selected > x_far,
+            "selected row's title should render further right than its own unselected position (selected_x={x_selected}, far_x={x_far})"
+        );
+    }
+
+    #[test]
+    fn test_draw_list_rows_have_no_icon_or_number_prefix() {
+        let mut launcher = launcher();
         let content = rendered_content(&mut launcher);
-        // The item that was first (now at index 1) should show as "2.",
-        // and the one that moved up to index 0 should show as "1.".
-        assert!(content.contains(&format!(
-            "1. {}",
-            meta::icon_for(launcher.registered_modules[0])
-        )));
-        assert!(content.contains(&format!(
-            "2. {}",
-            meta::icon_for(launcher.registered_modules[1])
-        )));
+        // Every icon appears at most once (the single detail-line icon for
+        // the selected module) — never once per row.
+        for id in ModuleId::all_visible() {
+            let icon = meta::icon_for(id);
+            assert!(
+                content.matches(icon).count() <= 1,
+                "icon {icon} for {} appears more than once — looks like it leaked into list rows",
+                id.as_str()
+            );
+        }
+        // No "N. " numbering prefix anywhere in the rendered content.
+        for n in 1..=launcher.registered_modules.len() {
+            assert!(
+                !content.contains(&format!("{n}. ")),
+                "found leftover numbering prefix \"{n}. \""
+            );
+        }
     }
 }

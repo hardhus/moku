@@ -74,6 +74,16 @@ pub async fn run(
                 };
                 last_activity = Instant::now();
 
+                // No module's handle_event marks itself dirty for a
+                // terminal resize (most only match Event::Key), so without
+                // this the screen would just sit at its old size/content
+                // until the next unrelated redraw. ratatui's Terminal::draw
+                // already re-queries the backend's size on every call, so
+                // forcing one is all that's needed here.
+                if matches!(ev, crossterm::event::Event::Resize(_, _)) {
+                    dirty = true;
+                }
+
                 match state {
                     AppState::Locked { after_unlock } => {
                         let was_unlocked = ctx.session.is_unlocked();
