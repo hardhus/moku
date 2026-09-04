@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, ListState, Paragraph},
 };
 use serde::{Deserialize, Serialize};
 
@@ -385,6 +385,22 @@ impl TuiModule for LauncherModule {
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
         let filtering = self.filter.is_some();
 
+        // Horizontally center a content-sized box instead of stretching
+        // every row to the terminal's full width — the same "unnecessarily
+        // big frame" complaint the vertical fix addressed, just sideways.
+        // BOX_WIDTH is picked to comfortably fit the longest line we ever
+        // render (the browse-mode status/help text, ~70 cols) without
+        // wrapping; bump it if a longer string is ever added below.
+        const BOX_WIDTH: u16 = 74;
+        let box_width = BOX_WIDTH.min(area.width);
+        let left_pad = area.width.saturating_sub(box_width) / 2;
+        let area = Layout::horizontal([
+            Constraint::Length(left_pad),
+            Constraint::Length(box_width),
+            Constraint::Min(0),
+        ])
+        .split(area)[1];
+
         // Size the list to its actual content (item count + its own top/
         // bottom border) instead of stretching it to fill the rest of the
         // screen — a near-empty screen-tall box around 10 short lines is
@@ -424,18 +440,21 @@ impl TuiModule for LauncherModule {
             );
         frame.render_widget(header, rows[1]);
 
-        // 2. Module list — no icons or numbers (mixed-width emoji glyphs
-        // render at inconsistent terminal cell widths across icons/fonts,
-        // which is what caused the earlier per-row misalignment; plain
-        // ASCII titles render at a fully consistent width everywhere).
-        // Every row starts at the SAME column (`base_indent`, computed
-        // from the longest title so the whole block reads as centered),
-        // rather than each row centering itself independently — different
-        // title lengths would otherwise each land at a different column,
-        // making the selection indent below impossible to read. Selection
-        // is shown by color (highlight_style) AND by an additional indent
-        // on top of that shared baseline, peaking on the selected row and
-        // tapering off over its immediate neighbors.
+        // 2. Module list — a fixed-center "carousel": the selected item
+        // always renders at the box's middle row. Instead of the cursor
+        // moving down through a static list until it hits the bottom (or
+        // jumping across the whole screen when browse-mode wraparound
+        // kicks in at either end), the window of visible items rotates by
+        // one step around that fixed center row every time you press
+        // up/down — same wraparound as before, but it now reads as
+        // continuous rotation instead of a jump. No icons or numbers
+        // (mixed-width emoji glyphs render at inconsistent terminal cell
+        // widths across icons/fonts, which is what caused the earlier
+        // per-row misalignment; plain ASCII titles render at a fully
+        // consistent width everywhere). Every row starts at the same
+        // column (`base_indent`, from the longest title, so the whole
+        // block reads as centered) plus an additional indent that peaks
+        // on the center row and tapers off over its neighbors.
         let display_indices: Vec<usize> = match &self.filter {
             Some(f) => f.matches.clone(),
             None => (0..self.registered_modules.len()).collect(),
@@ -444,7 +463,22 @@ impl TuiModule for LauncherModule {
             Some(f) => f.list_state.selected(),
             None => self.state.selected(),
         };
-        let content_width = rows[2].width.saturating_sub(2) as usize; // minus the list's own borders
+
+        let list_block = Block::default()
+            .title(format!(" Modules ({}) ", self.registered_modules.len()))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border))
+            .style(Style::default().bg(theme.base_bg));
+        let list_inner = list_block.inner(rows[2]);
+        frame.render_widget(list_block, rows[2]);
+
+        let inner_height = list_inner.height as usize;
+        let center_row = if inner_height == 0 {
+            0
+        } else {
+            (inner_height - 1) / 2
+        };
+        let content_width = list_inner.width as usize;
         let max_title_len = self
             .registered_modules
             .iter()
@@ -452,36 +486,50 @@ impl TuiModule for LauncherModule {
             .max()
             .unwrap_or(0);
         let base_indent = content_width.saturating_sub(max_title_len) / 2;
-        let items: Vec<ListItem> = display_indices
-            .iter()
-            .enumerate()
-            .map(|(pos, &idx)| {
-                let id = self.registered_modules[idx];
-                let indent = base_indent + selected_indent(pos, selected_pos);
-                ListItem::new(format!("{}{}", " ".repeat(indent), id.title()))
-            })
-            .collect();
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(format!(" Modules ({}) ", self.registered_modules.len()))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border))
-                    .style(Style::default().bg(theme.base_bg)),
-            )
-            .style(Style::default().fg(theme.base_fg))
-            .highlight_style(
+
+        // Fill rows nearest the center first so a very small filtered
+        // result set never wraps around and shows the same item twice —
+        // rows further out just stay blank once every distinct item has
+        // been placed.
+        let n_display = display_indices.len();
+        let mut row_order: Vec<usize> = (0..inner_height).collect();
+        row_order.sort_by_key(|&r| (r as i32 - center_row as i32).abs());
+        let mut cell_content: Vec<Option<String>> = vec![None; inner_height];
+        if n_display > 0 {
+            let sel = selected_pos.unwrap_or(0) as i32;
+            let mut shown = std::collections::HashSet::new();
+            for r in row_order {
+                let offset = r as i32 - center_row as i32;
+                let display_pos = (sel + offset).rem_euclid(n_display as i32) as usize;
+                if shown.insert(display_pos) {
+                    let idx = display_indices[display_pos];
+                    let id = self.registered_modules[idx];
+                    let indent =
+                        base_indent + selected_indent(offset.unsigned_abs() as usize, Some(0));
+                    cell_content[r] = Some(format!("{}{}", " ".repeat(indent), id.title()));
+                }
+            }
+        }
+
+        for (r, text) in cell_content.into_iter().enumerate() {
+            let row_area = Rect {
+                x: list_inner.x,
+                y: list_inner.y + r as u16,
+                width: list_inner.width,
+                height: 1,
+            };
+            let style = if r == center_row {
                 Style::default()
                     .fg(theme.selection_fg)
                     .bg(theme.selection_bg)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("");
-
-        if let Some(f) = &mut self.filter {
-            frame.render_stateful_widget(list, rows[2], &mut f.list_state);
-        } else {
-            frame.render_stateful_widget(list, rows[2], &mut self.state);
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.base_fg).bg(theme.base_bg)
+            };
+            frame.render_widget(
+                Paragraph::new(text.unwrap_or_default()).style(style),
+                row_area,
+            );
         }
 
         // 3. Detail line — the selected module's one-line description.
@@ -915,5 +963,102 @@ mod tests {
                 "found leftover numbering prefix \"{n}. \""
             );
         }
+    }
+
+    fn find_row(
+        launcher: &mut LauncherModule,
+        width: usize,
+        height: usize,
+        text: &str,
+    ) -> Option<usize> {
+        let backend = TestBackend::new(width as u16, height as u16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| {
+                launcher.draw(frame, Rect::new(0, 0, width as u16, height as u16), &theme)
+            })
+            .unwrap();
+        let content = terminal.backend().buffer().content.clone();
+        (0..height).find(|&y| {
+            let row: String = content[y * width..(y + 1) * width]
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            row.contains(text)
+        })
+    }
+
+    #[test]
+    fn test_selected_module_always_renders_at_the_fixed_center_row() {
+        let mut launcher = launcher();
+        let (width, height) = (100usize, 30usize);
+        let mut center_rows = std::collections::HashSet::new();
+        for i in [0usize, 3, 7, 9] {
+            launcher.state.select(Some(i));
+            let title = launcher.registered_modules[i].title().to_string();
+            let row = find_row(&mut launcher, width, height, &title)
+                .expect("selected title should be visible");
+            center_rows.insert(row);
+        }
+        assert_eq!(
+            center_rows.len(),
+            1,
+            "the selected module should always render at the same fixed row regardless of which item is selected, got rows: {center_rows:?}"
+        );
+    }
+
+    #[test]
+    fn test_item_before_first_wraps_to_appear_directly_above_center() {
+        let mut launcher = launcher();
+        let last_title = launcher.registered_modules[launcher.registered_modules.len() - 1]
+            .title()
+            .to_string();
+        launcher.state.select(Some(0)); // Dashboard, the first item, at center
+
+        let (width, height) = (100usize, 30usize);
+        let dashboard_row = find_row(&mut launcher, width, height, "Dashboard")
+            .expect("Dashboard should be visible when selected");
+
+        // Re-render to inspect the row directly above (find_row above
+        // already rendered once; render again for a fresh buffer).
+        let backend = TestBackend::new(width as u16, height as u16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| {
+                launcher.draw(frame, Rect::new(0, 0, width as u16, height as u16), &theme)
+            })
+            .unwrap();
+        let content = terminal.backend().buffer().content.clone();
+        let row_above: String = content[(dashboard_row - 1) * width..dashboard_row * width]
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            row_above.contains(&last_title),
+            "the last module should wrap circularly to appear directly above the first when it's selected, but row above Dashboard was: {row_above:?}"
+        );
+    }
+
+    #[test]
+    fn test_box_does_not_stretch_across_a_very_wide_terminal() {
+        let mut launcher = launcher();
+        let (width, height) = (300usize, 30usize);
+        let backend = TestBackend::new(width as u16, height as u16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| {
+                launcher.draw(frame, Rect::new(0, 0, width as u16, height as u16), &theme)
+            })
+            .unwrap();
+        let content = terminal.backend().buffer().content.clone();
+        let far_right_blank =
+            (0..height).all(|y| content[y * width + (width - 10)].symbol().trim().is_empty());
+        assert!(
+            far_right_blank,
+            "content should not stretch across a very wide (300-column) terminal"
+        );
     }
 }
