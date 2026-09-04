@@ -94,6 +94,9 @@ impl TuiModule for DaemonStatusModule {
                             if let Ok(exe) = std::env::current_exe() {
                                 let mut cmd = std::process::Command::new(exe);
                                 cmd.arg("daemon").arg("run");
+                                cmd.stdin(std::process::Stdio::null());
+                                cmd.stdout(std::process::Stdio::null());
+                                cmd.stderr(std::process::Stdio::null());
                                 #[cfg(windows)]
                                 {
                                     use std::os::windows::process::CommandExt;
@@ -132,7 +135,7 @@ impl TuiModule for DaemonStatusModule {
                     }
                     KeyCode::Char('e') => {
                         if let Ok(exe) = std::env::current_exe() {
-                            match crate::autostart::set_autostart(true, &exe, &["daemon", "run"]) {
+                            match crate::autostart::set_autostart(true, &exe, &["daemon", "start", "--from-autostart"]) {
                                 Ok(_) => self.show_temp_message("Autostart enabled."),
                                 Err(e) => self.show_temp_message(format!("Autostart error: {e}")),
                             }
@@ -141,7 +144,7 @@ impl TuiModule for DaemonStatusModule {
                     }
                     KeyCode::Char('d') => {
                         if let Ok(exe) = std::env::current_exe() {
-                            match crate::autostart::set_autostart(false, &exe, &["daemon", "run"]) {
+                            match crate::autostart::set_autostart(false, &exe, &["daemon", "start", "--from-autostart"]) {
                                 Ok(_) => self.show_temp_message("Autostart disabled."),
                                 Err(e) => self.show_temp_message(format!("Autostart error: {e}")),
                             }

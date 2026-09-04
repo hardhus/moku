@@ -2455,6 +2455,7 @@ dependencies = [
  "tracing-appender",
  "tracing-error",
  "tracing-subscriber",
+ "windows 0.58.0",
  "winfsp",
 ]
 

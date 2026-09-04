@@ -32,14 +32,39 @@ async fn main() -> Result<()> {
 
     if let Some(Commands::Daemon { sub: Some(sub_cmd) }) = &cli.command {
         match sub_cmd {
-            DaemonCommands::Start => {
+            DaemonCommands::Start { from_autostart } => {
+                let from_autostart = *from_autostart;
+                // Launched directly by the Windows Run key at logon, this
+                // process has no parent console, so the OS allocates a new,
+                // visible one just for it before main() runs. Free it
+                // immediately — before any print — so it never flashes on
+                // screen. Manual `moku daemon start` runs never set this
+                // flag, so their console (the user's own terminal) is left
+                // alone and the status messages below still print normally.
+                #[cfg(windows)]
+                if from_autostart {
+                    unsafe {
+                        let _ = windows::Win32::System::Console::FreeConsole();
+                    }
+                }
                 if moku_daemon::status::is_running() {
-                    println!("Daemon is already running.");
+                    if !from_autostart {
+                        println!("Daemon is already running.");
+                    }
                     return Ok(());
                 }
                 let exe = std::env::current_exe().map_err(|e| eyre!(e))?;
                 let mut cmd = std::process::Command::new(&exe);
                 cmd.arg("daemon").arg("run");
+                // Without this, the worker inherits our stdin/stdout/stderr
+                // handles by default and keeps them open for as long as it
+                // runs — e.g. a caller capturing our output via a pipe (or
+                // command substitution) would block forever waiting for
+                // EOF, since the long-lived detached worker never closes
+                // its inherited copy of that pipe.
+                cmd.stdin(std::process::Stdio::null());
+                cmd.stdout(std::process::Stdio::null());
+                cmd.stderr(std::process::Stdio::null());
                 #[cfg(windows)]
                 {
                     use std::os::windows::process::CommandExt;
@@ -47,9 +72,14 @@ async fn main() -> Result<()> {
                 }
                 match cmd.spawn() {
                     Ok(child) => {
-                        println!("Daemon started in background (PID: {})", child.id());
+                        if !from_autostart {
+                            println!("Daemon started in background (PID: {})", child.id());
+                        }
                     }
                     Err(e) => {
+                        if from_autostart {
+                            return Ok(());
+                        }
                         return Err(eyre!("Failed to spawn daemon: {}", e));
                     }
                 }
@@ -70,12 +100,12 @@ async fn main() -> Result<()> {
             }
             DaemonCommands::EnableAutostart => {
                 let exe = std::env::current_exe().map_err(|e| eyre!(e))?;
-                return moku_daemon::autostart::set_autostart(true, &exe, &["daemon", "run"])
+                return moku_daemon::autostart::set_autostart(true, &exe, &["daemon", "start", "--from-autostart"])
                     .map_err(|e| eyre!(e));
             }
             DaemonCommands::DisableAutostart => {
                 let exe = std::env::current_exe().map_err(|e| eyre!(e))?;
-                return moku_daemon::autostart::set_autostart(false, &exe, &["daemon", "run"])
+                return moku_daemon::autostart::set_autostart(false, &exe, &["daemon", "start", "--from-autostart"])
                     .map_err(|e| eyre!(e));
             }
         }

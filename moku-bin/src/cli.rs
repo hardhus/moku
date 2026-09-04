@@ -161,7 +161,16 @@ pub enum ConfigCommands {
 #[derive(Subcommand, Clone, PartialEq, Debug)]
 pub enum DaemonCommands {
     /// Start the daemon in the background (no terminal window). Returns immediately.
-    Start,
+    Start {
+        /// Internal: set only by the registered autostart entry. A
+        /// freshly-launched console-subsystem exe with no parent console
+        /// (as happens when Windows runs the HKCU Run key at logon) gets a
+        /// new console window from the OS before our code ever runs; this
+        /// flag tells the handler to free/hide that console immediately,
+        /// before printing anything, so the window never becomes visible.
+        #[arg(long, hide = true)]
+        from_autostart: bool,
+    },
     /// Stop the running background daemon.
     Stop,
     /// Run the daemon worker in the foreground (used by autostart).
@@ -239,7 +248,7 @@ mod tests {
         assert_eq!(cli_daemon.target_module(), ModuleId::DAEMON);
 
         let cli_daemon_start = Cli {
-            command: Some(Commands::Daemon { sub: Some(DaemonCommands::Start) }),
+            command: Some(Commands::Daemon { sub: Some(DaemonCommands::Start { from_autostart: false }) }),
             portable: false,
         };
         assert_eq!(cli_daemon_start.target_module(), ModuleId::DAEMON);

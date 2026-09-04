@@ -51,6 +51,9 @@ moku-http = { path = "../modules/moku-http" }
 [dev-dependencies]
 tempfile.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
 [target.'cfg(windows)'.build-dependencies]
 winfsp = { version = "0.13", features = ["delayload"] }
 

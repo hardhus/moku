@@ -67,9 +67,10 @@ mlua = { version = "0.11", features = ["lua54", "vendored", "send"] }
 # Bildirim ikon üretimi (sadece xtask kullanır, runtime'a girmez)
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 
-# Windows AUMID kaydı (sadece moku-notify, sadece Windows hedefinde)
+# Windows AUMID kaydı (sadece moku-notify, sadece Windows hedefinde) +
+# FreeConsole (moku-bin, autostart'ta konsol penceresini gizlemek için)
 winreg = "0.52"
-windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_Foundation"] }
+windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Console"] }
 
 # Internal Crates
 moku-core = { path = "./moku-core" }
