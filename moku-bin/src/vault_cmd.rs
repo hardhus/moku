@@ -106,6 +106,11 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
         }
         VaultCommands::Mount { name, mountpoint } => mount(name, mountpoint).await,
         VaultCommands::Unmount { name } => unmount(name).await,
+        VaultCommands::Import { path } => {
+            let cfg = registry::import_volume(std::path::Path::new(path)).await?;
+            println!("✅ Imported '{}' (id: {}).", cfg.display_name, cfg.id);
+            Ok(())
+        }
         VaultCommands::MountWorker { name, mountpoint } => worker::run(name, mountpoint).await,
     }
 }
@@ -134,7 +139,7 @@ async fn mount(name: &str, mountpoint: &str) -> Result<()> {
         MountOutcome::Failed { message } => bail!("Mount failed: {message}"),
         MountOutcome::TimedOut { pid } => {
             println!(
-                "⏳ '{}' is still starting (worker PID: {}) — check `moku vault status {}` shortly.",
+                "⏳ '{}' is starting in the background (worker PID: {}) — check `moku vault status {}` to confirm.",
                 cfg.display_name, pid, name
             );
         }

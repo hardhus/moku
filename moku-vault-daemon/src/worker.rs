@@ -20,8 +20,13 @@ const MOUNT_READY_SENTINEL: &str = "MOKU_MOUNT_READY";
 /// How long `spawn_mount_process` waits for the worker to either report
 /// `MOUNT_READY_SENTINEL` or fail before giving up and reporting
 /// `MountOutcome::TimedOut` (the worker itself keeps running either way —
-/// this is just how long the *caller* waits for an initial answer).
-const MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(15);
+/// this is just how long the *caller* waits for an initial answer). Kept
+/// short deliberately: a real mount or a bad-password failure both
+/// resolve in well under a second in practice, and the caller (CLI or
+/// TUI) should feel like it returns control immediately rather than
+/// hanging around "just in case" — `TimedOut` isn't treated as an error,
+/// just "still going, check status".
+const MOUNT_READY_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Reads the mount password from stdin (piped by the parent process — see
 /// `moku-bin/src/vault_cmd.rs`'s `Mount` handler) rather than a CLI arg or

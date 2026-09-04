@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use moku_core::SecurityManager;
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,16 @@ fn index_path() -> Result<PathBuf> {
     Ok(volumes_root()?.join(INDEX_FILE))
 }
 
+/// Serializes read-modify-write access to the index file within this
+/// process — without it, two registrations happening back to back (e.g.
+/// two volumes created in quick succession from the TUI, or just two
+/// concurrent tests) can race: both read the same starting content, and
+/// whichever writes second silently clobbers the other's insert. Doesn't
+/// protect against a *second moku process* writing at the same instant
+/// (no cross-process file lock here), but that's an extremely narrow case
+/// this app doesn't guard against for its other data files either.
+static INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Small, blocking read — the index is a tiny JSON map, and keeping
 /// `volume_dir` (a widely-used, synchronous function) synchronous avoids
 /// cascading an async signature change through every caller for what's a
@@ -64,12 +74,23 @@ fn load_index() -> HashMap<String, PathBuf> {
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-async fn save_index(index: &HashMap<String, PathBuf>) -> Result<()> {
+fn save_index(index: &HashMap<String, PathBuf>) -> Result<()> {
     let root = volumes_root()?;
-    tokio::fs::create_dir_all(&root).await?;
+    std::fs::create_dir_all(&root)?;
     let json = serde_json::to_string_pretty(index)?;
-    tokio::fs::write(root.join(INDEX_FILE), json).await?;
+    std::fs::write(root.join(INDEX_FILE), json)?;
     Ok(())
+}
+
+/// Reads, mutates, and writes back the index as one locked step — see
+/// `INDEX_LOCK`. Synchronous end to end (no `.await` inside the critical
+/// section) specifically so the lock never needs to be held across an
+/// await point.
+fn update_index(mutate: impl FnOnce(&mut HashMap<String, PathBuf>)) -> Result<()> {
+    let _guard = INDEX_LOCK.lock().unwrap();
+    let mut index = load_index();
+    mutate(&mut index);
+    save_index(&index)
 }
 
 fn slugify(name: &str) -> String {
@@ -182,11 +203,42 @@ pub async fn create_volume(
 
     moku_vault_fs::quota::Quota::load(dir.join(USAGE_FILE), size_limit_bytes).flush()?;
 
-    let mut index = load_index();
-    index.insert(id.clone(), dir.clone());
-    save_index(&index).await?;
+    update_index(|index| {
+        index.insert(id.clone(), dir.clone());
+    })?;
 
     Ok(config)
+}
+
+/// Registers an existing volume directory (one with its own `volume.json`
+/// already in it — e.g. moved by hand, copied from another machine, or
+/// created before the index existed) so it becomes manageable by name/id
+/// like any other, without touching its contents.
+pub async fn import_volume(path: &Path) -> Result<VolumeConfig> {
+    let path = tokio::fs::canonicalize(path)
+        .await
+        .with_context(|| format!("no such directory: {}", path.display()))?;
+    let cfg = load_config(&path)
+        .await
+        .with_context(|| format!("no volume.json found at {}", path.display()))?;
+
+    // The embedded id is fixed (unlike create_volume's freshly-slugified
+    // one), so a real collision with something already registered
+    // elsewhere can't be auto-resolved by renaming — refuse instead.
+    let existing = volume_dir(&cfg.id)?;
+    if existing.exists() && existing != path {
+        bail!(
+            "a volume with id '{}' is already registered at {}",
+            cfg.id,
+            existing.display()
+        );
+    }
+
+    update_index(|index| {
+        index.insert(cfg.id.clone(), path);
+    })?;
+
+    Ok(cfg)
 }
 
 pub async fn list_volumes() -> Result<Vec<VolumeConfig>> {
@@ -289,5 +341,76 @@ mod tests {
         let id = unique_id("claude-plan-test-7a21bd", dir.path()).unwrap();
         assert_ne!(id, "claude-plan-test-7a21bd");
         assert!(id.starts_with("claude-plan-test-7a21bd-"));
+    }
+
+    // `import_volume` writes into the real, shared `volumes_root()/index.json`
+    // (same testability gap as `unique_id` above — no way to override that
+    // fixed location) — each test below cleans up its own index entry
+    // afterward so no residue is left in the developer's real environment,
+    // and uses a name unique enough that a collision with anything real is
+    // effectively impossible.
+
+    fn write_fake_volume_json(dir: &Path, id: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let cfg = VolumeConfig {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            size_limit_bytes: 1024,
+            password_mode: PasswordMode::Custom,
+            created_at: 0,
+        };
+        std::fs::write(
+            dir.join(VOLUME_FILE),
+            serde_json::to_string_pretty(&cfg).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn remove_index_entry(id: &str) {
+        update_index(|index| {
+            index.remove(id);
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_import_volume_registers_it_in_the_index() {
+        let id = "claude-import-test-4d8f21";
+        let dir = tempfile::tempdir().unwrap();
+        let vol_dir = dir.path().join("myvol");
+        write_fake_volume_json(&vol_dir, id);
+
+        let cfg = import_volume(&vol_dir).await.unwrap();
+        assert_eq!(cfg.id, id);
+
+        let found = volume_dir(id).unwrap();
+        assert_eq!(found, tokio::fs::canonicalize(&vol_dir).await.unwrap());
+
+        remove_index_entry(id);
+    }
+
+    #[tokio::test]
+    async fn test_import_volume_errors_without_a_volume_json() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(import_volume(dir.path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_import_volume_rejects_id_collision_with_another_real_directory() {
+        let id = "claude-import-test-collision-9c3e";
+        let dir = tempfile::tempdir().unwrap();
+        let vol_dir_a = dir.path().join("a");
+        let vol_dir_b = dir.path().join("b");
+        write_fake_volume_json(&vol_dir_a, id);
+        write_fake_volume_json(&vol_dir_b, id);
+
+        import_volume(&vol_dir_a).await.unwrap();
+        let result = import_volume(&vol_dir_b).await;
+        assert!(
+            result.is_err(),
+            "importing a second directory with the same id must fail"
+        );
+
+        remove_index_entry(id);
     }
 }

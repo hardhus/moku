@@ -18,3 +18,4 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+arc-swap.workspace = true

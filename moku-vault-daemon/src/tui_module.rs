@@ -8,12 +8,13 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
+    text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
 use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
 
-use crate::registry::{self, VolumeConfig};
+use crate::registry::{self, PasswordMode, VolumeConfig};
 use crate::worker::{self, StopOutcome};
 use crate::{size, status};
 
@@ -34,13 +35,51 @@ struct PasswordPrompt {
     input: String,
 }
 
+/// Which field of the new-volume form currently has keyboard focus. All
+/// three are shown at once (`Tab` switches focus, `Enter` submits from
+/// any of them) — matches `modules/moku-rss/src/tui_module.rs`'s
+/// `EditField`/`EditFeed` shape, not a sequential per-field wizard.
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum CreateField {
+    Name,
+    Size,
+    Password,
+}
+
+/// State for creating a new volume from the TUI. Always `PasswordMode::
+/// Custom` (a single masked entry, no separate confirmation field — same
+/// one-entry convention `PasswordPrompt` already uses for mounting) and
+/// always created under the current directory (`create_volume`'s own
+/// `None` default) — no location field here; `--path` stays a CLI-only
+/// option for anyone who wants a different one, keeping this form simple.
+struct CreateForm {
+    focus: CreateField,
+    name: String,
+    size: String,
+    password: String,
+    error: Option<String>,
+}
+
+impl CreateForm {
+    fn new() -> Self {
+        Self {
+            focus: CreateField::Name,
+            name: String::new(),
+            size: String::new(),
+            password: String::new(),
+            error: None,
+        }
+    }
+}
+
 pub struct VaultManagerModule {
     rows: Vec<VolumeRow>,
     state: ListState,
     message: Option<(String, Instant)>,
     prompt: Option<PasswordPrompt>,
-    /// Result of an in-flight mount/unmount, written by a spawned task and
-    /// picked up at the top of `handle_event` — same pattern as
+    create_form: Option<CreateForm>,
+    /// Result of an in-flight mount/unmount/create, written by a spawned
+    /// task and picked up at the top of `handle_event` — same pattern as
     /// `modules/moku-settings/src/tabs/storage.rs`'s `migration_result`,
     /// required here for the same reason: `draw()` only gets `&MokuTheme`,
     /// not `&mut AppContext`, so a background task can't raise a toast
@@ -57,6 +96,7 @@ impl VaultManagerModule {
             state,
             message: None,
             prompt: None,
+            create_form: None,
             action_result: Arc::new(Mutex::new(None)),
         }
     }
@@ -174,6 +214,26 @@ impl VaultManagerModule {
         self.show_message("Mounting...");
     }
 
+    fn start_create(&mut self, name: String, size_bytes: u64, password: String) {
+        let slot = Arc::clone(&self.action_result);
+        tokio::spawn(async move {
+            let msg = match registry::create_volume(
+                &name,
+                size_bytes,
+                PasswordMode::Custom,
+                password,
+                None,
+            )
+            .await
+            {
+                Ok(cfg) => format!("Created '{}' (id: {}).", cfg.display_name, cfg.id),
+                Err(e) => format!("Create failed: {e}"),
+            };
+            *slot.lock().unwrap() = Some(msg);
+        });
+        self.show_message("Creating...");
+    }
+
     fn start_unmount(&mut self, volume_id: String, display_name: String) {
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
@@ -230,6 +290,87 @@ impl VaultManagerModule {
         ))
         .alignment(Alignment::Center)
         .style(Style::default().fg(theme.base_fg));
+        frame.render_widget(hint, chunks[2]);
+    }
+
+    fn draw_create_form(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &MokuTheme,
+        form: &CreateForm,
+    ) {
+        let chunks = Layout::vertical([
+            Constraint::Percentage(35),
+            Constraint::Length(6),
+            Constraint::Length(2),
+            Constraint::Percentage(35),
+        ])
+        .split(area);
+        let box_area = Layout::horizontal([
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+        ])
+        .split(chunks[1])[1];
+
+        let field_style = |focused: bool| {
+            if focused {
+                Style::default().fg(theme.selection_fg)
+            } else {
+                Style::default().fg(theme.base_fg)
+            }
+        };
+        let marker = |focused: bool| if focused { ">" } else { " " };
+        let masked_password: String = form.password.chars().map(|_| '•').collect();
+
+        let mut lines = vec![
+            Line::styled(
+                format!(
+                    "{} Name:     {}",
+                    marker(form.focus == CreateField::Name),
+                    form.name
+                ),
+                field_style(form.focus == CreateField::Name),
+            ),
+            Line::styled(
+                format!(
+                    "{} Size:     {}",
+                    marker(form.focus == CreateField::Size),
+                    form.size
+                ),
+                field_style(form.focus == CreateField::Size),
+            ),
+            Line::styled(
+                format!(
+                    "{} Password: {}",
+                    marker(form.focus == CreateField::Password),
+                    masked_password
+                ),
+                field_style(form.focus == CreateField::Password),
+            ),
+        ];
+        if let Some(err) = &form.error {
+            lines.push(Line::styled(
+                format!("  {err}"),
+                Style::default().fg(theme.error),
+            ));
+        }
+
+        let p = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" New Volume ")
+                    .title_alignment(Alignment::Center)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.info)),
+            )
+            .style(Style::default().bg(theme.base_bg));
+        frame.render_widget(p, box_area);
+
+        let hint = Paragraph::new("[Tab] Switch field  [Enter] Create  [Esc] Cancel")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.base_fg));
         frame.render_widget(hint, chunks[2]);
     }
 }
@@ -291,6 +432,66 @@ impl TuiModule for VaultManagerModule {
             return Ok(true);
         }
 
+        if let Some(form) = &mut self.create_form {
+            let Event::Key(key) = event else {
+                return Ok(false);
+            };
+            if key.kind != KeyEventKind::Press {
+                return Ok(false);
+            }
+            match key.code {
+                KeyCode::Esc => self.create_form = None,
+                KeyCode::Tab => {
+                    form.focus = match form.focus {
+                        CreateField::Name => CreateField::Size,
+                        CreateField::Size => CreateField::Password,
+                        CreateField::Password => CreateField::Name,
+                    };
+                }
+                KeyCode::Enter => {
+                    if form.name.trim().is_empty() {
+                        form.error = Some("Name cannot be empty.".to_string());
+                    } else if form.password.is_empty() {
+                        form.error = Some("Password cannot be empty.".to_string());
+                    } else {
+                        match size::parse_size(&form.size) {
+                            Ok(size_bytes) => {
+                                let name = form.name.trim().to_string();
+                                let password = form.password.clone();
+                                self.create_form = None;
+                                self.start_create(name, size_bytes, password);
+                            }
+                            Err(e) => form.error = Some(format!("Invalid size: {e}")),
+                        }
+                    }
+                }
+                KeyCode::Char(c) => {
+                    match form.focus {
+                        CreateField::Name => form.name.push(c),
+                        CreateField::Size => form.size.push(c),
+                        CreateField::Password => form.password.push(c),
+                    }
+                    form.error = None;
+                }
+                KeyCode::Backspace => {
+                    match form.focus {
+                        CreateField::Name => {
+                            form.name.pop();
+                        }
+                        CreateField::Size => {
+                            form.size.pop();
+                        }
+                        CreateField::Password => {
+                            form.password.pop();
+                        }
+                    }
+                    form.error = None;
+                }
+                _ => return Ok(false),
+            }
+            return Ok(true);
+        }
+
         let command = resolve_event(event, &ctx.config.load().keys, None);
         match command {
             Command::Up => self.select_previous(),
@@ -309,6 +510,9 @@ impl TuiModule for VaultManagerModule {
                 KeyCode::Char('r') => {
                     self.refresh().await;
                     self.show_message("Refreshed.");
+                }
+                KeyCode::Char('c') => {
+                    self.create_form = Some(CreateForm::new());
                 }
                 KeyCode::Char('m') | KeyCode::Enter => {
                     if let Some(row) = self.selected() {
@@ -354,11 +558,16 @@ impl TuiModule for VaultManagerModule {
             return;
         }
 
+        if let Some(form) = &self.create_form {
+            self.draw_create_form(frame, area, theme, form);
+            return;
+        }
+
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
 
         let items: Vec<ListItem> = if self.rows.is_empty() {
             vec![ListItem::new(
-                "  No encrypted volumes yet. Create one with: moku vault create <name> --size 10GB",
+                "  No encrypted volumes yet. Press [c] to create one.",
             )]
         } else {
             self.rows
@@ -405,7 +614,7 @@ impl TuiModule for VaultManagerModule {
             .as_ref()
             .map(|(m, _)| m.clone())
             .unwrap_or_else(|| {
-                " [Enter]/[m] Mount  [u] Unmount  [r] Refresh  [Esc] Back ".to_string()
+                " [Enter]/[m] Mount  [u] Unmount  [c] Create  [r] Refresh  [Esc] Back ".to_string()
             });
         let help_widget = Paragraph::new(help)
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
@@ -415,5 +624,193 @@ impl TuiModule for VaultManagerModule {
                     .border_style(Style::default().fg(theme.border)),
             );
         frame.render_widget(help_widget, chunks[1]);
+    }
+}
+
+#[cfg(test)]
+mod create_form_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::empty()))
+    }
+
+    #[tokio::test]
+    async fn test_tab_cycles_focus_through_all_three_fields() {
+        let mut module = VaultManagerModule::new();
+        module.create_form = Some(CreateForm::new());
+        let mut ctx = create_test_context().await;
+
+        assert_eq!(
+            module.create_form.as_ref().unwrap().focus,
+            CreateField::Name
+        );
+        module
+            .handle_event(&key(KeyCode::Tab), &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            module.create_form.as_ref().unwrap().focus,
+            CreateField::Size
+        );
+        module
+            .handle_event(&key(KeyCode::Tab), &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            module.create_form.as_ref().unwrap().focus,
+            CreateField::Password
+        );
+        module
+            .handle_event(&key(KeyCode::Tab), &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            module.create_form.as_ref().unwrap().focus,
+            CreateField::Name
+        );
+    }
+
+    #[tokio::test]
+    async fn test_char_input_routes_to_the_focused_field() {
+        let mut module = VaultManagerModule::new();
+        module.create_form = Some(CreateForm::new());
+        let mut ctx = create_test_context().await;
+
+        module
+            .handle_event(&key(KeyCode::Char('a')), &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(module.create_form.as_ref().unwrap().name, "a");
+
+        module
+            .handle_event(&key(KeyCode::Tab), &mut ctx)
+            .await
+            .unwrap();
+        module
+            .handle_event(&key(KeyCode::Char('1')), &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(module.create_form.as_ref().unwrap().size, "1");
+    }
+
+    #[tokio::test]
+    async fn test_enter_with_empty_name_sets_error_and_keeps_form_open() {
+        let mut module = VaultManagerModule::new();
+        module.create_form = Some(CreateForm::new());
+        let mut ctx = create_test_context().await;
+
+        module
+            .handle_event(&key(KeyCode::Enter), &mut ctx)
+            .await
+            .unwrap();
+        let form = module.create_form.as_ref().expect("form should stay open");
+        assert!(form.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_enter_with_invalid_size_sets_error() {
+        let mut module = VaultManagerModule::new();
+        let mut form = CreateForm::new();
+        form.name = "test".to_string();
+        form.size = "not-a-size".to_string();
+        form.password = "hunter2".to_string();
+        module.create_form = Some(form);
+        let mut ctx = create_test_context().await;
+
+        module
+            .handle_event(&key(KeyCode::Enter), &mut ctx)
+            .await
+            .unwrap();
+        let form = module.create_form.as_ref().expect("form should stay open");
+        assert!(form.error.as_ref().unwrap().contains("Invalid size"));
+    }
+
+    #[tokio::test]
+    async fn test_enter_with_empty_password_sets_error() {
+        let mut module = VaultManagerModule::new();
+        let mut form = CreateForm::new();
+        form.name = "test".to_string();
+        form.size = "10MiB".to_string();
+        module.create_form = Some(form);
+        let mut ctx = create_test_context().await;
+
+        module
+            .handle_event(&key(KeyCode::Enter), &mut ctx)
+            .await
+            .unwrap();
+        let form = module.create_form.as_ref().expect("form should stay open");
+        assert!(form.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_esc_cancels_the_form() {
+        let mut module = VaultManagerModule::new();
+        module.create_form = Some(CreateForm::new());
+        let mut ctx = create_test_context().await;
+
+        module
+            .handle_event(&key(KeyCode::Esc), &mut ctx)
+            .await
+            .unwrap();
+        assert!(module.create_form.is_none());
+    }
+
+    #[test]
+    fn test_create_form_render_shows_all_three_fields() {
+        let mut module = VaultManagerModule::new();
+        let mut form = CreateForm::new();
+        form.name = "my-vault".to_string();
+        form.size = "1GB".to_string();
+        module.create_form = Some(form);
+
+        let (width, height) = (70u16, 20u16);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| module.draw(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content.contains("New Volume"));
+        assert!(content.contains("Name"));
+        assert!(content.contains("my-vault"));
+        assert!(content.contains("Size"));
+        assert!(content.contains("1GB"));
+        assert!(content.contains("Password"));
     }
 }

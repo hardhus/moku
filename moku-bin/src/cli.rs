@@ -129,6 +129,10 @@ pub enum VaultCommands {
     },
     /// Unmount a volume.
     Unmount { name: String },
+    /// Register an existing volume directory (containing its own
+    /// volume.json — e.g. moved by hand, or created before moku tracked
+    /// volume locations) so it can be managed by name/id like any other.
+    Import { path: String },
     /// Internal: runs the actual mount in a dedicated child process,
     /// spawned by `Mount`. Reads the password from stdin. Not for direct use.
     #[command(hide = true)]
