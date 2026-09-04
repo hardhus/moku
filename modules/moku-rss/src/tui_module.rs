@@ -23,10 +23,12 @@ pub enum Panel {
     Items,
 }
 
-/// Which field of the (URL, name) add/edit flow is currently being typed —
-/// mirrors `modules/moku-secrets/src/tui_module.rs`'s `AddStage` shape.
+/// Which field of the URL+name add/edit form currently has keyboard focus.
+/// Both fields are shown at once (`Tab` switches focus, `Enter` submits
+/// from either) — unlike `modules/moku-secrets/src/tui_module.rs`'s
+/// `AddStage`, this isn't a sequential wizard.
 #[derive(PartialEq, Clone, Copy)]
-pub enum EditStage {
+pub enum EditField {
     Url,
     Name,
 }
@@ -43,7 +45,15 @@ pub enum RssView {
     EditFeed {
         url_input: String,
         name_input: String,
-        stage: EditStage,
+        focus: EditField,
+        /// True while `name_input` is still just an auto-suggestion (empty,
+        /// domain-derived, or fetched) that the user hasn't typed into
+        /// themselves — only while this holds does a background title
+        /// fetch get to overwrite it.
+        name_is_suggested: bool,
+        /// True while a background `RssEngine::peek_title` fetch for the
+        /// current `url_input` is in flight (cosmetic — shows "fetching…").
+        title_fetch_pending: bool,
         /// `None` = adding a new feed. `Some(i)` = editing `feeds[i]` (the
         /// real index into the `feeds` Vec, not the feed_state display
         /// index, which is offset by +1 for the "All Feeds" row).
@@ -57,6 +67,11 @@ pub struct RssTuiModule {
     view: RssView,
     refresh_result: Arc<Mutex<Option<Result<Vec<FeedItem>, String>>>>,
     is_refreshing: bool,
+    /// Set by a background `RssEngine::peek_title` fetch spawned when the
+    /// edit modal's focus leaves the URL field — `(url_it_was_fetched_for,
+    /// title_or_none)`. Kept on the module (not the transient `RssView`)
+    /// since the spawned task outlives any single view value.
+    title_suggestion: Arc<Mutex<Option<(String, Option<String>)>>>,
 }
 
 impl RssTuiModule {
@@ -76,6 +91,7 @@ impl RssTuiModule {
             },
             refresh_result: Arc::new(Mutex::new(None)),
             is_refreshing: false,
+            title_suggestion: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -119,24 +135,28 @@ fn matches_feed(item: &FeedItem, feed: &FeedSubscription) -> bool {
     false
 }
 
+/// A URL's host with any leading `www.` stripped (same `reqwest::Url`
+/// approach already used by `matches_feed`, not moku-bookmark's separate
+/// string-based `extract_domain`). `None` if the URL doesn't parse or has
+/// no host.
+fn domain_of(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    Some(host.strip_prefix("www.").unwrap_or(host).to_string())
+}
+
 /// The text shown for a feed in the Feeds panel: its own title if it has
 /// one (manually set, or auto-adopted from the feed's own parsed title —
 /// see `RssEngine::fetch_all`/`maybe_adopt_fetched_title`), else the
-/// feed's domain (same `reqwest::Url` + `www.`-stripping approach already
-/// used by `matches_feed`, not moku-bookmark's separate string-based one),
-/// else the raw URL as a last resort. Never the full URL when a title or a
-/// parseable host is available — long URLs sharing a common prefix (e.g.
-/// every YouTube channel feed) were indistinguishable otherwise.
+/// feed's domain, else the raw URL as a last resort. Never the full URL
+/// when a title or a parseable host is available — long URLs sharing a
+/// common prefix (e.g. every YouTube channel feed) were indistinguishable
+/// otherwise.
 fn feed_label(feed: &FeedSubscription) -> String {
     if let Some(title) = feed.title.as_deref().filter(|t| !t.is_empty()) {
         return title.to_string();
     }
-    if let Ok(url) = reqwest::Url::parse(&feed.url) {
-        if let Some(host) = url.host_str() {
-            return host.strip_prefix("www.").unwrap_or(host).to_string();
-        }
-    }
-    feed.url.clone()
+    domain_of(&feed.url).unwrap_or_else(|| feed.url.clone())
 }
 
 pub enum EditOutcome {
@@ -257,6 +277,7 @@ impl TuiModule for RssTuiModule {
             view,
             refresh_result,
             is_refreshing,
+            title_suggestion,
         } = self;
 
         match view {
@@ -392,7 +413,9 @@ impl TuiModule for RssTuiModule {
                                 *view = RssView::EditFeed {
                                     url_input: String::new(),
                                     name_input: String::new(),
-                                    stage: EditStage::Url,
+                                    focus: EditField::Url,
+                                    name_is_suggested: true,
+                                    title_fetch_pending: false,
                                     editing_index: None,
                                 };
                                 changed = true;
@@ -402,10 +425,14 @@ impl TuiModule for RssTuiModule {
                                     if let Some(i) = feed_state.selected() {
                                         if i > 0 && i - 1 < feeds.len() {
                                             let f = &feeds[i - 1];
+                                            let name_input = f.title.clone().unwrap_or_default();
+                                            let name_is_suggested = name_input.is_empty();
                                             *view = RssView::EditFeed {
                                                 url_input: f.url.clone(),
-                                                name_input: f.title.clone().unwrap_or_default(),
-                                                stage: EditStage::Url,
+                                                name_input,
+                                                focus: EditField::Url,
+                                                name_is_suggested,
+                                                title_fetch_pending: false,
                                                 editing_index: Some(i - 1),
                                             };
                                             changed = true;
@@ -550,9 +577,29 @@ impl TuiModule for RssTuiModule {
             RssView::EditFeed {
                 url_input,
                 name_input,
-                stage,
+                focus,
+                name_is_suggested,
+                title_fetch_pending,
                 editing_index,
             } => {
+                // Apply a background title-suggestion fetch's result, if
+                // one just finished for the URL currently in the field and
+                // the user hasn't typed a name of their own since it was
+                // kicked off (see the Tab handler below).
+                let got_suggestion = {
+                    let mut slot = title_suggestion.lock().unwrap();
+                    slot.take()
+                };
+                if let Some((for_url, title)) = got_suggestion {
+                    if for_url == url_input.trim() {
+                        *title_fetch_pending = false;
+                        if *name_is_suggested && let Some(t) = title {
+                            *name_input = t;
+                        }
+                        changed = true;
+                    }
+                }
+
                 if let Event::Key(key) = event {
                     if key.kind == KeyEventKind::Press {
                         match key.code {
@@ -568,85 +615,112 @@ impl TuiModule for RssTuiModule {
                                 };
                                 changed = true;
                             }
+                            KeyCode::Tab => {
+                                let switching_to_name = *focus == EditField::Url;
+                                *focus = match focus {
+                                    EditField::Url => EditField::Name,
+                                    EditField::Name => EditField::Url,
+                                };
+                                // Moving from the URL field to the Name
+                                // field: give an instant domain-based
+                                // suggestion (no network needed), then try
+                                // to upgrade it to the feed's real title in
+                                // the background — same fetch machinery the
+                                // [r] refresh already uses.
+                                if switching_to_name && *name_is_suggested {
+                                    let trimmed = url_input.trim().to_string();
+                                    if !trimmed.is_empty() {
+                                        *name_input = domain_of(&trimmed).unwrap_or_default();
+                                        if !*title_fetch_pending {
+                                            *title_fetch_pending = true;
+                                            let slot = Arc::clone(title_suggestion);
+                                            let fetch_url = trimmed;
+                                            tokio::spawn(async move {
+                                                let title = RssEngine::peek_title(&fetch_url).await;
+                                                let mut slot = slot.lock().unwrap();
+                                                *slot = Some((fetch_url, title));
+                                            });
+                                        }
+                                    }
+                                }
+                                changed = true;
+                            }
                             KeyCode::Backspace => {
-                                match stage {
-                                    EditStage::Url => {
+                                match focus {
+                                    EditField::Url => {
                                         url_input.pop();
                                     }
-                                    EditStage::Name => {
+                                    EditField::Name => {
                                         name_input.pop();
+                                        *name_is_suggested = false;
                                     }
                                 }
                                 changed = true;
                             }
                             KeyCode::Enter => {
-                                match stage {
-                                    EditStage::Url => {
-                                        if url_input.trim().is_empty() {
-                                            ctx.show_warning("URL cannot be empty.");
-                                        } else {
-                                            *stage = EditStage::Name;
+                                if url_input.trim().is_empty() {
+                                    ctx.show_warning("URL cannot be empty.");
+                                } else {
+                                    let url = url_input.trim().to_string();
+                                    let name = name_input.trim();
+                                    let title = if name.is_empty() {
+                                        None
+                                    } else {
+                                        Some(name.to_string())
+                                    };
+                                    let outcome = apply_edit(feeds, *editing_index, url, title);
+                                    match outcome {
+                                        EditOutcome::DuplicateUrl => {
+                                            ctx.show_warning(
+                                                "A feed with this URL already exists.",
+                                            );
                                         }
-                                    }
-                                    EditStage::Name => {
-                                        let url = url_input.trim().to_string();
-                                        let name = name_input.trim();
-                                        let title = if name.is_empty() {
-                                            None
-                                        } else {
-                                            Some(name.to_string())
-                                        };
-                                        let outcome = apply_edit(feeds, *editing_index, url, title);
-                                        match outcome {
-                                            EditOutcome::DuplicateUrl => {
-                                                ctx.show_warning(
-                                                    "A feed with this URL already exists.",
-                                                );
-                                            }
-                                            EditOutcome::Added => {
-                                                if let Err(e) = RssEngine::save_feeds(
-                                                    &ctx.storage,
-                                                    &ctx.config.load(),
-                                                    feeds,
-                                                )
-                                                .await
-                                                {
-                                                    ctx.show_error(format!("Save failed: {}", e));
-                                                } else {
-                                                    ctx.show_info("Feed added.");
-                                                }
-                                            }
-                                            EditOutcome::Updated => {
-                                                if let Err(e) = RssEngine::save_feeds(
-                                                    &ctx.storage,
-                                                    &ctx.config.load(),
-                                                    feeds,
-                                                )
-                                                .await
-                                                {
-                                                    ctx.show_error(format!("Save failed: {}", e));
-                                                } else {
-                                                    ctx.show_info("Feed updated.");
-                                                }
+                                        EditOutcome::Added => {
+                                            if let Err(e) = RssEngine::save_feeds(
+                                                &ctx.storage,
+                                                &ctx.config.load(),
+                                                feeds,
+                                            )
+                                            .await
+                                            {
+                                                ctx.show_error(format!("Save failed: {}", e));
+                                            } else {
+                                                ctx.show_info("Feed added.");
                                             }
                                         }
-                                        let mut feed_state = ListState::default();
-                                        feed_state.select(Some(0));
-                                        let mut item_state = ListState::default();
-                                        item_state.select(Some(0));
-                                        *view = RssView::Split {
-                                            active_panel: Panel::Feeds,
-                                            feed_state,
-                                            item_state,
-                                        };
+                                        EditOutcome::Updated => {
+                                            if let Err(e) = RssEngine::save_feeds(
+                                                &ctx.storage,
+                                                &ctx.config.load(),
+                                                feeds,
+                                            )
+                                            .await
+                                            {
+                                                ctx.show_error(format!("Save failed: {}", e));
+                                            } else {
+                                                ctx.show_info("Feed updated.");
+                                            }
+                                        }
                                     }
+                                    let mut feed_state = ListState::default();
+                                    feed_state.select(Some(0));
+                                    let mut item_state = ListState::default();
+                                    item_state.select(Some(0));
+                                    *view = RssView::Split {
+                                        active_panel: Panel::Feeds,
+                                        feed_state,
+                                        item_state,
+                                    };
                                 }
                                 changed = true;
                             }
                             KeyCode::Char(c) => {
-                                match stage {
-                                    EditStage::Url => url_input.push(c),
-                                    EditStage::Name => name_input.push(c),
+                                match focus {
+                                    EditField::Url => url_input.push(c),
+                                    EditField::Name => {
+                                        name_input.push(c);
+                                        *name_is_suggested = false;
+                                    }
                                 }
                                 changed = true;
                             }
@@ -687,6 +761,7 @@ impl TuiModule for RssTuiModule {
             view,
             refresh_result: _,
             is_refreshing,
+            title_suggestion: _,
         } = self;
 
         match view {
@@ -856,32 +931,19 @@ impl TuiModule for RssTuiModule {
             RssView::EditFeed {
                 url_input,
                 name_input,
-                stage,
+                focus,
+                name_is_suggested: _,
+                title_fetch_pending,
                 editing_index,
             } => {
                 let popup_area = centered_rect(60, 20, area);
                 frame.render_widget(Clear, popup_area);
 
-                let editing = editing_index.is_some();
-                let (title, shown) = match stage {
-                    EditStage::Url => (
-                        if editing {
-                            " Edit Feed - URL "
-                        } else {
-                            " Add Feed - URL "
-                        },
-                        url_input.clone(),
-                    ),
-                    EditStage::Name => (
-                        if editing {
-                            " Edit Feed - Name (optional) "
-                        } else {
-                            " Add Feed - Name (optional) "
-                        },
-                        name_input.clone(),
-                    ),
+                let title = if editing_index.is_some() {
+                    " Edit Feed "
+                } else {
+                    " Add Feed "
                 };
-
                 let block = Block::default()
                     .title(title)
                     .borders(Borders::ALL)
@@ -892,21 +954,51 @@ impl TuiModule for RssTuiModule {
 
                 let layout = Layout::vertical([
                     Constraint::Length(1),
+                    Constraint::Length(1),
                     Constraint::Min(0),
                     Constraint::Length(1),
                 ])
                 .split(inner_area);
 
-                let input_p = Paragraph::new(format!("> {}", shown))
-                    .style(Style::default().fg(theme.base_fg));
-                frame.render_widget(input_p, layout[0]);
+                let field_style = |focused: bool| {
+                    if focused {
+                        Style::default().fg(theme.selection_fg)
+                    } else {
+                        Style::default().fg(theme.base_fg)
+                    }
+                };
 
-                let help_p = Paragraph::new(" [Enter] next/confirm  [Esc] cancel ").style(
-                    Style::default()
-                        .fg(theme.base_fg)
-                        .add_modifier(Modifier::DIM),
-                );
-                frame.render_widget(help_p, layout[2]);
+                let url_focused = *focus == EditField::Url;
+                let url_p = Paragraph::new(format!(
+                    "{} URL:  {}",
+                    if url_focused { ">" } else { " " },
+                    url_input
+                ))
+                .style(field_style(url_focused));
+                frame.render_widget(url_p, layout[0]);
+
+                let name_focused = *focus == EditField::Name;
+                let fetching = if *title_fetch_pending {
+                    " (fetching...)"
+                } else {
+                    ""
+                };
+                let name_p = Paragraph::new(format!(
+                    "{} Name: {}{}",
+                    if name_focused { ">" } else { " " },
+                    name_input,
+                    fetching
+                ))
+                .style(field_style(name_focused));
+                frame.render_widget(name_p, layout[1]);
+
+                let help_p = Paragraph::new(" [Tab] Switch field  [Enter] Save  [Esc] Cancel ")
+                    .style(
+                        Style::default()
+                            .fg(theme.base_fg)
+                            .add_modifier(Modifier::DIM),
+                    );
+                frame.render_widget(help_p, layout[3]);
             }
         }
     }
@@ -1086,17 +1178,26 @@ mod tests {
     }
 
     #[test]
-    fn test_edit_feed_view_shows_correct_stage_title_and_field() {
+    fn test_edit_feed_view_shows_both_fields_at_once() {
         let mut module = RssTuiModule::new();
         module.view = RssView::EditFeed {
             url_input: "https://example.com/feed".to_string(),
-            name_input: String::new(),
-            stage: EditStage::Url,
+            name_input: "My Feed".to_string(),
+            focus: EditField::Url,
+            name_is_suggested: false,
+            title_fetch_pending: false,
             editing_index: None,
         };
         let content = rendered_rows(&mut module).join("");
-        assert!(content.contains("Add Feed - URL"));
-        assert!(content.contains("https://example.com/feed"));
+        assert!(content.contains("Add Feed"));
+        assert!(
+            content.contains("https://example.com/feed"),
+            "URL field should be visible"
+        );
+        assert!(
+            content.contains("My Feed"),
+            "Name field should be visible at the same time"
+        );
     }
 
     #[test]
@@ -1105,12 +1206,29 @@ mod tests {
         module.view = RssView::EditFeed {
             url_input: String::new(),
             name_input: "My Name".to_string(),
-            stage: EditStage::Name,
+            focus: EditField::Name,
+            name_is_suggested: false,
+            title_fetch_pending: false,
             editing_index: Some(0),
         };
         let content = rendered_rows(&mut module).join("");
-        assert!(content.contains("Edit Feed - Name"));
+        assert!(content.contains("Edit Feed"));
         assert!(content.contains("My Name"));
+    }
+
+    #[test]
+    fn test_edit_feed_view_shows_fetching_indicator_while_title_fetch_pending() {
+        let mut module = RssTuiModule::new();
+        module.view = RssView::EditFeed {
+            url_input: "https://example.com/feed".to_string(),
+            name_input: "example.com".to_string(),
+            focus: EditField::Name,
+            name_is_suggested: true,
+            title_fetch_pending: true,
+            editing_index: None,
+        };
+        let content = rendered_rows(&mut module).join("");
+        assert!(content.contains("fetching"));
     }
 
     #[test]

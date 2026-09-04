@@ -56,6 +56,15 @@ impl RssEngine {
             .unwrap_or_default()
     }
 
+    /// Best-effort peek at a feed's own declared title, without storing
+    /// anything — used by the add/edit-feed modal to suggest a title as
+    /// soon as a URL is entered. `None` on any failure (network, parse, or
+    /// the feed simply not declaring a title); callers should already have
+    /// a synchronous fallback (e.g. the domain) shown regardless.
+    pub async fn peek_title(url: &str) -> Option<String> {
+        fetch_one(url).await.ok().and_then(|f| f.title)
+    }
+
     async fn save_items(
         storage: &moku_core::StorageManager,
         config: &moku_core::MokuConfig,
