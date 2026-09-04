@@ -38,6 +38,9 @@ struct FilterState {
     /// Indices into `registered_modules`, best fuzzy match first.
     matches: Vec<usize>,
     list_state: ListState,
+    /// Position within `matches` shown at the top row of the list box —
+    /// see `recompute_viewport`.
+    viewport_top: usize,
 }
 
 impl FilterState {
@@ -50,6 +53,7 @@ impl FilterState {
             query: String::new(),
             matches: (0..len).collect(),
             list_state,
+            viewport_top: 0,
         }
     }
 }
@@ -57,6 +61,9 @@ impl FilterState {
 pub struct LauncherModule {
     registered_modules: Vec<ModuleId>,
     state: ListState,
+    /// Absolute index shown at the top row of the list box — see
+    /// `recompute_viewport`.
+    viewport_top: usize,
     filter: Option<FilterState>,
 }
 
@@ -77,6 +84,7 @@ impl LauncherModule {
         Self {
             registered_modules,
             state,
+            viewport_top: 0,
             filter: None,
         }
     }
@@ -96,6 +104,13 @@ impl LauncherModule {
             None => 0,
         };
         self.state.select(Some(i));
+        self.viewport_top = recompute_viewport(
+            self.viewport_top,
+            i,
+            self.registered_modules.len(),
+            VISIBLE_ROWS,
+            SCROLL_MARGIN,
+        );
         true
     }
 
@@ -114,6 +129,13 @@ impl LauncherModule {
             None => 0,
         };
         self.state.select(Some(i));
+        self.viewport_top = recompute_viewport(
+            self.viewport_top,
+            i,
+            self.registered_modules.len(),
+            VISIBLE_ROWS,
+            SCROLL_MARGIN,
+        );
         true
     }
 
@@ -137,6 +159,13 @@ impl LauncherModule {
         let target = target as usize;
         self.registered_modules.swap(i, target);
         self.state.select(Some(target));
+        self.viewport_top = recompute_viewport(
+            self.viewport_top,
+            target,
+            self.registered_modules.len(),
+            VISIBLE_ROWS,
+            SCROLL_MARGIN,
+        );
         true
     }
 
@@ -168,6 +197,7 @@ impl LauncherModule {
             .list_state
             .select(if matches.is_empty() { None } else { Some(0) });
         filter.matches = matches;
+        filter.viewport_top = 0;
     }
 
     fn filter_push_char(&mut self, c: char) {
@@ -194,6 +224,13 @@ impl LauncherModule {
         let i = filter.list_state.selected().unwrap_or(0);
         let target = (i as i32 + dir).clamp(0, filter.matches.len() as i32 - 1);
         filter.list_state.select(Some(target as usize));
+        filter.viewport_top = recompute_viewport(
+            filter.viewport_top,
+            target as usize,
+            filter.matches.len(),
+            VISIBLE_ROWS,
+            SCROLL_MARGIN,
+        );
     }
 
     fn filter_selected_module(&self) -> Option<ModuleId> {
@@ -228,6 +265,50 @@ impl LauncherModule {
             }
         }
     }
+}
+
+/// Rows visible in the list box at once, and how many of those rows (at
+/// each end) act as a scroll margin — "scrolloff", in editor terms. With
+/// 7 and 3 there's exactly one truly free row (the middle) where the
+/// cursor can sit without scrolling; everywhere else the cursor stays
+/// pinned at row `SCROLL_MARGIN` (or `VISIBLE_ROWS - 1 - SCROLL_MARGIN`
+/// near the bottom) and the list scrolls under it instead — except at
+/// the true start/end of the list, where there's nothing left to scroll
+/// into and the cursor is free to reach row 0 / the last row directly.
+const VISIBLE_ROWS: usize = 7;
+const SCROLL_MARGIN: usize = 3;
+
+/// Adjusts `viewport_top` (the position shown at row 0) so `selected_pos`
+/// stays visible within a `window`-row view over `n` total items, per the
+/// scrolloff behavior described on `VISIBLE_ROWS`/`SCROLL_MARGIN`. Pure
+/// and stateless given the previous `viewport_top` — callers persist the
+/// result and pass it back in next time, which is what gives the cursor
+/// its "free" zone (it only ever moves when the margin is actually
+/// crossed, not on every keypress).
+fn recompute_viewport(
+    viewport_top: usize,
+    selected_pos: usize,
+    n: usize,
+    window: usize,
+    margin: usize,
+) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let window = window.min(n);
+    let max_top = n - window;
+    let top = viewport_top.min(max_top);
+    let cursor_row = selected_pos as i32 - top as i32;
+    let low = margin as i32;
+    let high = window as i32 - 1 - margin as i32;
+    let top = if cursor_row < low {
+        selected_pos.saturating_sub(margin)
+    } else if cursor_row > high {
+        (selected_pos + margin + 1).saturating_sub(window)
+    } else {
+        top
+    };
+    top.min(max_top)
 }
 
 const MAX_SELECTION_INDENT: usize = 4;
@@ -389,9 +470,10 @@ impl TuiModule for LauncherModule {
         // every row to the terminal's full width — the same "unnecessarily
         // big frame" complaint the vertical fix addressed, just sideways.
         // BOX_WIDTH is picked to comfortably fit the longest line we ever
-        // render (the browse-mode status/help text, ~70 cols) without
-        // wrapping; bump it if a longer string is ever added below.
-        const BOX_WIDTH: u16 = 74;
+        // render (the browse-mode status/help text, ~81 cols with its
+        // badge) without wrapping/clipping; bump it if a longer string is
+        // ever added below.
+        const BOX_WIDTH: u16 = 84;
         let box_width = BOX_WIDTH.min(area.width);
         let left_pad = area.width.saturating_sub(box_width) / 2;
         let area = Layout::horizontal([
@@ -401,14 +483,15 @@ impl TuiModule for LauncherModule {
         ])
         .split(area)[1];
 
-        // Size the list to its actual content (item count + its own top/
-        // bottom border) instead of stretching it to fill the rest of the
-        // screen — a near-empty screen-tall box around 10 short lines is
-        // exactly the "unnecessarily big frame" look this replaces. The
-        // list height is always based on the full (unfiltered) module
-        // count so the box doesn't resize/reflow while typing a search
-        // query — only which rows are visible inside it changes.
-        let list_height = (self.registered_modules.len() as u16).max(1) + 2;
+        // Size the list to a fixed, content-appropriate row count (capped
+        // at VISIBLE_ROWS) instead of stretching to fit every item at
+        // once — a near-empty screen-tall box is exactly the
+        // "unnecessarily big frame" look this replaces, and a fixed cap
+        // is also what makes the scrolloff behavior below actually
+        // engage. Always based on the full (unfiltered) module count so
+        // the box doesn't resize/reflow while typing a search query —
+        // only which rows are visible inside it changes.
+        let list_height = (VISIBLE_ROWS.min(self.registered_modules.len().max(1)) as u16) + 2;
         let search_height = if filtering { 3 } else { 0 };
         let content_height = 3 + list_height + 1 + search_height + 1;
         let top_pad = area.height.saturating_sub(content_height) / 2;
@@ -440,21 +523,20 @@ impl TuiModule for LauncherModule {
             );
         frame.render_widget(header, rows[1]);
 
-        // 2. Module list — a fixed-center "carousel": the selected item
-        // always renders at the box's middle row. Instead of the cursor
-        // moving down through a static list until it hits the bottom (or
-        // jumping across the whole screen when browse-mode wraparound
-        // kicks in at either end), the window of visible items rotates by
-        // one step around that fixed center row every time you press
-        // up/down — same wraparound as before, but it now reads as
-        // continuous rotation instead of a jump. No icons or numbers
-        // (mixed-width emoji glyphs render at inconsistent terminal cell
-        // widths across icons/fonts, which is what caused the earlier
-        // per-row misalignment; plain ASCII titles render at a fully
-        // consistent width everywhere). Every row starts at the same
-        // column (`base_indent`, from the longest title, so the whole
-        // block reads as centered) plus an additional indent that peaks
-        // on the center row and tapers off over its neighbors.
+        // 2. Module list — a bounded "scrolloff" view: the cursor moves
+        // freely within the box, but once it comes within SCROLL_MARGIN
+        // rows of either edge, the list scrolls under it instead of
+        // letting it go further — except at the true start/end of the
+        // list, where there's nothing left to scroll into and the cursor
+        // reaches row 0 / the last row directly (see `recompute_viewport`
+        // for the exact rule). No icons or numbers (mixed-width emoji
+        // glyphs render at inconsistent terminal cell widths across
+        // icons/fonts, which is what caused the earlier per-row
+        // misalignment; plain ASCII titles render at a fully consistent
+        // width everywhere). Every row starts at the same column
+        // (`base_indent`, from the longest title, so the whole block
+        // reads as centered) plus an additional indent that peaks on the
+        // cursor's row and tapers off over its neighbors.
         let display_indices: Vec<usize> = match &self.filter {
             Some(f) => f.matches.clone(),
             None => (0..self.registered_modules.len()).collect(),
@@ -462,6 +544,10 @@ impl TuiModule for LauncherModule {
         let selected_pos = match &self.filter {
             Some(f) => f.list_state.selected(),
             None => self.state.selected(),
+        };
+        let viewport_top = match &self.filter {
+            Some(f) => f.viewport_top,
+            None => self.viewport_top,
         };
 
         let list_block = Block::default()
@@ -473,11 +559,6 @@ impl TuiModule for LauncherModule {
         frame.render_widget(list_block, rows[2]);
 
         let inner_height = list_inner.height as usize;
-        let center_row = if inner_height == 0 {
-            0
-        } else {
-            (inner_height - 1) / 2
-        };
         let content_width = list_inner.width as usize;
         let max_title_len = self
             .registered_modules
@@ -486,39 +567,30 @@ impl TuiModule for LauncherModule {
             .max()
             .unwrap_or(0);
         let base_indent = content_width.saturating_sub(max_title_len) / 2;
+        // Where the cursor actually lands this frame — varies (row 0 near
+        // the true start, the last row near the true end, otherwise
+        // pinned at SCROLL_MARGIN) — this is the taper's reference point,
+        // not a fixed row.
+        let cursor_row = selected_pos.map(|p| p as i32 - viewport_top as i32);
 
-        // Fill rows nearest the center first so a very small filtered
-        // result set never wraps around and shows the same item twice —
-        // rows further out just stay blank once every distinct item has
-        // been placed.
-        let n_display = display_indices.len();
-        let mut row_order: Vec<usize> = (0..inner_height).collect();
-        row_order.sort_by_key(|&r| (r as i32 - center_row as i32).abs());
-        let mut cell_content: Vec<Option<String>> = vec![None; inner_height];
-        if n_display > 0 {
-            let sel = selected_pos.unwrap_or(0) as i32;
-            let mut shown = std::collections::HashSet::new();
-            for r in row_order {
-                let offset = r as i32 - center_row as i32;
-                let display_pos = (sel + offset).rem_euclid(n_display as i32) as usize;
-                if shown.insert(display_pos) {
-                    let idx = display_indices[display_pos];
-                    let id = self.registered_modules[idx];
-                    let indent =
-                        base_indent + selected_indent(offset.unsigned_abs() as usize, Some(0));
-                    cell_content[r] = Some(format!("{}{}", " ".repeat(indent), id.title()));
-                }
-            }
-        }
-
-        for (r, text) in cell_content.into_iter().enumerate() {
+        for r in 0..inner_height {
+            let display_pos = viewport_top + r;
+            let text = display_indices.get(display_pos).map(|&idx| {
+                let id = self.registered_modules[idx];
+                let distance = cursor_row
+                    .map(|c| (r as i32 - c).unsigned_abs() as usize)
+                    .unwrap_or(usize::MAX);
+                let indent = base_indent + selected_indent(distance, Some(0));
+                format!("{}{}", " ".repeat(indent), id.title())
+            });
+            let is_cursor_row = cursor_row.is_some_and(|c| c == r as i32);
             let row_area = Rect {
                 x: list_inner.x,
                 y: list_inner.y + r as u16,
                 width: list_inner.width,
                 height: 1,
             };
-            let style = if r == center_row {
+            let style = if is_cursor_row {
                 Style::default()
                     .fg(theme.selection_fg)
                     .bg(theme.selection_bg)
@@ -570,18 +642,22 @@ impl TuiModule for LauncherModule {
             frame.render_widget(input, rows[4]);
         }
 
-        // 5. Status/help bar
+        // 5. Status/help bar — plain ASCII only (no arrow glyphs). Mixed-
+        // width Unicode characters (↑/↓ included) render at inconsistent
+        // cell widths across terminals/fonts — the exact bug that caused
+        // the earlier per-row icon misalignment — and were cutting this
+        // text off mid-word on some terminals.
         let (badge, badge_bg, help) = if filtering {
             (
                 " SEARCH ",
                 theme.warning,
-                " Type to filter · ↑↓ Move · Enter Open · Esc Cancel ",
+                " Type to filter | [Up/Dn] Move | [Enter] Open | [Esc] Cancel ",
             )
         } else {
             (
                 " BROWSE ",
                 theme.selection_bg,
-                " ↑↓/jk Move · Enter Open · / Search · Shift+↑↓ Reorder · Esc/q Quit ",
+                " [j/k] Move | [/] Search | [Shift+Up/Dn] Sort | [Enter] Open | [q] Quit ",
             )
         };
         let status_line = Line::from(vec![
@@ -990,54 +1066,131 @@ mod tests {
     }
 
     #[test]
-    fn test_selected_module_always_renders_at_the_fixed_center_row() {
+    fn test_cursor_moves_freely_near_the_true_start_of_the_list() {
+        // Within SCROLL_MARGIN of the true top, there's nothing to scroll
+        // into yet, so the cursor's screen row should track its absolute
+        // index directly (row 0 for item 0, row 1 for item 1, ...).
         let mut launcher = launcher();
         let (width, height) = (100usize, 30usize);
-        let mut center_rows = std::collections::HashSet::new();
-        for i in [0usize, 3, 7, 9] {
+        for i in 0..SCROLL_MARGIN {
             launcher.state.select(Some(i));
+            launcher.viewport_top = recompute_viewport(
+                launcher.viewport_top,
+                i,
+                launcher.registered_modules.len(),
+                VISIBLE_ROWS,
+                SCROLL_MARGIN,
+            );
             let title = launcher.registered_modules[i].title().to_string();
             let row = find_row(&mut launcher, width, height, &title)
                 .expect("selected title should be visible");
-            center_rows.insert(row);
+            let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
+            assert_eq!(
+                row - list_top,
+                i,
+                "item {i} near the true start should sit at its own absolute row"
+            );
         }
+    }
+
+    #[test]
+    fn test_cursor_pins_at_the_margin_row_once_scrolling_engages() {
+        let mut launcher = launcher();
+        let (width, height) = (100usize, 30usize);
+        // Index comfortably past the margin on both sides (well within a
+        // 10-item list with VISIBLE_ROWS=7): scrolling should have already
+        // engaged, pinning the cursor at row SCROLL_MARGIN from the list's
+        // own top border.
+        let i = 5;
+        launcher.state.select(Some(i));
+        launcher.viewport_top = recompute_viewport(
+            launcher.viewport_top,
+            i,
+            launcher.registered_modules.len(),
+            VISIBLE_ROWS,
+            SCROLL_MARGIN,
+        );
+        let title = launcher.registered_modules[i].title().to_string();
+        let row = find_row(&mut launcher, width, height, &title)
+            .expect("selected title should be visible");
+        let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
         assert_eq!(
-            center_rows.len(),
-            1,
-            "the selected module should always render at the same fixed row regardless of which item is selected, got rows: {center_rows:?}"
+            row - list_top,
+            SCROLL_MARGIN,
+            "cursor should be pinned at the scrolloff margin row once scrolled"
         );
     }
 
     #[test]
-    fn test_item_before_first_wraps_to_appear_directly_above_center() {
+    fn test_cursor_reaches_the_last_row_at_the_true_end_of_the_list() {
         let mut launcher = launcher();
-        let last_title = launcher.registered_modules[launcher.registered_modules.len() - 1]
-            .title()
-            .to_string();
-        launcher.state.select(Some(0)); // Dashboard, the first item, at center
-
         let (width, height) = (100usize, 30usize);
-        let dashboard_row = find_row(&mut launcher, width, height, "Dashboard")
-            .expect("Dashboard should be visible when selected");
+        let last = launcher.registered_modules.len() - 1;
+        launcher.state.select(Some(last));
+        launcher.viewport_top = recompute_viewport(
+            launcher.viewport_top,
+            last,
+            launcher.registered_modules.len(),
+            VISIBLE_ROWS,
+            SCROLL_MARGIN,
+        );
+        let title = launcher.registered_modules[last].title().to_string();
+        let row = find_row(&mut launcher, width, height, &title)
+            .expect("selected title should be visible");
+        let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
+        assert_eq!(
+            row - list_top,
+            VISIBLE_ROWS - 1,
+            "the last item should reach the box's last row, not stop short"
+        );
+    }
 
-        // Re-render to inspect the row directly above (find_row above
-        // already rendered once; render again for a fresh buffer).
-        let backend = TestBackend::new(width as u16, height as u16);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let theme = MokuTheme::default();
-        terminal
-            .draw(|frame| {
-                launcher.draw(frame, Rect::new(0, 0, width as u16, height as u16), &theme)
-            })
-            .unwrap();
-        let content = terminal.backend().buffer().content.clone();
-        let row_above: String = content[(dashboard_row - 1) * width..dashboard_row * width]
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
+    #[test]
+    fn test_recompute_viewport_stays_put_within_the_free_zone() {
+        // n=10, window=7, margin=3: row 3 (cursor_row = selected - top) is
+        // the only truly free row — as long as the cursor would land
+        // exactly there, the existing viewport_top is left untouched.
+        assert_eq!(recompute_viewport(0, 3, 10, 7, 3), 0);
+        assert_eq!(recompute_viewport(1, 4, 10, 7, 3), 1); // unrelated prior offset preserved
+    }
+
+    #[test]
+    fn test_recompute_viewport_scrolls_forward_past_the_bottom_margin() {
+        assert_eq!(recompute_viewport(0, 4, 10, 7, 3), 1);
+        assert_eq!(recompute_viewport(1, 6, 10, 7, 3), 3); // clamped at max_top = n - window
+    }
+
+    #[test]
+    fn test_recompute_viewport_scrolls_backward_past_the_top_margin() {
+        assert_eq!(recompute_viewport(3, 3, 10, 7, 3), 0);
+        assert_eq!(recompute_viewport(3, 0, 10, 7, 3), 0);
+    }
+
+    #[test]
+    fn test_recompute_viewport_handles_empty_and_short_lists() {
+        assert_eq!(recompute_viewport(5, 0, 0, 7, 3), 0);
+        // n shorter than the window: max_top is 0, everything stays put.
+        assert_eq!(recompute_viewport(0, 1, 2, 7, 3), 0);
+    }
+
+    #[test]
+    fn test_status_bar_help_text_is_not_truncated() {
+        let mut launcher = launcher();
+        let content = rendered_content(&mut launcher);
         assert!(
-            row_above.contains(&last_title),
-            "the last module should wrap circularly to appear directly above the first when it's selected, but row above Dashboard was: {row_above:?}"
+            content.contains("[q] Quit"),
+            "browse-mode status bar should show the full \"[q] Quit\" hint, not a truncated fragment"
+        );
+        assert!(
+            content.contains("[Shift+Up/Dn] Sort"),
+            "browse-mode status bar should show the full reorder hint"
+        );
+
+        launcher.enter_filter_mode();
+        let content = rendered_content(&mut launcher);
+        assert!(
+            content.contains("[Esc] Cancel"),
+            "search-mode status bar should show the full cancel hint"
         );
     }
 
