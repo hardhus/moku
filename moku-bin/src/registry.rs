@@ -11,7 +11,7 @@ pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
 
     let plugin_ids: Vec<ModuleId> = loaded_plugins.iter().map(|m| m.id()).collect();
 
-    r.insert(Box::new(moku_launcher::LauncherModule::new(plugin_ids)));
+    r.insert(Box::new(moku_launcher::LauncherModule::new(plugin_ids, config)));
     r.insert(Box::new(moku_lock_screen::LockScreenModule::new()));
     r.insert(Box::new(moku_todo::TodoModule::new()));
     r.insert(Box::new(moku_settings::SettingsModule::new(config)));

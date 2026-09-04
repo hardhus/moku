@@ -58,10 +58,17 @@ impl Default for ThemeColors {
             border: "DarkGray".to_string(),
             selection_fg: "Yellow".to_string(),
             selection_bg: "Reset".to_string(),
-            info: "Blue".to_string(),
-            warning: "Yellow".to_string(),
-            error: "Red".to_string(),
-            success: "Green".to_string(),
+            // Semantic accent colors below are picked from the Okabe-Ito
+            // colorblind-safe palette rather than plain ANSI names — the
+            // classic success=Green/error=Red pair is the single most
+            // confusable pairing under red-green color vision deficiency.
+            // Backgrounds stay "Reset" (transparent); only these four hues
+            // changed. Still fully overridable per-user via `[themes.*]`
+            // in config.toml.
+            info: "#0072B2".to_string(),
+            warning: "#E69F00".to_string(),
+            error: "#D55E00".to_string(),
+            success: "#009E73".to_string(),
         }
     }
 }
