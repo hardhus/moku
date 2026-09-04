@@ -7,13 +7,17 @@ use ratatui::{
     Frame,
     layout::{Rect, Layout, Constraint},
     style::{Modifier, Style},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, List, ListItem},
 };
 use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
 
+const AUTOSTART_ARGS: &[&str] = &["daemon", "start", "--from-autostart"];
+
 pub struct DaemonStatusModule {
     is_running: bool,
     pid: Option<u32>,
+    autostart_enabled: bool,
     last_checked: Instant,
     message: Option<String>,
     message_time: Option<Instant>,
@@ -24,6 +28,7 @@ impl DaemonStatusModule {
         Self {
             is_running: false,
             pid: None,
+            autostart_enabled: false,
             last_checked: Instant::now(),
             message: None,
             message_time: None,
@@ -33,6 +38,9 @@ impl DaemonStatusModule {
     fn refresh_status(&mut self) {
         self.pid = crate::pid::read();
         self.is_running = self.pid.map(crate::status::pid_is_alive).unwrap_or(false);
+        self.autostart_enabled = std::env::current_exe()
+            .map(|exe| crate::autostart::is_autostart_enabled(&exe, AUTOSTART_ARGS))
+            .unwrap_or(false);
         self.last_checked = Instant::now();
     }
 
@@ -133,21 +141,18 @@ impl TuiModule for DaemonStatusModule {
                         }
                         changed = true;
                     }
-                    KeyCode::Char('e') => {
+                    KeyCode::Char('a') => {
                         if let Ok(exe) = std::env::current_exe() {
-                            match crate::autostart::set_autostart(true, &exe, &["daemon", "start", "--from-autostart"]) {
-                                Ok(_) => self.show_temp_message("Autostart enabled."),
+                            let enable = !self.autostart_enabled;
+                            match crate::autostart::set_autostart(enable, &exe, AUTOSTART_ARGS) {
+                                Ok(_) => {
+                                    self.autostart_enabled = enable;
+                                    self.show_temp_message(if enable { "Autostart enabled." } else { "Autostart disabled." });
+                                }
                                 Err(e) => self.show_temp_message(format!("Autostart error: {e}")),
                             }
-                        }
-                        changed = true;
-                    }
-                    KeyCode::Char('d') => {
-                        if let Ok(exe) = std::env::current_exe() {
-                            match crate::autostart::set_autostart(false, &exe, &["daemon", "start", "--from-autostart"]) {
-                                Ok(_) => self.show_temp_message("Autostart disabled."),
-                                Err(e) => self.show_temp_message(format!("Autostart error: {e}")),
-                            }
+                        } else {
+                            self.show_temp_message("Failed to find current executable path.");
                         }
                         changed = true;
                     }
@@ -193,18 +198,26 @@ impl TuiModule for DaemonStatusModule {
         frame.render_widget(header, chunks[0]);
 
         // 2. Status Panel
-        let status_str = if self.is_running {
-            format!(" [Running] (PID: {})", self.pid.unwrap_or(0))
+        let daemon_badge = if self.is_running {
+            Span::styled(format!("● Running (PID: {})", self.pid.unwrap_or(0)), Style::default().fg(theme.success))
         } else {
-            " [Stopped]".to_string()
+            Span::styled("● Stopped", Style::default().fg(theme.error))
         };
-        let last_check_str = format!("Last Checked: {}s ago", self.last_checked.elapsed().as_secs());
-        let info_text = format!(
-            "  Daemon Status: {}\n  {}\n  The daemon runs unencrypted tasks in the background.",
-            status_str, last_check_str
-        );
-        let info = Paragraph::new(info_text)
-            .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
+        let autostart_badge = if self.autostart_enabled {
+            Span::styled("● Enabled", Style::default().fg(theme.success))
+        } else {
+            Span::styled("● Disabled", Style::default().fg(theme.error))
+        };
+        let status_lines = Text::from(vec![
+            Line::from(vec![Span::raw("  Daemon:     "), daemon_badge]),
+            Line::from(vec![Span::raw("  Autostart:  "), autostart_badge]),
+            Line::from(Span::styled(
+                format!("  Last check: {}s ago", self.last_checked.elapsed().as_secs()),
+                Style::default().fg(theme.base_fg),
+            )),
+        ]);
+        let info = Paragraph::new(status_lines)
+            .style(Style::default().bg(theme.base_bg))
             .block(Block::default().title(" Status ").borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
         frame.render_widget(info, chunks[1]);
 
@@ -245,7 +258,8 @@ impl TuiModule for DaemonStatusModule {
         frame.render_widget(msg_widget, chunks[3]);
 
         // 5. Help Bar
-        let help_text = " [s] Start | [k] Stop | [r] Refresh | [e] Enable Autostart | [d] Disable Autostart | [Esc] Back ";
+        let autostart_label = if self.autostart_enabled { "Disable Autostart" } else { "Enable Autostart" };
+        let help_text = format!(" [s] Start | [k] Stop | [a] {autostart_label} | [r] Refresh | [Esc] Back ");
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
@@ -283,11 +297,53 @@ fn title_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
     #[test]
     fn test_title_case() {
         assert_eq!(title_case("rss"), "Rss");
         assert_eq!(title_case(""), "");
         assert_eq!(title_case("a"), "A");
+    }
+
+    fn rendered_content(module: &mut DaemonStatusModule) -> String {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| module.draw(frame, Rect::new(0, 0, 80, 24), &theme))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn test_draw_shows_running_and_autostart_enabled_badges() {
+        let mut module = DaemonStatusModule::new();
+        module.is_running = true;
+        module.pid = Some(4242);
+        module.autostart_enabled = true;
+        let content = rendered_content(&mut module);
+        assert!(content.contains("Running"));
+        assert!(content.contains("4242"));
+        assert!(content.contains("Enabled"));
+        assert!(content.contains("Disable Autostart"));
+    }
+
+    #[test]
+    fn test_draw_shows_stopped_and_autostart_disabled_badges() {
+        let mut module = DaemonStatusModule::new();
+        module.is_running = false;
+        module.pid = None;
+        module.autostart_enabled = false;
+        let content = rendered_content(&mut module);
+        assert!(content.contains("Stopped"));
+        assert!(content.contains("Disabled"));
+        assert!(content.contains("Enable Autostart"));
     }
 }

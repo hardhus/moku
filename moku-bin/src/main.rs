@@ -100,13 +100,17 @@ async fn main() -> Result<()> {
             }
             DaemonCommands::EnableAutostart => {
                 let exe = std::env::current_exe().map_err(|e| eyre!(e))?;
-                return moku_daemon::autostart::set_autostart(true, &exe, &["daemon", "start", "--from-autostart"])
-                    .map_err(|e| eyre!(e));
+                moku_daemon::autostart::set_autostart(true, &exe, &["daemon", "start", "--from-autostart"])
+                    .map_err(|e| eyre!(e))?;
+                println!("✅ Moku added to system autostart.");
+                return Ok(());
             }
             DaemonCommands::DisableAutostart => {
                 let exe = std::env::current_exe().map_err(|e| eyre!(e))?;
-                return moku_daemon::autostart::set_autostart(false, &exe, &["daemon", "start", "--from-autostart"])
-                    .map_err(|e| eyre!(e));
+                moku_daemon::autostart::set_autostart(false, &exe, &["daemon", "start", "--from-autostart"])
+                    .map_err(|e| eyre!(e))?;
+                println!("🧹 Moku removed from system autostart.");
+                return Ok(());
             }
         }
     }
