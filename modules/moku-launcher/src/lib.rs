@@ -384,12 +384,27 @@ impl TuiModule for LauncherModule {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
         let filtering = self.filter.is_some();
+
+        // Size the list to its actual content (item count + its own top/
+        // bottom border) instead of stretching it to fill the rest of the
+        // screen — a near-empty screen-tall box around 10 short lines is
+        // exactly the "unnecessarily big frame" look this replaces. The
+        // list height is always based on the full (unfiltered) module
+        // count so the box doesn't resize/reflow while typing a search
+        // query — only which rows are visible inside it changes.
+        let list_height = (self.registered_modules.len() as u16).max(1) + 2;
+        let search_height = if filtering { 3 } else { 0 };
+        let content_height = 3 + list_height + 1 + search_height + 1;
+        let top_pad = area.height.saturating_sub(content_height) / 2;
+
         let rows = Layout::vertical([
-            Constraint::Length(3),                             // 1. Header
-            Constraint::Min(0),                                // 2. Module list
-            Constraint::Length(1),                             // 3. Detail line
-            Constraint::Length(if filtering { 3 } else { 0 }), // 4. Search input
-            Constraint::Length(1),                             // 5. Status/help bar
+            Constraint::Length(top_pad),       // 0. top spacer (vertical centering)
+            Constraint::Length(3),             // 1. Header
+            Constraint::Length(list_height),   // 2. Module list (tight-fit)
+            Constraint::Length(1),             // 3. Detail line
+            Constraint::Length(search_height), // 4. Search input
+            Constraint::Length(1),             // 5. Status/help bar
+            Constraint::Min(0),                // 6. bottom spacer
         ])
         .split(area);
 
@@ -407,15 +422,20 @@ impl TuiModule for LauncherModule {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.border)),
             );
-        frame.render_widget(header, rows[0]);
+        frame.render_widget(header, rows[1]);
 
         // 2. Module list — no icons or numbers (mixed-width emoji glyphs
         // render at inconsistent terminal cell widths across icons/fonts,
         // which is what caused the earlier per-row misalignment; plain
         // ASCII titles render at a fully consistent width everywhere).
-        // Selection is shown by color (highlight_style below) AND by a
-        // graduated indent that peaks on the selected row and tapers off
-        // over its immediate neighbors, all center-aligned.
+        // Every row starts at the SAME column (`base_indent`, computed
+        // from the longest title so the whole block reads as centered),
+        // rather than each row centering itself independently — different
+        // title lengths would otherwise each land at a different column,
+        // making the selection indent below impossible to read. Selection
+        // is shown by color (highlight_style) AND by an additional indent
+        // on top of that shared baseline, peaking on the selected row and
+        // tapering off over its immediate neighbors.
         let display_indices: Vec<usize> = match &self.filter {
             Some(f) => f.matches.clone(),
             None => (0..self.registered_modules.len()).collect(),
@@ -424,14 +444,21 @@ impl TuiModule for LauncherModule {
             Some(f) => f.list_state.selected(),
             None => self.state.selected(),
         };
+        let content_width = rows[2].width.saturating_sub(2) as usize; // minus the list's own borders
+        let max_title_len = self
+            .registered_modules
+            .iter()
+            .map(|id| id.title().chars().count())
+            .max()
+            .unwrap_or(0);
+        let base_indent = content_width.saturating_sub(max_title_len) / 2;
         let items: Vec<ListItem> = display_indices
             .iter()
             .enumerate()
             .map(|(pos, &idx)| {
                 let id = self.registered_modules[idx];
-                let indent = selected_indent(pos, selected_pos);
-                let text = format!("{}{}", " ".repeat(indent), id.title());
-                ListItem::new(Line::from(text).alignment(Alignment::Center))
+                let indent = base_indent + selected_indent(pos, selected_pos);
+                ListItem::new(format!("{}{}", " ".repeat(indent), id.title()))
             })
             .collect();
         let list = List::new(items)
@@ -452,9 +479,9 @@ impl TuiModule for LauncherModule {
             .highlight_symbol("");
 
         if let Some(f) = &mut self.filter {
-            frame.render_stateful_widget(list, rows[1], &mut f.list_state);
+            frame.render_stateful_widget(list, rows[2], &mut f.list_state);
         } else {
-            frame.render_stateful_widget(list, rows[1], &mut self.state);
+            frame.render_stateful_widget(list, rows[2], &mut self.state);
         }
 
         // 3. Detail line — the selected module's one-line description.
@@ -471,7 +498,7 @@ impl TuiModule for LauncherModule {
             .unwrap_or_default();
         let detail =
             Paragraph::new(detail_text).style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
-        frame.render_widget(detail, rows[2]);
+        frame.render_widget(detail, rows[3]);
 
         // 4. Search input — only occupies space while filtering.
         if let Some(f) = &self.filter {
@@ -492,7 +519,7 @@ impl TuiModule for LauncherModule {
                     .border_style(Style::default().fg(theme.info).add_modifier(Modifier::BOLD))
                     .style(Style::default().bg(theme.base_bg)),
             );
-            frame.render_widget(input, rows[3]);
+            frame.render_widget(input, rows[4]);
         }
 
         // 5. Status/help bar
@@ -521,7 +548,7 @@ impl TuiModule for LauncherModule {
             Span::styled(help, Style::default().fg(theme.base_fg)),
         ]);
         let status = Paragraph::new(status_line).style(Style::default().bg(theme.base_bg));
-        frame.render_widget(status, rows[4]);
+        frame.render_widget(status, rows[5]);
     }
 }
 
@@ -789,6 +816,81 @@ mod tests {
         assert!(
             x_selected > x_far,
             "selected row's title should render further right than its own unselected position (selected_x={x_selected}, far_x={x_far})"
+        );
+    }
+
+    #[test]
+    fn test_unselected_rows_of_different_lengths_share_the_same_starting_column() {
+        let mut launcher = launcher();
+        // Select index 0 so every other row here is at distance >= 2 (zero
+        // extra indent) — differing only in their own title length.
+        launcher.state.select(Some(0));
+
+        let short_title = ModuleId::BOOKMARK.title(); // "Bookmark"
+        let long_title = ModuleId::RSS.title(); // "RSS Feed Reader"
+        assert!(launcher.registered_modules.contains(&ModuleId::BOOKMARK));
+        assert!(launcher.registered_modules.contains(&ModuleId::RSS));
+
+        let x_short = title_start_x(&mut launcher, short_title).expect("short title visible");
+        let x_long = title_start_x(&mut launcher, long_title).expect("long title visible");
+
+        assert_eq!(
+            x_short, x_long,
+            "unselected rows of different title lengths should start at the same column (short_x={x_short}, long_x={x_long})"
+        );
+    }
+
+    #[test]
+    fn test_content_is_vertically_padded_from_the_top_in_a_tall_terminal() {
+        let mut launcher = launcher();
+        let (width, height) = (100usize, 50usize); // far taller than the content needs
+        let backend = TestBackend::new(width as u16, height as u16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| {
+                launcher.draw(frame, Rect::new(0, 0, width as u16, height as u16), &theme)
+            })
+            .unwrap();
+        let content = terminal.backend().buffer().content.clone();
+        let header_row = (0..height).find(|&y| {
+            let row: String = content[y * width..(y + 1) * width]
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            row.contains("Moku Launcher")
+        });
+        assert!(
+            header_row.is_some_and(|y| y > 0),
+            "header should be pushed down from the very top row in a tall terminal (found at {header_row:?}) — content should be vertically centered, not pinned to the top"
+        );
+    }
+
+    #[test]
+    fn test_list_box_does_not_stretch_to_fill_a_tall_terminal() {
+        let mut launcher = launcher();
+        let (width, height) = (100u16, 50u16); // far taller than 10 items need
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| launcher.draw(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let content = terminal.backend().buffer().content.clone();
+        let w = width as usize;
+        // The status bar ("BROWSE") should land well before the last row —
+        // if the list still stretched via Min(0), it (and everything below
+        // it) would be pushed all the way down to the bottom of the screen.
+        let status_row = (0..height as usize).find(|&y| {
+            let row: String = content[y * w..(y + 1) * w]
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            row.contains("BROWSE")
+        });
+        assert!(
+            status_row.is_some_and(|y| y < height as usize - 5),
+            "status bar should sit well above the bottom of a tall terminal (found at {status_row:?} of {height} rows) — the list shouldn't stretch to fill all remaining space"
         );
     }
 
