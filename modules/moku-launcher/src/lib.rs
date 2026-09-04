@@ -18,7 +18,6 @@ use moku_core::{
 };
 
 mod fuzzy;
-mod meta;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -39,21 +38,30 @@ struct FilterState {
     matches: Vec<usize>,
     list_state: ListState,
     /// Position within `matches` shown at the top row of the list box —
-    /// see `recompute_viewport`.
-    viewport_top: usize,
+    /// see `recompute_ring_viewport`. `i64` because it's tracked modulo
+    /// `n` (never clamped), so intermediate values can transiently go
+    /// negative before `rem_euclid` normalizes them.
+    viewport_top: i64,
 }
 
 impl FilterState {
     fn new(len: usize) -> Self {
         let mut list_state = ListState::default();
-        if len > 0 {
+        // Establish the ring's rotated position up front (see
+        // recompute_ring_viewport) so the very first render already shows
+        // item 0 pinned at RING_MARGIN rather than at row 0 — the rotation
+        // isn't something that only kicks in after the first keypress.
+        let viewport_top = if len > 0 {
             list_state.select(Some(0));
-        }
+            recompute_ring_viewport(0, 0, len, RING_MARGIN)
+        } else {
+            0
+        };
         Self {
             query: String::new(),
             matches: (0..len).collect(),
             list_state,
-            viewport_top: 0,
+            viewport_top,
         }
     }
 }
@@ -62,8 +70,8 @@ pub struct LauncherModule {
     registered_modules: Vec<ModuleId>,
     state: ListState,
     /// Absolute index shown at the top row of the list box — see
-    /// `recompute_viewport`.
-    viewport_top: usize,
+    /// `recompute_ring_viewport`.
+    viewport_top: i64,
     filter: Option<FilterState>,
 }
 
@@ -78,13 +86,17 @@ impl LauncherModule {
         let registered_modules =
             merge_order(ModuleId::all_visible(), extra_visible, &settings.order);
         let mut state = ListState::default();
-        if !registered_modules.is_empty() {
+        // Same up-front rotation as FilterState::new — see there.
+        let viewport_top = if !registered_modules.is_empty() {
             state.select(Some(0));
-        }
+            recompute_ring_viewport(0, 0, registered_modules.len(), RING_MARGIN)
+        } else {
+            0
+        };
         Self {
             registered_modules,
             state,
-            viewport_top: 0,
+            viewport_top,
             filter: None,
         }
     }
@@ -104,12 +116,11 @@ impl LauncherModule {
             None => 0,
         };
         self.state.select(Some(i));
-        self.viewport_top = recompute_viewport(
+        self.viewport_top = recompute_ring_viewport(
             self.viewport_top,
             i,
             self.registered_modules.len(),
-            VISIBLE_ROWS,
-            SCROLL_MARGIN,
+            RING_MARGIN,
         );
         true
     }
@@ -129,12 +140,11 @@ impl LauncherModule {
             None => 0,
         };
         self.state.select(Some(i));
-        self.viewport_top = recompute_viewport(
+        self.viewport_top = recompute_ring_viewport(
             self.viewport_top,
             i,
             self.registered_modules.len(),
-            VISIBLE_ROWS,
-            SCROLL_MARGIN,
+            RING_MARGIN,
         );
         true
     }
@@ -159,12 +169,11 @@ impl LauncherModule {
         let target = target as usize;
         self.registered_modules.swap(i, target);
         self.state.select(Some(target));
-        self.viewport_top = recompute_viewport(
+        self.viewport_top = recompute_ring_viewport(
             self.viewport_top,
             target,
             self.registered_modules.len(),
-            VISIBLE_ROWS,
-            SCROLL_MARGIN,
+            RING_MARGIN,
         );
         true
     }
@@ -196,8 +205,11 @@ impl LauncherModule {
         filter
             .list_state
             .select(if matches.is_empty() { None } else { Some(0) });
+        // Re-establish the ring's rotated position immediately (same
+        // reasoning as FilterState::new) rather than resetting to 0 and
+        // waiting for the next arrow press to correct it.
+        filter.viewport_top = recompute_ring_viewport(0, 0, matches.len(), RING_MARGIN);
         filter.matches = matches;
-        filter.viewport_top = 0;
     }
 
     fn filter_push_char(&mut self, c: char) {
@@ -224,12 +236,11 @@ impl LauncherModule {
         let i = filter.list_state.selected().unwrap_or(0);
         let target = (i as i32 + dir).clamp(0, filter.matches.len() as i32 - 1);
         filter.list_state.select(Some(target as usize));
-        filter.viewport_top = recompute_viewport(
+        filter.viewport_top = recompute_ring_viewport(
             filter.viewport_top,
             target as usize,
             filter.matches.len(),
-            VISIBLE_ROWS,
-            SCROLL_MARGIN,
+            RING_MARGIN,
         );
     }
 
@@ -267,65 +278,53 @@ impl LauncherModule {
     }
 }
 
-/// Rows visible in the list box at once, and how many of those rows (at
-/// each end) act as a scroll margin — "scrolloff", in editor terms. With
-/// 7 and 3 there's exactly one truly free row (the middle) where the
-/// cursor can sit without scrolling; everywhere else the cursor stays
-/// pinned at row `SCROLL_MARGIN` (or `VISIBLE_ROWS - 1 - SCROLL_MARGIN`
-/// near the bottom) and the list scrolls under it instead — except at
-/// the true start/end of the list, where there's nothing left to scroll
-/// into and the cursor is free to reach row 0 / the last row directly.
-const VISIBLE_ROWS: usize = 7;
-const SCROLL_MARGIN: usize = 3;
+/// How many rows (0-indexed distance from either edge) the cursor stays
+/// clear of before the ring starts rotating under it. 2 means the cursor
+/// pins at row index 2 (the 3rd row) from the top, and at row index
+/// `n - 1 - 2` from the bottom — everywhere in between is a free zone
+/// where the cursor moves normally.
+const RING_MARGIN: usize = 2;
 
-/// Adjusts `viewport_top` (the position shown at row 0) so `selected_pos`
-/// stays visible within a `window`-row view over `n` total items, per the
-/// scrolloff behavior described on `VISIBLE_ROWS`/`SCROLL_MARGIN`. Pure
-/// and stateless given the previous `viewport_top` — callers persist the
-/// result and pass it back in next time, which is what gives the cursor
-/// its "free" zone (it only ever moves when the margin is actually
-/// crossed, not on every keypress).
-fn recompute_viewport(
-    viewport_top: usize,
-    selected_pos: usize,
-    n: usize,
-    window: usize,
-    margin: usize,
-) -> usize {
+/// Adjusts `viewport_top` (the item shown at row 0) so the cursor stays
+/// within `RING_MARGIN` of either edge, exactly like `recompute_viewport`
+/// used to — except the `n`-item list is always shown in full (the
+/// window is always `n` rows) and there is no true start/end at all:
+/// positions are tracked modulo `n`, never clamped, so "moving past the
+/// first item" wraps seamlessly to the last one and vice versa. This is
+/// what makes it read as a closed ring/cylinder rather than a bounded
+/// list — the cursor never reaches row 0 or the last row exposing a
+/// boundary, because there isn't one.
+fn recompute_ring_viewport(viewport_top: i64, selected_pos: usize, n: usize, margin: usize) -> i64 {
     if n == 0 {
         return 0;
     }
-    let window = window.min(n);
-    let max_top = n - window;
-    let top = viewport_top.min(max_top);
-    let cursor_row = selected_pos as i32 - top as i32;
-    let low = margin as i32;
-    let high = window as i32 - 1 - margin as i32;
-    let top = if cursor_row < low {
-        selected_pos.saturating_sub(margin)
+    let n = n as i64;
+    let cursor_row = (selected_pos as i64 - viewport_top).rem_euclid(n);
+    let low = margin as i64;
+    let high = n - 1 - margin as i64;
+    if cursor_row < low {
+        (selected_pos as i64 - low).rem_euclid(n)
     } else if cursor_row > high {
-        (selected_pos + margin + 1).saturating_sub(window)
+        (selected_pos as i64 - high).rem_euclid(n)
     } else {
-        top
-    };
-    top.min(max_top)
+        viewport_top.rem_euclid(n)
+    }
 }
 
 const MAX_SELECTION_INDENT: usize = 4;
-const SELECTION_INDENT_STEP: usize = 2;
 
-/// Leading-space count for the row at `pos` (its position within whatever
-/// list is currently displayed — full or filtered), given the selected
-/// row's position `selected_pos`. Peaks at `MAX_SELECTION_INDENT` on the
-/// selected row itself, tapers by `SELECTION_INDENT_STEP` per row of
-/// distance, floors at 0. `None` selection (empty list) means no indent
-/// anywhere.
-fn selected_indent(pos: usize, selected_pos: Option<usize>) -> usize {
-    let Some(selected_pos) = selected_pos else {
+/// Leading-space count for a row `distance` steps away from the cursor's
+/// row. Quadratic rather than linear falloff — not a real 3D perspective
+/// (ratatui/a terminal can't do that), but a curved rather than
+/// stair-step taper reads a little more like a rounded surface. Floors
+/// at 0; `has_selection = false` (nothing selected, e.g. an empty list)
+/// means no indent anywhere.
+fn selected_indent(distance: usize, has_selection: bool) -> usize {
+    if !has_selection {
         return 0;
-    };
-    let distance = pos.abs_diff(selected_pos);
-    MAX_SELECTION_INDENT.saturating_sub(distance.saturating_mul(SELECTION_INDENT_STEP))
+    }
+    let d = distance as f32;
+    (MAX_SELECTION_INDENT as f32 - d * d * 0.6).max(0.0).round() as usize
 }
 
 /// Orders `all_visible` (+ `extra_visible` appended) according to
@@ -483,27 +482,23 @@ impl TuiModule for LauncherModule {
         ])
         .split(area)[1];
 
-        // Size the list to a fixed, content-appropriate row count (capped
-        // at VISIBLE_ROWS) instead of stretching to fit every item at
-        // once — a near-empty screen-tall box is exactly the
-        // "unnecessarily big frame" look this replaces, and a fixed cap
-        // is also what makes the scrolloff behavior below actually
-        // engage. Always based on the full (unfiltered) module count so
-        // the box doesn't resize/reflow while typing a search query —
-        // only which rows are visible inside it changes.
-        let list_height = (VISIBLE_ROWS.min(self.registered_modules.len().max(1)) as u16) + 2;
+        // Size the list to fit every item at once — nothing is ever
+        // hidden — instead of the terminal's full height. Always based on
+        // the full (unfiltered) module count so the box doesn't resize/
+        // reflow while typing a search query — only which item lands at
+        // the cursor's row changes.
+        let list_height = (self.registered_modules.len().max(1) as u16) + 2;
         let search_height = if filtering { 3 } else { 0 };
-        let content_height = 3 + list_height + 1 + search_height + 1;
+        let content_height = 3 + list_height + search_height + 1;
         let top_pad = area.height.saturating_sub(content_height) / 2;
 
         let rows = Layout::vertical([
             Constraint::Length(top_pad),       // 0. top spacer (vertical centering)
             Constraint::Length(3),             // 1. Header
-            Constraint::Length(list_height),   // 2. Module list (tight-fit)
-            Constraint::Length(1),             // 3. Detail line
-            Constraint::Length(search_height), // 4. Search input
-            Constraint::Length(1),             // 5. Status/help bar
-            Constraint::Min(0),                // 6. bottom spacer
+            Constraint::Length(list_height),   // 2. Module list (fits every item)
+            Constraint::Length(search_height), // 3. Search input
+            Constraint::Length(1),             // 4. Status/help bar
+            Constraint::Min(0),                // 5. bottom spacer
         ])
         .split(area);
 
@@ -523,20 +518,24 @@ impl TuiModule for LauncherModule {
             );
         frame.render_widget(header, rows[1]);
 
-        // 2. Module list — a bounded "scrolloff" view: the cursor moves
-        // freely within the box, but once it comes within SCROLL_MARGIN
-        // rows of either edge, the list scrolls under it instead of
-        // letting it go further — except at the true start/end of the
-        // list, where there's nothing left to scroll into and the cursor
-        // reaches row 0 / the last row directly (see `recompute_viewport`
-        // for the exact rule). No icons or numbers (mixed-width emoji
-        // glyphs render at inconsistent terminal cell widths across
-        // icons/fonts, which is what caused the earlier per-row
-        // misalignment; plain ASCII titles render at a fully consistent
-        // width everywhere). Every row starts at the same column
-        // (`base_indent`, from the longest title, so the whole block
-        // reads as centered) plus an additional indent that peaks on the
-        // cursor's row and tapers off over its neighbors.
+        // 2. Module list — a closed ring: every item is always shown (the
+        // box is sized to fit them all), and the list has no true start
+        // or end — positions wrap circularly (see `recompute_ring_viewport`).
+        // The cursor moves freely near the middle, and once it's within
+        // RING_MARGIN rows of either edge, it stays put and the whole
+        // ring rotates by one step under it instead — including right
+        // past the first/last item, which is what makes it read as a
+        // cylinder rather than a list with edges. No icons or numbers
+        // (mixed-width emoji glyphs render at inconsistent terminal cell
+        // widths across icons/fonts, which is what caused the earlier
+        // per-row misalignment; plain ASCII titles render at a fully
+        // consistent width everywhere). Every row starts at the same
+        // column (`base_indent`, from the longest title, so the whole
+        // block reads as centered) plus an additional indent — and a
+        // dimmer color the further a row sits from the cursor — that
+        // peaks/is brightest on the cursor's row and tapers off over its
+        // neighbors, suggesting a little depth without any real
+        // perspective (a terminal can't do that).
         let display_indices: Vec<usize> = match &self.filter {
             Some(f) => f.matches.clone(),
             None => (0..self.registered_modules.len()).collect(),
@@ -549,6 +548,7 @@ impl TuiModule for LauncherModule {
             Some(f) => f.viewport_top,
             None => self.viewport_top,
         };
+        let n_display = display_indices.len() as i64;
 
         let list_block = Block::default()
             .title(format!(" Modules ({}) ", self.registered_modules.len()))
@@ -567,36 +567,43 @@ impl TuiModule for LauncherModule {
             .max()
             .unwrap_or(0);
         let base_indent = content_width.saturating_sub(max_title_len) / 2;
-        // Where the cursor actually lands this frame — varies (row 0 near
-        // the true start, the last row near the true end, otherwise
-        // pinned at SCROLL_MARGIN) — this is the taper's reference point,
-        // not a fixed row.
-        let cursor_row = selected_pos.map(|p| p as i32 - viewport_top as i32);
+        // Where the cursor actually lands this frame — usually pinned at
+        // RING_MARGIN from an edge, free to sit anywhere in the middle —
+        // this is the taper/dimming's reference point.
+        let cursor_row =
+            selected_pos.map(|p| (p as i64 - viewport_top).rem_euclid(n_display.max(1)));
 
         for r in 0..inner_height {
-            let display_pos = viewport_top + r;
-            let text = display_indices.get(display_pos).map(|&idx| {
+            let text = (n_display > 0).then(|| {
+                let idx = display_indices[(viewport_top + r as i64).rem_euclid(n_display) as usize];
                 let id = self.registered_modules[idx];
                 let distance = cursor_row
-                    .map(|c| (r as i32 - c).unsigned_abs() as usize)
+                    .map(|c| (r as i64 - c).unsigned_abs() as usize)
                     .unwrap_or(usize::MAX);
-                let indent = base_indent + selected_indent(distance, Some(0));
+                let indent = base_indent + selected_indent(distance, cursor_row.is_some());
                 format!("{}{}", " ".repeat(indent), id.title())
             });
-            let is_cursor_row = cursor_row.is_some_and(|c| c == r as i32);
+            let distance = cursor_row
+                .map(|c| (r as i64 - c).unsigned_abs())
+                .unwrap_or(u64::MAX);
+            let style = if distance == 0 {
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else if distance <= 2 {
+                Style::default().fg(theme.base_fg).bg(theme.base_bg)
+            } else {
+                Style::default()
+                    .fg(theme.base_fg)
+                    .bg(theme.base_bg)
+                    .add_modifier(Modifier::DIM)
+            };
             let row_area = Rect {
                 x: list_inner.x,
                 y: list_inner.y + r as u16,
                 width: list_inner.width,
                 height: 1,
-            };
-            let style = if is_cursor_row {
-                Style::default()
-                    .fg(theme.selection_fg)
-                    .bg(theme.selection_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.base_fg).bg(theme.base_bg)
             };
             frame.render_widget(
                 Paragraph::new(text.unwrap_or_default()).style(style),
@@ -604,23 +611,7 @@ impl TuiModule for LauncherModule {
             );
         }
 
-        // 3. Detail line — the selected module's one-line description.
-        let selected_id = if self.filter.is_some() {
-            self.filter_selected_module()
-        } else {
-            self.state
-                .selected()
-                .and_then(|i| self.registered_modules.get(i))
-                .copied()
-        };
-        let detail_text = selected_id
-            .map(|id| format!(" {} — {}", meta::icon_for(id), meta::description_for(id)))
-            .unwrap_or_default();
-        let detail =
-            Paragraph::new(detail_text).style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
-        frame.render_widget(detail, rows[3]);
-
-        // 4. Search input — only occupies space while filtering.
+        // 3. Search input — only occupies space while filtering.
         if let Some(f) = &self.filter {
             let (body, style) = if f.query.is_empty() {
                 (
@@ -639,10 +630,10 @@ impl TuiModule for LauncherModule {
                     .border_style(Style::default().fg(theme.info).add_modifier(Modifier::BOLD))
                     .style(Style::default().bg(theme.base_bg)),
             );
-            frame.render_widget(input, rows[4]);
+            frame.render_widget(input, rows[3]);
         }
 
-        // 5. Status/help bar — plain ASCII only (no arrow glyphs). Mixed-
+        // 4. Status/help bar — plain ASCII only (no arrow glyphs). Mixed-
         // width Unicode characters (↑/↓ included) render at inconsistent
         // cell widths across terminals/fonts — the exact bug that caused
         // the earlier per-row icon misalignment — and were cutting this
@@ -672,7 +663,7 @@ impl TuiModule for LauncherModule {
             Span::styled(help, Style::default().fg(theme.base_fg)),
         ]);
         let status = Paragraph::new(status_line).style(Style::default().bg(theme.base_bg));
-        frame.render_widget(status, rows[5]);
+        frame.render_widget(status, rows[4]);
     }
 }
 
@@ -882,19 +873,13 @@ mod tests {
     }
 
     #[test]
-    fn test_selected_indent_peaks_at_selection_and_tapers_off() {
-        assert_eq!(selected_indent(3, Some(3)), MAX_SELECTION_INDENT);
-        assert_eq!(
-            selected_indent(2, Some(3)),
-            MAX_SELECTION_INDENT - SELECTION_INDENT_STEP
-        );
-        assert_eq!(
-            selected_indent(4, Some(3)),
-            MAX_SELECTION_INDENT - SELECTION_INDENT_STEP
-        );
-        assert_eq!(selected_indent(0, Some(3)), 0); // distance 3, floored at 0
-        assert_eq!(selected_indent(9, Some(3)), 0); // far away, floored at 0
-        assert_eq!(selected_indent(0, None), 0); // nothing selected
+    fn test_selected_indent_peaks_at_zero_distance_and_tapers_off() {
+        assert_eq!(selected_indent(0, true), MAX_SELECTION_INDENT);
+        assert!(selected_indent(1, true) < MAX_SELECTION_INDENT);
+        assert!(selected_indent(1, true) > selected_indent(2, true));
+        assert_eq!(selected_indent(3, true), 0); // far enough away, floored at 0
+        assert_eq!(selected_indent(9, true), 0); // far away, floored at 0
+        assert_eq!(selected_indent(0, false), 0); // nothing selected
     }
 
     /// Column offset of the first occurrence of `title` in the rendered
@@ -945,15 +930,17 @@ mod tests {
 
     #[test]
     fn test_unselected_rows_of_different_lengths_share_the_same_starting_column() {
+        // Fresh launcher: Dashboard (index 0) selected, ring already
+        // rotated by the constructor so its cursor row is fixed at
+        // RING_MARGIN. Notes and Vault both land far enough from that row
+        // (distance >= 3) to have zero extra indent regardless of their
+        // very different title lengths ("Notes" vs "Encrypted Vaults").
         let mut launcher = launcher();
-        // Select index 0 so every other row here is at distance >= 2 (zero
-        // extra indent) — differing only in their own title length.
-        launcher.state.select(Some(0));
 
-        let short_title = ModuleId::BOOKMARK.title(); // "Bookmark"
-        let long_title = ModuleId::RSS.title(); // "RSS Feed Reader"
-        assert!(launcher.registered_modules.contains(&ModuleId::BOOKMARK));
-        assert!(launcher.registered_modules.contains(&ModuleId::RSS));
+        let short_title = ModuleId::NOTES.title(); // "Notes"
+        let long_title = ModuleId::VAULT.title(); // "Encrypted Vaults"
+        assert!(launcher.registered_modules.contains(&ModuleId::NOTES));
+        assert!(launcher.registered_modules.contains(&ModuleId::VAULT));
 
         let x_short = title_start_x(&mut launcher, short_title).expect("short title visible");
         let x_long = title_start_x(&mut launcher, long_title).expect("long title visible");
@@ -1019,20 +1006,9 @@ mod tests {
     }
 
     #[test]
-    fn test_draw_list_rows_have_no_icon_or_number_prefix() {
+    fn test_draw_list_rows_have_no_number_prefix() {
         let mut launcher = launcher();
         let content = rendered_content(&mut launcher);
-        // Every icon appears at most once (the single detail-line icon for
-        // the selected module) — never once per row.
-        for id in ModuleId::all_visible() {
-            let icon = meta::icon_for(id);
-            assert!(
-                content.matches(icon).count() <= 1,
-                "icon {icon} for {} appears more than once — looks like it leaked into list rows",
-                id.as_str()
-            );
-        }
-        // No "N. " numbering prefix anywhere in the rendered content.
         for n in 1..=launcher.registered_modules.len() {
             assert!(
                 !content.contains(&format!("{n}. ")),
@@ -1066,111 +1042,101 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_moves_freely_near_the_true_start_of_the_list() {
-        // Within SCROLL_MARGIN of the true top, there's nothing to scroll
-        // into yet, so the cursor's screen row should track its absolute
-        // index directly (row 0 for item 0, row 1 for item 1, ...).
+    fn test_all_items_always_rendered_simultaneously() {
+        // Nothing is ever hidden — every module title should be present
+        // in the rendered content regardless of which one is selected.
         let mut launcher = launcher();
-        let (width, height) = (100usize, 30usize);
-        for i in 0..SCROLL_MARGIN {
+        for i in [0usize, 5, 9] {
             launcher.state.select(Some(i));
-            launcher.viewport_top = recompute_viewport(
-                launcher.viewport_top,
-                i,
-                launcher.registered_modules.len(),
-                VISIBLE_ROWS,
-                SCROLL_MARGIN,
-            );
-            let title = launcher.registered_modules[i].title().to_string();
-            let row = find_row(&mut launcher, width, height, &title)
-                .expect("selected title should be visible");
-            let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
-            assert_eq!(
-                row - list_top,
-                i,
-                "item {i} near the true start should sit at its own absolute row"
-            );
+            let content = rendered_content(&mut launcher);
+            for id in &launcher.registered_modules.clone() {
+                assert!(
+                    content.contains(id.title()),
+                    "{} missing while item {i} selected",
+                    id.title()
+                );
+            }
         }
     }
 
     #[test]
-    fn test_cursor_pins_at_the_margin_row_once_scrolling_engages() {
+    fn test_first_item_selected_does_not_render_at_the_top_row() {
+        // Fresh launcher: Dashboard (index 0) is selected, and the
+        // constructor already rotates the ring so it sits at RING_MARGIN,
+        // never at row 0 — there's no "true start" to expose.
         let mut launcher = launcher();
         let (width, height) = (100usize, 30usize);
-        // Index comfortably past the margin on both sides (well within a
-        // 10-item list with VISIBLE_ROWS=7): scrolling should have already
-        // engaged, pinning the cursor at row SCROLL_MARGIN from the list's
-        // own top border.
-        let i = 5;
-        launcher.state.select(Some(i));
-        launcher.viewport_top = recompute_viewport(
-            launcher.viewport_top,
-            i,
-            launcher.registered_modules.len(),
-            VISIBLE_ROWS,
-            SCROLL_MARGIN,
-        );
-        let title = launcher.registered_modules[i].title().to_string();
-        let row = find_row(&mut launcher, width, height, &title)
-            .expect("selected title should be visible");
+        let dashboard_row = find_row(&mut launcher, width, height, "Dashboard")
+            .expect("Dashboard should be visible");
         let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
         assert_eq!(
-            row - list_top,
-            SCROLL_MARGIN,
-            "cursor should be pinned at the scrolloff margin row once scrolled"
+            dashboard_row - list_top,
+            RING_MARGIN,
+            "the first item should sit at the pinned margin row, not row 0"
         );
     }
 
     #[test]
-    fn test_cursor_reaches_the_last_row_at_the_true_end_of_the_list() {
+    fn test_ring_rotates_one_step_keeping_cursor_row_fixed() {
+        // The exact KARE2 -> KARE3 transition confirmed with the user:
+        // Daemon (index 5) selected, then one more Down to Vault (index
+        // 6) — the cursor's screen row must not change, but the ring
+        // rotates so HTTP (the item that was two rows above Daemon) now
+        // appears at the very top.
         let mut launcher = launcher();
+        for _ in 0..5 {
+            launcher.next(); // Dashboard -> ... -> Daemon
+        }
+        assert_eq!(launcher.state.selected(), Some(5));
         let (width, height) = (100usize, 30usize);
-        let last = launcher.registered_modules.len() - 1;
-        launcher.state.select(Some(last));
-        launcher.viewport_top = recompute_viewport(
-            launcher.viewport_top,
-            last,
-            launcher.registered_modules.len(),
-            VISIBLE_ROWS,
-            SCROLL_MARGIN,
-        );
-        let title = launcher.registered_modules[last].title().to_string();
-        let row = find_row(&mut launcher, width, height, &title)
-            .expect("selected title should be visible");
         let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
+        let daemon_row =
+            find_row(&mut launcher, width, height, "Daemon Status").unwrap() - list_top;
+
+        launcher.next(); // Daemon -> Vault
+        assert_eq!(launcher.state.selected(), Some(6));
+        let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
+        let vault_row =
+            find_row(&mut launcher, width, height, "Encrypted Vaults").unwrap() - list_top;
+        let http_row = find_row(&mut launcher, width, height, "API Client").unwrap() - list_top;
+
         assert_eq!(
-            row - list_top,
-            VISIBLE_ROWS - 1,
-            "the last item should reach the box's last row, not stop short"
+            vault_row, daemon_row,
+            "the cursor's screen row should not move once scrolling has engaged"
+        );
+        assert_eq!(
+            http_row, 0,
+            "the ring should have rotated so the wrapped-around item lands at the very top"
         );
     }
 
     #[test]
-    fn test_recompute_viewport_stays_put_within_the_free_zone() {
-        // n=10, window=7, margin=3: row 3 (cursor_row = selected - top) is
-        // the only truly free row — as long as the cursor would land
-        // exactly there, the existing viewport_top is left untouched.
-        assert_eq!(recompute_viewport(0, 3, 10, 7, 3), 0);
-        assert_eq!(recompute_viewport(1, 4, 10, 7, 3), 1); // unrelated prior offset preserved
+    fn test_recompute_ring_viewport_stays_put_in_the_free_zone() {
+        // n=10, margin=2: cursor_row in [2, 7] is free — moving within it
+        // never changes viewport_top.
+        assert_eq!(recompute_ring_viewport(8, 1, 10, 2), 8);
+        assert_eq!(recompute_ring_viewport(8, 5, 10, 2), 8);
     }
 
     #[test]
-    fn test_recompute_viewport_scrolls_forward_past_the_bottom_margin() {
-        assert_eq!(recompute_viewport(0, 4, 10, 7, 3), 1);
-        assert_eq!(recompute_viewport(1, 6, 10, 7, 3), 3); // clamped at max_top = n - window
+    fn test_recompute_ring_viewport_rotates_forward_past_the_bottom_margin() {
+        // The exact KARE1 -> KARE3 sequence confirmed with the user.
+        assert_eq!(recompute_ring_viewport(0, 0, 10, 2), 8); // KARE1: Dashboard selected fresh
+        assert_eq!(recompute_ring_viewport(8, 6, 10, 2), 9); // KARE3: one more Down past the margin
     }
 
     #[test]
-    fn test_recompute_viewport_scrolls_backward_past_the_top_margin() {
-        assert_eq!(recompute_viewport(3, 3, 10, 7, 3), 0);
-        assert_eq!(recompute_viewport(3, 0, 10, 7, 3), 0);
+    fn test_recompute_ring_viewport_rotates_backward_past_the_top_margin() {
+        assert_eq!(recompute_ring_viewport(8, 0, 10, 2), 8); // still in free zone at row 2
+        assert_eq!(recompute_ring_viewport(8, 9, 10, 2), 7); // wraps past Dashboard to the last item
     }
 
     #[test]
-    fn test_recompute_viewport_handles_empty_and_short_lists() {
-        assert_eq!(recompute_viewport(5, 0, 0, 7, 3), 0);
-        // n shorter than the window: max_top is 0, everything stays put.
-        assert_eq!(recompute_viewport(0, 1, 2, 7, 3), 0);
+    fn test_recompute_ring_viewport_handles_empty_and_singleton_lists() {
+        assert_eq!(recompute_ring_viewport(5, 0, 0, 2), 0);
+        // A single item with a margin larger than the list: must not
+        // panic, and settles on a stable value.
+        assert_eq!(recompute_ring_viewport(0, 0, 1, 2), 0);
     }
 
     #[test]
