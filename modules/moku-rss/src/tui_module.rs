@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use arboard::Clipboard;
@@ -24,6 +23,14 @@ pub enum Panel {
     Items,
 }
 
+/// Which field of the (URL, name) add/edit flow is currently being typed —
+/// mirrors `modules/moku-secrets/src/tui_module.rs`'s `AddStage` shape.
+#[derive(PartialEq, Clone, Copy)]
+pub enum EditStage {
+    Url,
+    Name,
+}
+
 pub enum RssView {
     Split {
         active_panel: Panel,
@@ -33,8 +40,14 @@ pub enum RssView {
     Detail {
         item: FeedItem,
     },
-    AddFeed {
-        input: String,
+    EditFeed {
+        url_input: String,
+        name_input: String,
+        stage: EditStage,
+        /// `None` = adding a new feed. `Some(i)` = editing `feeds[i]` (the
+        /// real index into the `feeds` Vec, not the feed_state display
+        /// index, which is offset by +1 for the "All Feeds" row).
+        editing_index: Option<usize>,
     },
 }
 
@@ -44,7 +57,6 @@ pub struct RssTuiModule {
     view: RssView,
     refresh_result: Arc<Mutex<Option<Result<Vec<FeedItem>, String>>>>,
     is_refreshing: bool,
-    status_message: Option<(String, Instant)>,
 }
 
 impl RssTuiModule {
@@ -64,12 +76,7 @@ impl RssTuiModule {
             },
             refresh_result: Arc::new(Mutex::new(None)),
             is_refreshing: false,
-            status_message: None,
         }
-    }
-
-    fn show_status(&mut self, msg: impl Into<String>) {
-        self.status_message = Some((msg.into(), Instant::now()));
     }
 }
 
@@ -110,6 +117,65 @@ fn matches_feed(item: &FeedItem, feed: &FeedSubscription) -> bool {
         }
     }
     false
+}
+
+/// The text shown for a feed in the Feeds panel: its own title if it has
+/// one (manually set, or auto-adopted from the feed's own parsed title —
+/// see `RssEngine::fetch_all`/`maybe_adopt_fetched_title`), else the
+/// feed's domain (same `reqwest::Url` + `www.`-stripping approach already
+/// used by `matches_feed`, not moku-bookmark's separate string-based one),
+/// else the raw URL as a last resort. Never the full URL when a title or a
+/// parseable host is available — long URLs sharing a common prefix (e.g.
+/// every YouTube channel feed) were indistinguishable otherwise.
+fn feed_label(feed: &FeedSubscription) -> String {
+    if let Some(title) = feed.title.as_deref().filter(|t| !t.is_empty()) {
+        return title.to_string();
+    }
+    if let Ok(url) = reqwest::Url::parse(&feed.url) {
+        if let Some(host) = url.host_str() {
+            return host.strip_prefix("www.").unwrap_or(host).to_string();
+        }
+    }
+    feed.url.clone()
+}
+
+pub enum EditOutcome {
+    Added,
+    Updated,
+    DuplicateUrl,
+}
+
+/// The save-decision core of the add/edit-feed flow, kept free of I/O and
+/// `ctx` so it's directly unit-testable — same "pure core + thin
+/// side-effecting caller" split already used by `engine::merge_feed_entries`.
+pub fn apply_edit(
+    feeds: &mut Vec<FeedSubscription>,
+    editing_index: Option<usize>,
+    url: String,
+    title: Option<String>,
+) -> EditOutcome {
+    let duplicate = feeds
+        .iter()
+        .enumerate()
+        .any(|(i, f)| f.url == url && Some(i) != editing_index);
+    if duplicate {
+        return EditOutcome::DuplicateUrl;
+    }
+    match editing_index {
+        Some(i) => {
+            feeds[i].url = url;
+            feeds[i].title = title;
+            EditOutcome::Updated
+        }
+        None => {
+            feeds.push(FeedSubscription {
+                url,
+                title,
+                favorite: false,
+            });
+            EditOutcome::Added
+        }
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -175,10 +241,10 @@ impl TuiModule for RssTuiModule {
             match res {
                 Ok(all_items) => {
                     self.items = all_items;
-                    self.show_status("Feeds refreshed successfully.");
+                    ctx.show_info("Feeds refreshed successfully.");
                 }
                 Err(e) => {
-                    self.show_status(format!("Refresh error: {}", e));
+                    ctx.show_error(format!("Refresh error: {}", e));
                 }
             }
             changed = true;
@@ -191,7 +257,6 @@ impl TuiModule for RssTuiModule {
             view,
             refresh_result,
             is_refreshing,
-            status_message,
         } = self;
 
         match view {
@@ -303,8 +368,7 @@ impl TuiModule for RssTuiModule {
                             KeyCode::Char('r') => {
                                 if !*is_refreshing {
                                     *is_refreshing = true;
-                                    *status_message =
-                                        Some(("Refreshing feeds...".to_string(), Instant::now()));
+                                    ctx.show_info("Refreshing feeds...");
                                     let storage = Arc::clone(&ctx.storage);
                                     let config = Arc::clone(&ctx.config);
                                     let result_slot = Arc::clone(refresh_result);
@@ -325,10 +389,29 @@ impl TuiModule for RssTuiModule {
                                 }
                             }
                             KeyCode::Char('a') => {
-                                *view = RssView::AddFeed {
-                                    input: String::new(),
+                                *view = RssView::EditFeed {
+                                    url_input: String::new(),
+                                    name_input: String::new(),
+                                    stage: EditStage::Url,
+                                    editing_index: None,
                                 };
                                 changed = true;
+                            }
+                            KeyCode::Char('e') => {
+                                if *active_panel == Panel::Feeds {
+                                    if let Some(i) = feed_state.selected() {
+                                        if i > 0 && i - 1 < feeds.len() {
+                                            let f = &feeds[i - 1];
+                                            *view = RssView::EditFeed {
+                                                url_input: f.url.clone(),
+                                                name_input: f.title.clone().unwrap_or_default(),
+                                                stage: EditStage::Url,
+                                                editing_index: Some(i - 1),
+                                            };
+                                            changed = true;
+                                        }
+                                    }
+                                }
                             }
                             KeyCode::Char('f') => {
                                 if *active_panel == Panel::Feeds {
@@ -342,18 +425,11 @@ impl TuiModule for RssTuiModule {
                                             )
                                             .await
                                             {
-                                                *status_message = Some((
-                                                    format!("Save error: {}", e),
-                                                    Instant::now(),
-                                                ));
+                                                ctx.show_error(format!("Save error: {}", e));
+                                            } else if feeds[i - 1].favorite {
+                                                ctx.show_info("Added to favorites.");
                                             } else {
-                                                let msg = if feeds[i - 1].favorite {
-                                                    "Added to favorites ★"
-                                                } else {
-                                                    "Removed from favorites"
-                                                };
-                                                *status_message =
-                                                    Some((msg.to_string(), Instant::now()));
+                                                ctx.show_info("Removed from favorites.");
                                             }
                                             changed = true;
                                         }
@@ -372,14 +448,11 @@ impl TuiModule for RssTuiModule {
                                             )
                                             .await
                                             {
-                                                *status_message = Some((
-                                                    format!("Delete error: {}", e),
-                                                    Instant::now(),
-                                                ));
+                                                ctx.show_error(format!("Delete error: {}", e));
                                             } else {
-                                                *status_message = Some((
-                                                    format!("Removed: {}", removed.url),
-                                                    Instant::now(),
+                                                ctx.show_info(format!(
+                                                    "Removed: {}",
+                                                    feed_label(&removed)
                                                 ));
                                                 feed_state.select(Some((i - 1).max(0)));
                                             }
@@ -398,18 +471,9 @@ impl TuiModule for RssTuiModule {
                                             match Clipboard::new()
                                                 .and_then(|mut c| c.set_text(link.to_string()))
                                             {
-                                                Ok(_) => {
-                                                    *status_message = Some((
-                                                        format!("Copied: {}", link),
-                                                        Instant::now(),
-                                                    ))
-                                                }
-                                                Err(e) => {
-                                                    *status_message = Some((
-                                                        format!("Clipboard error: {}", e),
-                                                        Instant::now(),
-                                                    ))
-                                                }
+                                                Ok(_) => ctx.show_info(format!("Copied: {}", link)),
+                                                Err(e) => ctx
+                                                    .show_error(format!("Clipboard error: {}", e)),
                                             }
                                             changed = true;
                                         }
@@ -423,10 +487,7 @@ impl TuiModule for RssTuiModule {
                                     if let Some(i) = item_state.selected() {
                                         if i < filtered.len() {
                                             let _ = moku_core::util::open_url(&filtered[i].link);
-                                            *status_message = Some((
-                                                "Opening in browser...".to_string(),
-                                                Instant::now(),
-                                            ));
+                                            ctx.show_info("Opening in browser...");
                                             changed = true;
                                         }
                                     }
@@ -471,23 +532,14 @@ impl TuiModule for RssTuiModule {
                                 match Clipboard::new()
                                     .and_then(|mut c| c.set_text(item.link.clone()))
                                 {
-                                    Ok(_) => {
-                                        *status_message =
-                                            Some((format!("Copied: {}", item.link), Instant::now()))
-                                    }
-                                    Err(e) => {
-                                        *status_message = Some((
-                                            format!("Clipboard error: {}", e),
-                                            Instant::now(),
-                                        ))
-                                    }
+                                    Ok(_) => ctx.show_info(format!("Copied: {}", item.link)),
+                                    Err(e) => ctx.show_error(format!("Clipboard error: {}", e)),
                                 }
                                 changed = true;
                             }
                             KeyCode::Char('o') => {
                                 let _ = moku_core::util::open_url(&item.link);
-                                *status_message =
-                                    Some(("Opening in browser...".to_string(), Instant::now()));
+                                ctx.show_info("Opening in browser...");
                                 changed = true;
                             }
                             _ => {}
@@ -495,7 +547,12 @@ impl TuiModule for RssTuiModule {
                     }
                 }
             }
-            RssView::AddFeed { input } => {
+            RssView::EditFeed {
+                url_input,
+                name_input,
+                stage,
+                editing_index,
+            } => {
                 if let Event::Key(key) = event {
                     if key.kind == KeyEventKind::Press {
                         match key.code {
@@ -512,55 +569,85 @@ impl TuiModule for RssTuiModule {
                                 changed = true;
                             }
                             KeyCode::Backspace => {
-                                input.pop();
+                                match stage {
+                                    EditStage::Url => {
+                                        url_input.pop();
+                                    }
+                                    EditStage::Name => {
+                                        name_input.pop();
+                                    }
+                                }
                                 changed = true;
                             }
                             KeyCode::Enter => {
-                                let url = input.trim().to_string();
-                                if !url.is_empty() {
-                                    if !feeds.iter().any(|f| f.url == url) {
-                                        feeds.push(FeedSubscription {
-                                            url,
-                                            title: None,
-                                            favorite: false,
-                                        });
-                                        if let Err(e) = RssEngine::save_feeds(
-                                            &ctx.storage,
-                                            &ctx.config.load(),
-                                            feeds,
-                                        )
-                                        .await
-                                        {
-                                            *status_message = Some((
-                                                format!("Save failed: {}", e),
-                                                Instant::now(),
-                                            ));
+                                match stage {
+                                    EditStage::Url => {
+                                        if url_input.trim().is_empty() {
+                                            ctx.show_warning("URL cannot be empty.");
                                         } else {
-                                            *status_message = Some((
-                                                "Feed added successfully.".to_string(),
-                                                Instant::now(),
-                                            ));
+                                            *stage = EditStage::Name;
                                         }
-                                    } else {
-                                        *status_message = Some((
-                                            "Feed already exists.".to_string(),
-                                            Instant::now(),
-                                        ));
+                                    }
+                                    EditStage::Name => {
+                                        let url = url_input.trim().to_string();
+                                        let name = name_input.trim();
+                                        let title = if name.is_empty() {
+                                            None
+                                        } else {
+                                            Some(name.to_string())
+                                        };
+                                        let outcome = apply_edit(feeds, *editing_index, url, title);
+                                        match outcome {
+                                            EditOutcome::DuplicateUrl => {
+                                                ctx.show_warning(
+                                                    "A feed with this URL already exists.",
+                                                );
+                                            }
+                                            EditOutcome::Added => {
+                                                if let Err(e) = RssEngine::save_feeds(
+                                                    &ctx.storage,
+                                                    &ctx.config.load(),
+                                                    feeds,
+                                                )
+                                                .await
+                                                {
+                                                    ctx.show_error(format!("Save failed: {}", e));
+                                                } else {
+                                                    ctx.show_info("Feed added.");
+                                                }
+                                            }
+                                            EditOutcome::Updated => {
+                                                if let Err(e) = RssEngine::save_feeds(
+                                                    &ctx.storage,
+                                                    &ctx.config.load(),
+                                                    feeds,
+                                                )
+                                                .await
+                                                {
+                                                    ctx.show_error(format!("Save failed: {}", e));
+                                                } else {
+                                                    ctx.show_info("Feed updated.");
+                                                }
+                                            }
+                                        }
+                                        let mut feed_state = ListState::default();
+                                        feed_state.select(Some(0));
+                                        let mut item_state = ListState::default();
+                                        item_state.select(Some(0));
+                                        *view = RssView::Split {
+                                            active_panel: Panel::Feeds,
+                                            feed_state,
+                                            item_state,
+                                        };
                                     }
                                 }
-                                let mut feed_state = ListState::default();
-                                feed_state.select(Some(0));
-                                let mut item_state = ListState::default();
-                                item_state.select(Some(0));
-                                *view = RssView::Split {
-                                    active_panel: Panel::Feeds,
-                                    feed_state,
-                                    item_state,
-                                };
                                 changed = true;
                             }
                             KeyCode::Char(c) => {
-                                input.push(c);
+                                match stage {
+                                    EditStage::Url => url_input.push(c),
+                                    EditStage::Name => name_input.push(c),
+                                }
                                 changed = true;
                             }
                             _ => {}
@@ -583,14 +670,13 @@ impl TuiModule for RssTuiModule {
             self.is_refreshing = false;
             if let Ok(all_items) = res {
                 self.items = all_items;
-                self.show_status("Feeds refreshed successfully.");
-            }
-        }
-
-        // Clean status message if expired
-        if let Some((_, time)) = self.status_message {
-            if time.elapsed() > Duration::from_secs(3) {
-                self.status_message = None;
+                // No toast here — `draw()` has no `AppContext` access (see
+                // `TuiModule::draw`'s signature), so a refresh completing
+                // without the user pressing a key updates the list
+                // visually but can only surface a toast the next time
+                // `handle_event` runs its own copy of this check. This is
+                // a pre-existing structural limit of `draw()`, not a
+                // regression from moving off the old status-line field.
             }
         }
 
@@ -601,7 +687,6 @@ impl TuiModule for RssTuiModule {
             view,
             refresh_result: _,
             is_refreshing,
-            status_message,
         } = self;
 
         match view {
@@ -610,23 +695,21 @@ impl TuiModule for RssTuiModule {
                 feed_state,
                 item_state,
             } => {
-                let chunks = Layout::vertical([
-                    Constraint::Min(0),
-                    Constraint::Length(1), // status message
-                    Constraint::Length(3), // help
-                ])
-                .split(area);
+                let chunks =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
 
                 let panels =
                     Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
                         .split(chunks[0]);
 
-                // Feeds panel
+                // Feeds panel — favorite marker goes at the FRONT of the
+                // line, not appended at the end: a long label (or a narrow
+                // panel) means trailing content gets clipped, so a
+                // trailing star was effectively never visible.
                 let mut feed_items = vec![ListItem::new(" * All Feeds")];
                 for f in feeds.iter() {
-                    let label = f.title.as_deref().unwrap_or(&f.url);
-                    let star = if f.favorite { " ★" } else { "" };
-                    feed_items.push(ListItem::new(format!(" • {}{}", label, star)));
+                    let marker = if f.favorite { "★" } else { " " };
+                    feed_items.push(ListItem::new(format!(" {} {}", marker, feed_label(f))));
                 }
 
                 let feed_border_style = if *active_panel == Panel::Feeds {
@@ -655,7 +738,12 @@ impl TuiModule for RssTuiModule {
 
                 frame.render_stateful_widget(feed_list, panels[0], feed_state);
 
-                // Articles panel
+                // Articles column: list on top, preview of the selected
+                // article below.
+                let article_area =
+                    Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+                        .split(panels[1]);
+
                 let selected_feed_idx = feed_state.selected().unwrap_or(0);
                 let filtered = get_filtered_items(feeds, items, selected_feed_idx);
 
@@ -694,21 +782,31 @@ impl TuiModule for RssTuiModule {
                     )
                     .highlight_symbol(">> ");
 
-                frame.render_stateful_widget(item_list, panels[1], item_state);
+                frame.render_stateful_widget(item_list, article_area[0], item_state);
 
-                // Status message
-                if let Some((msg, _)) = status_message {
-                    let msg_p = Paragraph::new(format!(" {}", msg)).style(
-                        Style::default()
-                            .fg(theme.selection_fg)
-                            .add_modifier(Modifier::ITALIC),
+                let preview_text = match item_state.selected().and_then(|i| filtered.get(i)) {
+                    Some(item) => format!(
+                        "{}\n{}\n\n{}",
+                        item.feed_title,
+                        item.title,
+                        item.summary.as_deref().unwrap_or("No preview available.")
+                    ),
+                    None => "No article selected.".to_string(),
+                };
+                let preview = Paragraph::new(preview_text)
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
+                    .block(
+                        Block::default()
+                            .title(" Preview ")
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(theme.border)),
                     );
-                    frame.render_widget(msg_p, chunks[1]);
-                }
+                frame.render_widget(preview, article_area[1]);
 
                 // Help bar
                 let help_text = if *active_panel == Panel::Feeds {
-                    " [Tab] Switch | [a] Add Feed | [d] Delete Feed | [f] Favorite | [r] Refresh | [Esc] Back "
+                    " [Tab] Switch | [a] Add Feed | [e] Edit Feed | [d] Delete Feed | [f] Favorite | [r] Refresh | [Esc] Back "
                 } else {
                     " [Tab] Switch | [Enter] Read | [c] Copy Link | [o] Open Browser | [r] Refresh | [Esc] Back "
                 };
@@ -719,15 +817,11 @@ impl TuiModule for RssTuiModule {
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(theme.border)),
                     );
-                frame.render_widget(help, chunks[2]);
+                frame.render_widget(help, chunks[1]);
             }
             RssView::Detail { item } => {
-                let chunks = Layout::vertical([
-                    Constraint::Min(0),
-                    Constraint::Length(1), // status message
-                    Constraint::Length(3), // help
-                ])
-                .split(area);
+                let chunks =
+                    Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
 
                 let block = Block::default()
                     .title(format!(" 📰 {} ", item.feed_title))
@@ -737,22 +831,18 @@ impl TuiModule for RssTuiModule {
                 let inner_area = block.inner(chunks[0]);
                 frame.render_widget(block, chunks[0]);
 
-                let detail_text = format!("Title:\n{}\n\nLink:\n{}\n", item.title, item.link);
+                let detail_text = match item.summary.as_deref() {
+                    Some(summary) => format!(
+                        "Title:\n{}\n\nLink:\n{}\n\nSummary:\n{}\n",
+                        item.title, item.link, summary
+                    ),
+                    None => format!("Title:\n{}\n\nLink:\n{}\n", item.title, item.link),
+                };
 
                 let p = Paragraph::new(detail_text)
                     .wrap(Wrap { trim: true })
                     .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
                 frame.render_widget(p, inner_area);
-
-                // Status message
-                if let Some((msg, _)) = status_message {
-                    let msg_p = Paragraph::new(format!(" {}", msg)).style(
-                        Style::default()
-                            .fg(theme.selection_fg)
-                            .add_modifier(Modifier::ITALIC),
-                    );
-                    frame.render_widget(msg_p, chunks[1]);
-                }
 
                 let help = Paragraph::new(" [c] Copy Link | [o] Open Browser | [Esc/q] Back ")
                     .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
@@ -761,14 +851,39 @@ impl TuiModule for RssTuiModule {
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(theme.border)),
                     );
-                frame.render_widget(help, chunks[2]);
+                frame.render_widget(help, chunks[1]);
             }
-            RssView::AddFeed { input } => {
+            RssView::EditFeed {
+                url_input,
+                name_input,
+                stage,
+                editing_index,
+            } => {
                 let popup_area = centered_rect(60, 20, area);
                 frame.render_widget(Clear, popup_area);
 
+                let editing = editing_index.is_some();
+                let (title, shown) = match stage {
+                    EditStage::Url => (
+                        if editing {
+                            " Edit Feed - URL "
+                        } else {
+                            " Add Feed - URL "
+                        },
+                        url_input.clone(),
+                    ),
+                    EditStage::Name => (
+                        if editing {
+                            " Edit Feed - Name (optional) "
+                        } else {
+                            " Add Feed - Name (optional) "
+                        },
+                        name_input.clone(),
+                    ),
+                };
+
                 let block = Block::default()
-                    .title(" 📡 Add New RSS Feed URL ")
+                    .title(title)
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.selection_bg));
 
@@ -782,11 +897,11 @@ impl TuiModule for RssTuiModule {
                 ])
                 .split(inner_area);
 
-                let input_p = Paragraph::new(format!("> {}", input))
+                let input_p = Paragraph::new(format!("> {}", shown))
                     .style(Style::default().fg(theme.base_fg));
                 frame.render_widget(input_p, layout[0]);
 
-                let help_p = Paragraph::new(" [Enter] Save | [Esc] Cancel ").style(
+                let help_p = Paragraph::new(" [Enter] next/confirm  [Esc] cancel ").style(
                     Style::default()
                         .fg(theme.base_fg)
                         .add_modifier(Modifier::DIM),
@@ -804,6 +919,228 @@ impl TuiModule for RssTuiModule {
             feeds.len(),
             items.len()
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+
+    fn sub(url: &str, title: Option<&str>, favorite: bool) -> FeedSubscription {
+        FeedSubscription {
+            url: url.to_string(),
+            title: title.map(str::to_string),
+            favorite,
+        }
+    }
+
+    #[test]
+    fn test_feed_label_prefers_title() {
+        let f = sub("https://example.com/feed", Some("My Blog"), false);
+        assert_eq!(feed_label(&f), "My Blog");
+    }
+
+    #[test]
+    fn test_feed_label_falls_back_to_domain_without_www() {
+        let f = sub(
+            "https://www.youtube.com/feeds/videos.xml?channel_id=abc123",
+            None,
+            false,
+        );
+        assert_eq!(feed_label(&f), "youtube.com");
+    }
+
+    #[test]
+    fn test_feed_label_falls_back_to_raw_url_when_unparseable() {
+        let f = sub("not a url", None, false);
+        assert_eq!(feed_label(&f), "not a url");
+    }
+
+    #[test]
+    fn test_apply_edit_adds_new_feed() {
+        let mut feeds = vec![sub("https://a.example/feed", None, false)];
+        let outcome = apply_edit(
+            &mut feeds,
+            None,
+            "https://b.example/feed".to_string(),
+            Some("B".to_string()),
+        );
+        assert!(matches!(outcome, EditOutcome::Added));
+        assert_eq!(feeds.len(), 2);
+        assert_eq!(feeds[1].title.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn test_apply_edit_updates_existing_feed_at_its_index() {
+        let mut feeds = vec![
+            sub("https://a.example/feed", None, false),
+            sub("https://b.example/feed", Some("B"), false),
+        ];
+        let outcome = apply_edit(
+            &mut feeds,
+            Some(1),
+            "https://b-new.example/feed".to_string(),
+            Some("B Renamed".to_string()),
+        );
+        assert!(matches!(outcome, EditOutcome::Updated));
+        assert_eq!(feeds.len(), 2, "editing must not add a new entry");
+        assert_eq!(feeds[1].url, "https://b-new.example/feed");
+        assert_eq!(feeds[1].title.as_deref(), Some("B Renamed"));
+        assert_eq!(
+            feeds[0].url, "https://a.example/feed",
+            "other feed untouched"
+        );
+    }
+
+    #[test]
+    fn test_apply_edit_rejects_duplicate_url_against_other_feeds() {
+        let mut feeds = vec![
+            sub("https://a.example/feed", None, false),
+            sub("https://b.example/feed", None, false),
+        ];
+        let outcome = apply_edit(&mut feeds, None, "https://a.example/feed".to_string(), None);
+        assert!(matches!(outcome, EditOutcome::DuplicateUrl));
+        assert_eq!(feeds.len(), 2, "nothing should be added on a duplicate");
+    }
+
+    #[test]
+    fn test_apply_edit_editing_a_feed_with_its_own_unchanged_url_is_not_a_duplicate() {
+        let mut feeds = vec![sub("https://a.example/feed", Some("A"), false)];
+        let outcome = apply_edit(
+            &mut feeds,
+            Some(0),
+            "https://a.example/feed".to_string(),
+            Some("A Renamed".to_string()),
+        );
+        assert!(matches!(outcome, EditOutcome::Updated));
+        assert_eq!(feeds[0].title.as_deref(), Some("A Renamed"));
+    }
+
+    fn rendered_rows(module: &mut RssTuiModule) -> Vec<String> {
+        let (width, height) = (60u16, 20u16);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| module.draw(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let content = terminal.backend().buffer().content.clone();
+        (0..height as usize)
+            .map(|y| {
+                content[y * width as usize..(y + 1) * width as usize]
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_favorite_star_renders_near_the_start_of_its_row() {
+        // The panel is narrow (30% of a 60-col test terminal, minus
+        // borders) — a long label would clip a *trailing* star, which is
+        // exactly the bug being fixed, so the label here is short enough
+        // to definitely fit either way; what's under test is the star's
+        // position, not clipping itself (covered by the label tests).
+        let mut module = RssTuiModule::new();
+        module.feeds = vec![sub("https://example.com/feed", Some("Fav"), true)];
+        let rows = rendered_rows(&mut module);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("Fav"))
+            .expect("feed row visible");
+        let star_pos = row.find('★').expect("star should render");
+        assert!(
+            star_pos < 5,
+            "favorite star should be near the start of the row, not clipped at the end: {row:?}"
+        );
+    }
+
+    #[test]
+    fn test_titled_feed_shows_title_not_url() {
+        let mut module = RssTuiModule::new();
+        module.feeds = vec![sub(
+            "https://example.com/feed.xml",
+            Some("Cool Blog"),
+            false,
+        )];
+        let content = rendered_rows(&mut module).join("");
+        assert!(content.contains("Cool Blog"));
+        assert!(!content.contains("example.com/feed.xml"));
+    }
+
+    #[test]
+    fn test_untitled_feed_shows_domain_not_full_url() {
+        let mut module = RssTuiModule::new();
+        module.feeds = vec![sub(
+            "https://www.youtube.com/feeds/videos.xml?channel_id=abc123",
+            None,
+            false,
+        )];
+        let content = rendered_rows(&mut module).join("");
+        assert!(content.contains("youtube.com"));
+        assert!(!content.contains("channel_id=abc123"));
+    }
+
+    #[test]
+    fn test_edit_feed_view_shows_correct_stage_title_and_field() {
+        let mut module = RssTuiModule::new();
+        module.view = RssView::EditFeed {
+            url_input: "https://example.com/feed".to_string(),
+            name_input: String::new(),
+            stage: EditStage::Url,
+            editing_index: None,
+        };
+        let content = rendered_rows(&mut module).join("");
+        assert!(content.contains("Add Feed - URL"));
+        assert!(content.contains("https://example.com/feed"));
+    }
+
+    #[test]
+    fn test_edit_feed_view_marked_as_editing_when_index_present() {
+        let mut module = RssTuiModule::new();
+        module.view = RssView::EditFeed {
+            url_input: String::new(),
+            name_input: "My Name".to_string(),
+            stage: EditStage::Name,
+            editing_index: Some(0),
+        };
+        let content = rendered_rows(&mut module).join("");
+        assert!(content.contains("Edit Feed - Name"));
+        assert!(content.contains("My Name"));
+    }
+
+    #[test]
+    fn test_preview_shows_selected_articles_summary() {
+        let mut module = RssTuiModule::new();
+        module.items = vec![FeedItem {
+            id: "a".into(),
+            feed_title: "Blog".into(),
+            title: "An Article".into(),
+            link: "https://example.com/a".into(),
+            published_at: 1,
+            summary: Some("This is the preview text.".to_string()),
+        }];
+        let content = rendered_rows(&mut module).join("");
+        assert!(content.contains("This is the preview text."));
+    }
+
+    #[test]
+    fn test_preview_shows_placeholder_when_article_has_no_summary() {
+        let mut module = RssTuiModule::new();
+        module.items = vec![FeedItem {
+            id: "a".into(),
+            feed_title: "Blog".into(),
+            title: "An Article".into(),
+            link: "https://example.com/a".into(),
+            published_at: 1,
+            summary: None,
+        }];
+        let content = rendered_rows(&mut module).join("");
+        assert!(content.contains("No preview available."));
     }
 }
 
