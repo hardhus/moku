@@ -150,6 +150,11 @@ pub struct TodoModule {
     /// `Some(id)` while composing a sub-task (opened via Tab) — `None`
     /// means the pending input is a new top-level task (opened via `a`).
     input_parent: Option<String>,
+    /// `Some(id)` while waiting for the user to confirm deleting that task
+    /// (and its subtree) — plain `d` sets this instead of deleting right
+    /// away; `Shift+D` (`moku_core::is_delete_bypass`) still deletes
+    /// immediately, bypassing confirmation entirely.
+    confirm_delete: Option<String>,
 }
 
 impl TodoModule {
@@ -161,6 +166,7 @@ impl TodoModule {
             input_mode: false,
             input_buffer: String::new(),
             input_parent: None,
+            confirm_delete: None,
         }
     }
 
@@ -246,14 +252,13 @@ impl TodoModule {
         true
     }
 
-    /// Deletes the selected task AND its entire subtree (cascading, no
-    /// confirmation — matches this module's existing no-confirm-on-
-    /// delete style, just extended to a whole subtree at once).
-    async fn delete_item(&mut self, ctx: &mut AppContext) -> bool {
-        let Some(idx) = self.selected_index() else {
-            return false;
-        };
-        let Some(task) = self.items.get(idx) else {
+    /// Deletes the task with the given id AND its entire subtree
+    /// (cascading). Keyed off `id` rather than the current selection so it
+    /// works identically whether called right away (`Shift+D` bypass) or
+    /// later from the confirmation prompt, regardless of what's selected
+    /// by then.
+    async fn delete_task_by_id(&mut self, id: &str, ctx: &mut AppContext) -> bool {
+        let Some(task) = self.items.iter().find(|t| t.id == id) else {
             return false;
         };
         let mut doomed = Vec::new();
@@ -273,6 +278,32 @@ impl TodoModule {
         }
         ctx.show_info(format!("Deleted: {}", title));
         self.save(ctx).await;
+        true
+    }
+
+    /// `Shift+D`: deletes the selected task immediately, bypassing the
+    /// confirmation prompt plain `d`/`Command::Delete` now shows.
+    async fn delete_selected_immediately(&mut self, ctx: &mut AppContext) -> bool {
+        let Some(id) = self
+            .selected_index()
+            .and_then(|idx| self.items.get(idx))
+            .map(|t| t.id.clone())
+        else {
+            return false;
+        };
+        self.delete_task_by_id(&id, ctx).await
+    }
+
+    /// Opens the delete-confirmation prompt for the selected task, if any.
+    fn start_confirm_delete(&mut self) -> bool {
+        let Some(id) = self
+            .selected_index()
+            .and_then(|idx| self.items.get(idx))
+            .map(|t| t.id.clone())
+        else {
+            return false;
+        };
+        self.confirm_delete = Some(id);
         true
     }
 
@@ -406,16 +437,43 @@ impl TuiModule for TodoModule {
             return Ok(changed);
         }
 
+        if self.confirm_delete.is_some() {
+            let mut changed = false;
+            if let Event::Key(key) = event
+                && key.kind == KeyEventKind::Press
+            {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') => {
+                        if let Some(id) = self.confirm_delete.take() {
+                            self.delete_task_by_id(&id, ctx).await;
+                        }
+                        changed = true;
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') => {
+                        self.confirm_delete = None;
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(changed);
+        }
+
         // Tab isn't one of resolve_event's known actions, so it's checked
         // directly here first — same "raw check before resolve_event"
         // shape used elsewhere in this app (e.g. the launcher's
-        // Shift+Up/Down reorder).
+        // Shift+Up/Down reorder). Shift+D (moku_core::is_delete_bypass)
+        // gets the same treatment: it deletes immediately, skipping the
+        // confirmation prompt plain `d`/Command::Delete now shows.
         if let Event::Key(key) = event
             && key.kind == KeyEventKind::Press
             && key.code == KeyCode::Tab
         {
             self.start_add_subtask();
             return Ok(true);
+        }
+        if moku_core::is_delete_bypass(event) {
+            return Ok(self.delete_selected_immediately(ctx).await);
         }
 
         let module_config: TodoKeyConfig = ctx
@@ -434,7 +492,7 @@ impl TuiModule for TodoModule {
             Command::Left => self.collapse_selected(),
             Command::Right => self.expand_selected(),
             Command::Confirm | Command::Toggle => self.toggle_status(ctx).await,
-            Command::Delete => self.delete_item(ctx).await,
+            Command::Delete => self.start_confirm_delete(),
             Command::Add => {
                 self.start_add(None);
                 true
@@ -510,6 +568,32 @@ impl TuiModule for TodoModule {
                         .title(title)
                         .border_style(Style::default().fg(theme.warning)),
                 )
+        } else if let Some(id) = &self.confirm_delete {
+            let message = match self.items.iter().find(|t| &t.id == id) {
+                Some(task) => {
+                    let mut doomed = Vec::new();
+                    collect_subtree_ids(&self.items, id, &mut doomed);
+                    let extra = doomed.len() - 1;
+                    if extra > 0 {
+                        format!(
+                            "Delete '{}' and its {extra} sub-task(s)? [y] Yes  [n] No",
+                            task.title
+                        )
+                    } else {
+                        format!("Delete '{}'? [y] Yes  [n] No", task.title)
+                    }
+                }
+                None => "Delete this task? [y] Yes  [n] No".to_string(),
+            };
+            Paragraph::new(message)
+                .style(Style::default().fg(theme.error))
+                .alignment(ratatui::layout::Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Confirm Delete ")
+                        .border_style(Style::default().fg(theme.error)),
+                )
         } else {
             Paragraph::new(" [a] Add | [Tab] Sub-task | [Space] Toggle | [<-/->] Collapse | [d] Delete | [Esc] Back ")
                 .style(Style::default().fg(theme.base_fg))
@@ -545,6 +629,7 @@ mod tests {
     use std::sync::Arc;
 
     use arc_swap::ArcSwap;
+    use crossterm::event::{KeyEvent, KeyModifiers};
     use moku_core::security::{SecurityManager, VaultSession};
     use moku_core::{MokuConfig, StorageManager};
     use ratatui::Terminal;
@@ -758,6 +843,85 @@ mod tests {
             !content.contains("Child Task"),
             "collapsed task's child should not render"
         );
+    }
+
+    #[tokio::test]
+    async fn test_plain_d_does_not_delete_and_opens_confirmation() {
+        let mut module = TodoModule::new();
+        module.items = vec![task("1", "Root Task", None)];
+        module.state.select(Some(0));
+        let mut ctx = create_test_context().await;
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert_eq!(module.items.len(), 1, "plain 'd' must not delete anything");
+        assert_eq!(module.confirm_delete.as_deref(), Some("1"));
+    }
+
+    #[tokio::test]
+    async fn test_shift_d_deletes_immediately_with_cascade() {
+        let mut module = TodoModule::new();
+        module.items = vec![
+            task("1", "Root Task", None),
+            task("1a", "Child Task", Some("1")),
+        ];
+        module.state.select(Some(0));
+        let mut ctx = create_test_context().await;
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert!(
+            module.items.is_empty(),
+            "Shift+D should delete the task and its subtree immediately"
+        );
+        assert!(module.confirm_delete.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_yes_deletes_the_task() {
+        let mut module = TodoModule::new();
+        module.items = vec![task("1", "Root Task", None)];
+        module.state.select(Some(0));
+        module.confirm_delete = Some("1".to_string());
+        let mut ctx = create_test_context().await;
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert!(module.items.is_empty());
+        assert!(module.confirm_delete.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_no_cancels_without_deleting() {
+        let mut module = TodoModule::new();
+        module.items = vec![task("1", "Root Task", None)];
+        module.state.select(Some(0));
+        module.confirm_delete = Some("1".to_string());
+        let mut ctx = create_test_context().await;
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert_eq!(module.items.len(), 1, "cancelling must not delete anything");
+        assert!(module.confirm_delete.is_none());
+    }
+
+    #[test]
+    fn test_confirm_delete_prompt_shows_task_title_and_subtree_count() {
+        let mut module = TodoModule::new();
+        module.items = vec![
+            task("1", "Root Task", None),
+            task("1a", "Child Task", Some("1")),
+        ];
+        module.state.select(Some(0));
+        module.confirm_delete = Some("1".to_string());
+        let rows = rendered_rows(&mut module);
+        let content = rows.join("");
+        assert!(content.contains("Root Task"));
+        assert!(content.contains("1 sub-task"));
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ pub const MODE_NORMAL: &str = "Normal";
 pub const MODE_SEARCH: &str = "Search";
 pub const MODE_INPUT: &str = "Add Bookmark";
 pub const MODE_DOMAIN_FILTER_PREFIX: &str = "Domain Filter";
+pub const MODE_CONFIRM_DELETE: &str = "Confirm Delete";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Bookmark {

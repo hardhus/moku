@@ -61,6 +61,10 @@ pub struct SecretsModule {
     message: Option<(String, Instant)>,
     add: Option<AddState>,
     export: Option<ExportState>,
+    /// `Some(index)` while waiting for the user to confirm deleting that
+    /// entry — plain `d` sets this instead of deleting right away;
+    /// `Shift+D` (`moku_core::is_delete_bypass`) still deletes immediately.
+    confirm_delete: Option<usize>,
 }
 
 impl SecretsModule {
@@ -72,6 +76,7 @@ impl SecretsModule {
             message: None,
             add: None,
             export: None,
+            confirm_delete: None,
         }
     }
 
@@ -127,6 +132,31 @@ impl SecretsModule {
         }
         self.save(ctx).await;
         self.show_message(format!("Deleted '{}'", removed.name));
+    }
+
+    /// `y`/Enter confirms the pending delete (`confirm_delete`), `n`/Esc
+    /// cancels — either way returns to the normal list view.
+    async fn handle_confirm_delete_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        ctx: &mut AppContext,
+    ) -> bool {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') => {
+                if self.confirm_delete.take().is_some() {
+                    // `delete_selected` reads `self.state.selected()`,
+                    // which still points at the entry pending deletion —
+                    // normal navigation is blocked while confirm_delete is
+                    // Some, so the selection can't have moved since.
+                    self.delete_selected(ctx).await;
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('n') => {
+                self.confirm_delete = None;
+            }
+            _ => return false,
+        }
+        true
     }
 
     async fn handle_add_key(
@@ -277,6 +307,46 @@ impl SecretsModule {
         }
     }
 
+    fn draw_confirm_delete(&self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
+        let Some(i) = self.confirm_delete else { return };
+        let name = self
+            .entries
+            .get(i)
+            .map(|e| e.name.as_str())
+            .unwrap_or("this entry");
+
+        let chunks = Layout::vertical([
+            Constraint::Percentage(40),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Percentage(40),
+        ])
+        .split(area);
+        let input_chunk = Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+        ])
+        .split(chunks[1])[1];
+
+        let p = Paragraph::new(format!("Delete '{name}'?"))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .title(" Confirm Delete ")
+                    .title_alignment(Alignment::Center)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.error)),
+            )
+            .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
+        frame.render_widget(p, input_chunk);
+
+        let hint = Paragraph::new("[y] Yes  [n] No")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.base_fg));
+        frame.render_widget(hint, chunks[2]);
+    }
+
     fn draw_add(&self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
         let Some(add) = &self.add else { return };
         let chunks = Layout::vertical([
@@ -400,6 +470,17 @@ impl TuiModule for SecretsModule {
         if self.export.is_some() {
             return Ok(self.handle_export_key(*key).await);
         }
+        if self.confirm_delete.is_some() {
+            return Ok(self.handle_confirm_delete_key(*key, ctx).await);
+        }
+
+        // Shift+D bypasses the confirmation prompt entirely and deletes
+        // immediately — checked as a raw key before the normal dispatch,
+        // same shape as other raw Shift-key checks in this app.
+        if moku_core::is_delete_bypass(event) {
+            self.delete_selected(ctx).await;
+            return Ok(true);
+        }
 
         let command = resolve_event(event, &ctx.config.load().keys, None);
         match command {
@@ -420,7 +501,11 @@ impl TuiModule for SecretsModule {
                     value: String::new(),
                 });
             }
-            KeyCode::Char('d') => self.delete_selected(ctx).await,
+            KeyCode::Char('d') => {
+                if self.state.selected().is_some() {
+                    self.confirm_delete = self.state.selected();
+                }
+            }
             KeyCode::Char('r') => self.reveal = !self.reveal,
             KeyCode::Char('e') => {
                 self.export = Some(ExportState {
@@ -448,6 +533,10 @@ impl TuiModule for SecretsModule {
         }
         if self.export.is_some() {
             self.draw_export(frame, area, theme);
+            return;
+        }
+        if self.confirm_delete.is_some() {
+            self.draw_confirm_delete(frame, area, theme);
             return;
         }
 
@@ -551,6 +640,104 @@ impl TuiModule for SecretsModule {
         }
         let entries = engine::load_entries(&ctx.storage).await;
         Some(ModuleStatus::normal(format!("{} secrets", entries.len())))
+    }
+}
+
+#[cfg(test)]
+mod confirm_delete_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::model::SecretEntry;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    async fn module_with_one_entry() -> (SecretsModule, AppContext) {
+        let mut module = SecretsModule::new();
+        let ctx = create_test_context().await;
+        let key = SecurityManager::derive_key("test-pass", &[9u8; 16])
+            .await
+            .unwrap();
+        ctx.session.unlock(key);
+        module.entries = vec![SecretEntry::new(
+            "github".to_string(),
+            "hunter2".to_string(),
+        )];
+        module.state.select(Some(0));
+        (module, ctx)
+    }
+
+    #[tokio::test]
+    async fn test_plain_d_does_not_delete_and_opens_confirmation() {
+        let (mut module, mut ctx) = module_with_one_entry().await;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert_eq!(
+            module.entries.len(),
+            1,
+            "plain 'd' must not delete anything"
+        );
+        assert_eq!(module.confirm_delete, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_shift_d_deletes_immediately() {
+        let (mut module, mut ctx) = module_with_one_entry().await;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert!(
+            module.entries.is_empty(),
+            "Shift+D should delete immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_yes_deletes() {
+        let (mut module, mut ctx) = module_with_one_entry().await;
+        module.confirm_delete = Some(0);
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert!(module.entries.is_empty());
+        assert!(module.confirm_delete.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_no_cancels() {
+        let (mut module, mut ctx) = module_with_one_entry().await;
+        module.confirm_delete = Some(0);
+        let event = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert_eq!(
+            module.entries.len(),
+            1,
+            "cancelling must not delete anything"
+        );
+        assert!(module.confirm_delete.is_none());
     }
 }
 

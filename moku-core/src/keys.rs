@@ -138,6 +138,17 @@ fn check_hardcoded(key: &KeyEvent) -> Command {
     }
 }
 
+/// Whether `event` is the Shift-held bypass for a "confirm before
+/// deleting" action — Shift+D skips the confirmation prompt and deletes
+/// immediately. `check_hardcoded`'s plain `Command::Delete` arm requires
+/// no modifiers, so Shift+D is unmapped/no-op everywhere today — this is
+/// purely additive, not a behavior change to the unmodified `d` key.
+pub fn is_delete_bypass(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press
+        && key.code == KeyCode::Char('D')
+        && key.modifiers.contains(KeyModifiers::SHIFT))
+}
+
 pub fn keys_match(key_event: KeyEvent, config_str: &str) -> bool {
     let config_lower = config_str.to_lowercase();
     let mut parts: Vec<&str> = config_lower.split('-').collect();
@@ -188,6 +199,24 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::empty(),
         })
+    }
+
+    #[test]
+    fn test_is_delete_bypass_true_for_shift_d() {
+        let event = make_key(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        assert!(is_delete_bypass(&event));
+    }
+
+    #[test]
+    fn test_is_delete_bypass_false_for_plain_d() {
+        let event = make_key(KeyCode::Char('d'), KeyModifiers::empty());
+        assert!(!is_delete_bypass(&event));
+    }
+
+    #[test]
+    fn test_is_delete_bypass_false_for_ctrl_d() {
+        let event = make_key(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(!is_delete_bypass(&event));
     }
 
     #[test]

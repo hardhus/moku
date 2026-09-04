@@ -17,7 +17,9 @@ use moku_core::{
 use crate::engine::BookmarkEngine;
 use crate::filter::BookmarkFilter;
 use crate::io::BookmarkIO;
-use crate::model::{Bookmark, MODE_DOMAIN_FILTER_PREFIX, MODE_INPUT, MODE_NORMAL, MODE_SEARCH};
+use crate::model::{
+    Bookmark, MODE_CONFIRM_DELETE, MODE_DOMAIN_FILTER_PREFIX, MODE_INPUT, MODE_NORMAL, MODE_SEARCH,
+};
 use crate::ui::BookmarkUi;
 
 #[derive(PartialEq)]
@@ -26,6 +28,10 @@ enum AppMode {
     Input,
     Search,
     DomainFilter(String),
+    /// Waiting for the user to confirm deleting the currently selected
+    /// bookmark. Plain `d` enters this instead of deleting right away;
+    /// `Shift+D` (`moku_core::is_delete_bypass`) still deletes immediately.
+    ConfirmDelete,
 }
 
 pub struct BookmarkModule {
@@ -116,6 +122,22 @@ impl BookmarkModule {
             Err(e) => ctx.show_error(format!("Clipboard error: {}", e)),
         }
         Ok(false)
+    }
+
+    /// Deletes the currently selected bookmark. Shared by the `Shift+D`
+    /// bypass and the confirmation prompt's `y`/Enter so both paths run
+    /// identical logic (matches the original `Command::Delete` arm's own
+    /// error propagation via `?`, unchanged).
+    async fn delete_selected(&mut self, ctx: &mut AppContext) -> Result<bool> {
+        let Some(i) = self.state.selected() else {
+            return Ok(false);
+        };
+        let target_url = self.filtered_items[i].url.clone();
+        self.items.retain(|b| b.url != target_url);
+        BookmarkEngine::save_all(ctx, &self.items).await?;
+        ctx.show_info("Deleted");
+        self.refresh_filter();
+        Ok(true)
     }
 
     fn command_up(&mut self) {
@@ -255,6 +277,35 @@ impl TuiModule for BookmarkModule {
             return Ok(changed);
         }
 
+        // --- CONFIRM DELETE MODE ---
+        if self.mode == AppMode::ConfirmDelete {
+            if let Event::Key(key) = event {
+                if key.kind == KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Enter | KeyCode::Char('y') => {
+                            changed = self.delete_selected(ctx).await?;
+                            self.mode = AppMode::Normal;
+                        }
+                        KeyCode::Esc | KeyCode::Char('n') => {
+                            self.mode = AppMode::Normal;
+                            changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return Ok(changed);
+        }
+
+        // Shift+D bypasses the confirmation prompt entirely and deletes
+        // immediately — checked as a raw key before resolve_event, same
+        // shape as other raw Shift-key checks in this app (e.g.
+        // moku-http's Shift+R).
+        if moku_core::is_delete_bypass(event) {
+            changed = self.delete_selected(ctx).await?;
+            return Ok(changed);
+        }
+
         // --- NORMAL MODE ---
         let command = resolve_event(event, &ctx.config.load().keys, None);
 
@@ -272,12 +323,8 @@ impl TuiModule for BookmarkModule {
                 changed = true;
             }
             Command::Delete => {
-                if let Some(i) = self.state.selected() {
-                    let target_url = &self.filtered_items[i].url;
-                    self.items.retain(|b| &b.url != target_url);
-                    BookmarkEngine::save_all(ctx, &self.items).await?;
-                    ctx.show_info("Deleted");
-                    self.refresh_filter();
+                if self.state.selected().is_some() {
+                    self.mode = AppMode::ConfirmDelete;
                     changed = true;
                 }
             }
@@ -385,6 +432,15 @@ impl TuiModule for BookmarkModule {
             AppMode::Search => MODE_SEARCH.to_string(),
             AppMode::DomainFilter(d) => format!("{}: {}", MODE_DOMAIN_FILTER_PREFIX, d),
             AppMode::Normal => MODE_NORMAL.to_string(),
+            AppMode::ConfirmDelete => {
+                let label = self
+                    .state
+                    .selected()
+                    .and_then(|i| self.filtered_items.get(i))
+                    .map(|b| b.name.clone().unwrap_or_else(|| b.url.clone()))
+                    .unwrap_or_default();
+                format!("{}: {}", MODE_CONFIRM_DELETE, label)
+            }
         };
 
         BookmarkUi::draw(
@@ -408,6 +464,89 @@ impl TuiModule for BookmarkModule {
         }
         let items = BookmarkEngine::load_all(ctx).await.unwrap_or_default();
         Some(ModuleStatus::normal(format!("{} bookmarks", items.len())))
+    }
+}
+
+#[cfg(test)]
+mod confirm_delete_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    async fn module_with_one_bookmark() -> (BookmarkModule, AppContext) {
+        let mut module = BookmarkModule::new();
+        let ctx = create_test_context().await;
+        let key = SecurityManager::derive_key("test-pass", &[9u8; 16])
+            .await
+            .unwrap();
+        ctx.session.unlock(key);
+        module.items = vec![Bookmark::new("https://example.com".to_string())];
+        module.refresh_filter();
+        (module, ctx)
+    }
+
+    #[tokio::test]
+    async fn test_plain_d_does_not_delete_and_shows_confirm_mode() {
+        let (mut module, mut ctx) = module_with_one_bookmark().await;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert_eq!(module.items.len(), 1, "plain 'd' must not delete anything");
+        assert!(module.mode == AppMode::ConfirmDelete);
+    }
+
+    #[tokio::test]
+    async fn test_shift_d_deletes_immediately() {
+        let (mut module, mut ctx) = module_with_one_bookmark().await;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert!(module.items.is_empty(), "Shift+D should delete immediately");
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_yes_deletes() {
+        let (mut module, mut ctx) = module_with_one_bookmark().await;
+        module.mode = AppMode::ConfirmDelete;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert!(module.items.is_empty());
+        assert!(module.mode == AppMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_no_cancels() {
+        let (mut module, mut ctx) = module_with_one_bookmark().await;
+        module.mode = AppMode::ConfirmDelete;
+        let event = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert_eq!(module.items.len(), 1, "cancelling must not delete anything");
+        assert!(module.mode == AppMode::Normal);
     }
 }
 

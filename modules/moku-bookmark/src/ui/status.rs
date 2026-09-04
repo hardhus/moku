@@ -8,7 +8,7 @@ use ratatui::{
 
 use moku_core::MokuTheme;
 
-use crate::model::{MODE_DOMAIN_FILTER_PREFIX, MODE_INPUT, MODE_SEARCH};
+use crate::model::{MODE_CONFIRM_DELETE, MODE_DOMAIN_FILTER_PREFIX, MODE_INPUT, MODE_SEARCH};
 
 /// Renders the status bar at the bottom based on the current application state.
 pub fn draw_status_bar(frame: &mut Frame, area: Rect, theme: &MokuTheme, mode_name: &str) {
@@ -28,6 +28,8 @@ pub fn draw_status_bar(frame: &mut Frame, area: Rect, theme: &MokuTheme, mode_na
             theme.warning,
             " [r] Reset Filter | [Esc] Normal Mode | [c] Copy ",
         )
+    } else if mode_name.starts_with(MODE_CONFIRM_DELETE) {
+        (theme.error, " [y] Yes | [n] No | [Esc] Cancel ")
     } else {
         (
             theme.selection_bg,

@@ -59,6 +59,12 @@ pub enum RssView {
         /// index, which is offset by +1 for the "All Feeds" row).
         editing_index: Option<usize>,
     },
+    /// Waiting for the user to confirm deleting `feeds[index]` — plain `d`
+    /// enters this instead of deleting right away; `Shift+D`
+    /// (`moku_core::is_delete_bypass`) still deletes immediately.
+    ConfirmDeleteFeed {
+        index: usize,
+    },
 }
 
 pub struct RssTuiModule {
@@ -198,6 +204,27 @@ pub fn apply_edit(
     }
 }
 
+/// Removes `feeds[index]`, saves, and reports the outcome — shared by the
+/// `Shift+D` bypass and the confirmation prompt's `y`/Enter so both paths
+/// run identical logic (matches the original `d`-key handler exactly).
+async fn delete_feed_at(
+    feeds: &mut Vec<FeedSubscription>,
+    feed_state: &mut ListState,
+    index: usize,
+    ctx: &mut AppContext,
+) {
+    if index >= feeds.len() {
+        return;
+    }
+    let removed = feeds.remove(index);
+    if let Err(e) = RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await {
+        ctx.show_error(format!("Delete error: {}", e));
+    } else {
+        ctx.show_info(format!("Removed: {}", feed_label(&removed)));
+        feed_state.select(Some(index));
+    }
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::vertical([
         Constraint::Percentage((100 - percent_y) / 2),
@@ -286,6 +313,20 @@ impl TuiModule for RssTuiModule {
                 feed_state,
                 item_state,
             } => {
+                // Shift+D bypasses the confirmation prompt entirely and
+                // deletes immediately — checked as a raw key before the
+                // normal dispatch, same shape as other raw Shift-key
+                // checks in this app.
+                if *active_panel == Panel::Feeds
+                    && moku_core::is_delete_bypass(event)
+                    && let Some(i) = feed_state.selected()
+                    && i > 0
+                    && i - 1 < feeds.len()
+                {
+                    delete_feed_at(feeds, feed_state, i - 1, ctx).await;
+                    return Ok(true);
+                }
+
                 match command {
                     Command::Quit | Command::Back => {
                         ctx.navigate_to(ModuleId::LAUNCHER);
@@ -467,22 +508,7 @@ impl TuiModule for RssTuiModule {
                                 if *active_panel == Panel::Feeds {
                                     if let Some(i) = feed_state.selected() {
                                         if i > 0 && i - 1 < feeds.len() {
-                                            let removed = feeds.remove(i - 1);
-                                            if let Err(e) = RssEngine::save_feeds(
-                                                &ctx.storage,
-                                                &ctx.config.load(),
-                                                feeds,
-                                            )
-                                            .await
-                                            {
-                                                ctx.show_error(format!("Delete error: {}", e));
-                                            } else {
-                                                ctx.show_info(format!(
-                                                    "Removed: {}",
-                                                    feed_label(&removed)
-                                                ));
-                                                feed_state.select(Some((i - 1).max(0)));
-                                            }
+                                            *view = RssView::ConfirmDeleteFeed { index: i - 1 };
                                             changed = true;
                                         }
                                     }
@@ -722,6 +748,39 @@ impl TuiModule for RssTuiModule {
                                         *name_is_suggested = false;
                                     }
                                 }
+                                changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            RssView::ConfirmDeleteFeed { index } => {
+                if let Event::Key(key) = event {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Enter | KeyCode::Char('y') => {
+                                let mut feed_state = ListState::default();
+                                delete_feed_at(feeds, &mut feed_state, *index, ctx).await;
+                                let mut item_state = ListState::default();
+                                item_state.select(Some(0));
+                                *view = RssView::Split {
+                                    active_panel: Panel::Feeds,
+                                    feed_state,
+                                    item_state,
+                                };
+                                changed = true;
+                            }
+                            KeyCode::Esc | KeyCode::Char('n') => {
+                                let mut feed_state = ListState::default();
+                                feed_state.select(Some(*index + 1));
+                                let mut item_state = ListState::default();
+                                item_state.select(Some(0));
+                                *view = RssView::Split {
+                                    active_panel: Panel::Feeds,
+                                    feed_state,
+                                    item_state,
+                                };
                                 changed = true;
                             }
                             _ => {}
@@ -1000,6 +1059,41 @@ impl TuiModule for RssTuiModule {
                     );
                 frame.render_widget(help_p, layout[3]);
             }
+            RssView::ConfirmDeleteFeed { index } => {
+                let popup_area = centered_rect(60, 20, area);
+                frame.render_widget(Clear, popup_area);
+
+                let label = feeds
+                    .get(*index)
+                    .map(feed_label)
+                    .unwrap_or_else(|| "this feed".to_string());
+
+                let block = Block::default()
+                    .title(" Confirm Delete ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.error));
+
+                let inner_area = block.inner(popup_area);
+                frame.render_widget(block, popup_area);
+
+                let layout = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
+                ])
+                .split(inner_area);
+
+                let message = Paragraph::new(format!("Delete '{label}'?"))
+                    .style(Style::default().fg(theme.base_fg));
+                frame.render_widget(message, layout[0]);
+
+                let help_p = Paragraph::new(" [y] Yes  [n] No ").style(
+                    Style::default()
+                        .fg(theme.base_fg)
+                        .add_modifier(Modifier::DIM),
+                );
+                frame.render_widget(help_p, layout[2]);
+            }
         }
     }
 
@@ -1259,6 +1353,97 @@ mod tests {
         }];
         let content = rendered_rows(&mut module).join("");
         assert!(content.contains("No preview available."));
+    }
+}
+
+#[cfg(test)]
+mod confirm_delete_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    fn module_with_one_feed() -> RssTuiModule {
+        let mut module = RssTuiModule::new();
+        module.feeds = vec![FeedSubscription {
+            url: "https://example.com/feed".to_string(),
+            title: Some("Example Feed".to_string()),
+            favorite: false,
+        }];
+        if let RssView::Split { feed_state, .. } = &mut module.view {
+            feed_state.select(Some(1)); // display index 1 = the only real feed
+        }
+        module
+    }
+
+    #[tokio::test]
+    async fn test_plain_d_does_not_delete_and_opens_confirmation() {
+        let mut module = module_with_one_feed();
+        let mut ctx = create_test_context().await;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert_eq!(module.feeds.len(), 1, "plain 'd' must not delete anything");
+        assert!(matches!(
+            module.view,
+            RssView::ConfirmDeleteFeed { index: 0 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_shift_d_deletes_immediately() {
+        let mut module = module_with_one_feed();
+        let mut ctx = create_test_context().await;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert!(module.feeds.is_empty(), "Shift+D should delete immediately");
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_yes_deletes() {
+        let mut module = module_with_one_feed();
+        module.view = RssView::ConfirmDeleteFeed { index: 0 };
+        let mut ctx = create_test_context().await;
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert!(module.feeds.is_empty());
+        assert!(matches!(module.view, RssView::Split { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_no_cancels() {
+        let mut module = module_with_one_feed();
+        module.view = RssView::ConfirmDeleteFeed { index: 0 };
+        let mut ctx = create_test_context().await;
+        let event = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert_eq!(module.feeds.len(), 1, "cancelling must not delete anything");
+        assert!(matches!(module.view, RssView::Split { .. }));
     }
 }
 
