@@ -52,7 +52,13 @@ impl VaultManagerModule {
     pub fn new() -> Self {
         let mut state = ListState::default();
         state.select(Some(0));
-        Self { rows: Vec::new(), state, message: None, prompt: None, action_result: Arc::new(Mutex::new(None)) }
+        Self {
+            rows: Vec::new(),
+            state,
+            message: None,
+            prompt: None,
+            action_result: Arc::new(Mutex::new(None)),
+        }
     }
 
     async fn refresh(&mut self) {
@@ -62,10 +68,18 @@ impl VaultManagerModule {
             .map(|cfg| {
                 let used_bytes = registry::usage_bytes(&cfg.id).unwrap_or(0);
                 let mounted = status::is_mounted(&cfg.id);
-                VolumeRow { cfg, used_bytes, mounted }
+                VolumeRow {
+                    cfg,
+                    used_bytes,
+                    mounted,
+                }
             })
             .collect();
-        let out_of_range = self.state.selected().map(|i| i >= self.rows.len()).unwrap_or(true);
+        let out_of_range = self
+            .state
+            .selected()
+            .map(|i| i >= self.rows.len())
+            .unwrap_or(true);
         if out_of_range && !self.rows.is_empty() {
             self.state.select(Some(0));
         }
@@ -134,11 +148,25 @@ impl VaultManagerModule {
         }
     }
 
-    fn start_mount(&mut self, volume_id: String, display_name: String, mountpoint: String, password: String) {
+    fn start_mount(
+        &mut self,
+        volume_id: String,
+        display_name: String,
+        mountpoint: String,
+        password: String,
+    ) {
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
-            let msg = match worker::spawn_mount_process(&volume_id, &mountpoint, &password) {
-                Ok(pid) => format!("Mounting '{display_name}' at {mountpoint} (worker PID: {pid})..."),
+            let msg = match worker::spawn_mount_process(&volume_id, &mountpoint, &password).await {
+                Ok(worker::MountOutcome::Ready { pid }) => {
+                    format!("Mounted '{display_name}' at {mountpoint} (worker PID: {pid}).")
+                }
+                Ok(worker::MountOutcome::Failed { message }) => format!("Mount failed: {message}"),
+                Ok(worker::MountOutcome::TimedOut { pid }) => {
+                    format!(
+                        "'{display_name}' is still starting (worker PID: {pid}) — check back shortly."
+                    )
+                }
                 Err(e) => format!("Mount failed: {e}"),
             };
             *slot.lock().unwrap() = Some(msg);
@@ -151,7 +179,9 @@ impl VaultManagerModule {
         tokio::spawn(async move {
             let msg = match worker::stop_mount_process(&volume_id).await {
                 Ok(StopOutcome::NotMounted) => format!("'{display_name}' is not mounted."),
-                Ok(StopOutcome::StaleCleanedUp) => format!("'{display_name}' had a stale mount record; cleaned up."),
+                Ok(StopOutcome::StaleCleanedUp) => {
+                    format!("'{display_name}' had a stale mount record; cleaned up.")
+                }
                 Ok(StopOutcome::Graceful) => format!("Unmounted '{display_name}'."),
                 Ok(StopOutcome::Forced) => format!("Unmounted '{display_name}' (forced)."),
                 Err(e) => format!("Unmount failed: {e}"),
@@ -161,12 +191,26 @@ impl VaultManagerModule {
         self.show_message("Unmounting...");
     }
 
-    fn draw_prompt(&self, frame: &mut Frame, area: Rect, theme: &MokuTheme, prompt: &PasswordPrompt) {
-        let chunks =
-            Layout::vertical([Constraint::Percentage(40), Constraint::Length(3), Constraint::Length(2), Constraint::Percentage(40)])
-                .split(area);
-        let input_chunk =
-            Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(50), Constraint::Percentage(25)]).split(chunks[1])[1];
+    fn draw_prompt(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &MokuTheme,
+        prompt: &PasswordPrompt,
+    ) {
+        let chunks = Layout::vertical([
+            Constraint::Percentage(40),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Percentage(40),
+        ])
+        .split(area);
+        let input_chunk = Layout::horizontal([
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+        ])
+        .split(chunks[1])[1];
 
         let masked: String = prompt.input.chars().map(|_| '•').collect();
         let p = Paragraph::new(masked)
@@ -180,9 +224,12 @@ impl VaultManagerModule {
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
         frame.render_widget(p, input_chunk);
 
-        let hint = Paragraph::new(format!("Mounting at {} — [Enter] confirm  [Esc] cancel", prompt.mountpoint))
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.base_fg));
+        let hint = Paragraph::new(format!(
+            "Mounting at {} — [Enter] confirm  [Esc] cancel",
+            prompt.mountpoint
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme.base_fg));
         frame.render_widget(hint, chunks[2]);
     }
 }
@@ -219,7 +266,9 @@ impl TuiModule for VaultManagerModule {
         }
 
         if let Some(prompt) = &mut self.prompt {
-            let Event::Key(key) = event else { return Ok(false) };
+            let Event::Key(key) = event else {
+                return Ok(false);
+            };
             if key.kind != KeyEventKind::Press {
                 return Ok(false);
             }
@@ -308,12 +357,18 @@ impl TuiModule for VaultManagerModule {
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
 
         let items: Vec<ListItem> = if self.rows.is_empty() {
-            vec![ListItem::new("  No encrypted volumes yet. Create one with: moku vault create <name> --size 10GB")]
+            vec![ListItem::new(
+                "  No encrypted volumes yet. Create one with: moku vault create <name> --size 10GB",
+            )]
         } else {
             self.rows
                 .iter()
                 .map(|row| {
-                    let status = if row.mounted { "🟢 mounted" } else { "⚫ not mounted" };
+                    let status = if row.mounted {
+                        "🟢 mounted"
+                    } else {
+                        "⚫ not mounted"
+                    };
                     let content = format!(
                         "{}  ({})  {} / {}  [{}]",
                         row.cfg.display_name,
@@ -335,7 +390,12 @@ impl TuiModule for VaultManagerModule {
                     .border_style(Style::default().fg(theme.border))
                     .style(Style::default().bg(theme.base_bg)),
             )
-            .highlight_style(Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol(">> ");
 
         frame.render_stateful_widget(list, chunks[0], &mut self.state);
@@ -344,10 +404,16 @@ impl TuiModule for VaultManagerModule {
             .message
             .as_ref()
             .map(|(m, _)| m.clone())
-            .unwrap_or_else(|| " [Enter]/[m] Mount  [u] Unmount  [r] Refresh  [Esc] Back ".to_string());
+            .unwrap_or_else(|| {
+                " [Enter]/[m] Mount  [u] Unmount  [r] Refresh  [Esc] Back ".to_string()
+            });
         let help_widget = Paragraph::new(help)
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border)),
+            );
         frame.render_widget(help_widget, chunks[1]);
     }
 }

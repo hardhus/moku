@@ -101,7 +101,11 @@ impl FileSystemContext for VaultFsContext {
         };
         // No ACL support (matches the vault format's no-metadata-beyond-
         // size/mtime design) — always report a zero-length descriptor.
-        Ok(FileSecurity { reparse: false, sz_security_descriptor: 0, attributes })
+        Ok(FileSecurity {
+            reparse: false,
+            sz_security_descriptor: 0,
+            attributes,
+        })
     }
 
     fn open(
@@ -135,8 +139,13 @@ impl FileSystemContext for VaultFsContext {
     ) -> winfsp::Result<Self::FileContext> {
         let is_directory = (create_options & FILE_DIRECTORY_FILE) != 0;
         let path = to_virtual_path(file_name);
-        let parent = path.parent().ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?;
-        let name = path.file_name().ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?.to_string();
+        let parent = path
+            .parent()
+            .ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?
+            .to_string();
 
         if is_directory {
             let attr = self.engine.mkdir(&parent, &name).map_err(map_err)?;
@@ -160,8 +169,12 @@ impl FileSystemContext for VaultFsContext {
         if flags & FSP_CLEANUP_DELETE == 0 {
             return;
         }
-        let Some(parent) = context.path.parent() else { return };
-        let Some(name) = context.path.file_name() else { return };
+        let Some(parent) = context.path.parent() else {
+            return;
+        };
+        let Some(name) = context.path.file_name() else {
+            return;
+        };
         if context.fh.is_some() {
             let _ = self.engine.unlink(&parent, name);
         } else {
@@ -169,7 +182,11 @@ impl FileSystemContext for VaultFsContext {
         }
     }
 
-    fn get_file_info(&self, context: &Self::FileContext, file_info: &mut FileInfo) -> winfsp::Result<()> {
+    fn get_file_info(
+        &self,
+        context: &Self::FileContext,
+        file_info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
         let attr = self.engine.getattr(&context.path).map_err(map_err)?;
         write_file_info(file_info, &attr);
         Ok(())
@@ -200,7 +217,10 @@ impl FileSystemContext for VaultFsContext {
         _set_allocation_size: bool,
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
-        let attr = self.engine.setattr_size(&context.path, new_size).map_err(map_err)?;
+        let attr = self
+            .engine
+            .setattr_size(&context.path, new_size)
+            .map_err(map_err)?;
         write_file_info(file_info, &attr);
         Ok(())
     }
@@ -214,12 +234,20 @@ impl FileSystemContext for VaultFsContext {
         _extra_buffer: Option<&[u8]>,
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
-        let attr = self.engine.setattr_size(&context.path, 0).map_err(map_err)?;
+        let attr = self
+            .engine
+            .setattr_size(&context.path, 0)
+            .map_err(map_err)?;
         write_file_info(file_info, &attr);
         Ok(())
     }
 
-    fn set_delete(&self, context: &Self::FileContext, _file_name: &U16CStr, delete_file: bool) -> winfsp::Result<()> {
+    fn set_delete(
+        &self,
+        context: &Self::FileContext,
+        _file_name: &U16CStr,
+        delete_file: bool,
+    ) -> winfsp::Result<()> {
         if !delete_file {
             return Ok(());
         }
@@ -232,8 +260,15 @@ impl FileSystemContext for VaultFsContext {
         Ok(())
     }
 
-    fn read(&self, context: &Self::FileContext, buffer: &mut [u8], offset: u64) -> winfsp::Result<u32> {
-        let fh = context.fh.ok_or(winfsp::FspError::from(STATUS_NOT_A_DIRECTORY))?;
+    fn read(
+        &self,
+        context: &Self::FileContext,
+        buffer: &mut [u8],
+        offset: u64,
+    ) -> winfsp::Result<u32> {
+        let fh = context
+            .fh
+            .ok_or(winfsp::FspError::from(STATUS_NOT_A_DIRECTORY))?;
         let attr = self.engine.getattr(&context.path).map_err(map_err)?;
         if offset >= attr.size {
             return Err(STATUS_END_OF_FILE.into());
@@ -251,10 +286,16 @@ impl FileSystemContext for VaultFsContext {
         constrained_io: bool,
         file_info: &mut FileInfo,
     ) -> winfsp::Result<u32> {
-        let fh = context.fh.ok_or(winfsp::FspError::from(STATUS_NOT_A_DIRECTORY))?;
+        let fh = context
+            .fh
+            .ok_or(winfsp::FspError::from(STATUS_NOT_A_DIRECTORY))?;
         let attr_before = self.engine.getattr(&context.path).map_err(map_err)?;
 
-        let start = if write_to_eof { attr_before.size } else { offset };
+        let start = if write_to_eof {
+            attr_before.size
+        } else {
+            offset
+        };
         let n = if constrained_io {
             if start >= attr_before.size {
                 write_file_info(file_info, &attr_before);
@@ -262,7 +303,9 @@ impl FileSystemContext for VaultFsContext {
             }
             let end = (start + buffer.len() as u64).min(attr_before.size);
             let len = (end - start) as usize;
-            self.engine.write(fh, start, &buffer[..len]).map_err(map_err)?
+            self.engine
+                .write(fh, start, &buffer[..len])
+                .map_err(map_err)?
         } else {
             self.engine.write(fh, start, buffer).map_err(map_err)?
         };
@@ -291,8 +334,11 @@ impl FileSystemContext for VaultFsContext {
                 return Ok(cursor);
             }
 
-            let parent_attr =
-                context.path.parent().and_then(|p| self.engine.getattr(&p).ok()).unwrap_or_else(|| self_attr.clone());
+            let parent_attr = context
+                .path
+                .parent()
+                .and_then(|p| self.engine.getattr(&p).ok())
+                .unwrap_or_else(|| self_attr.clone());
             dir_info.reset();
             write_file_info(dir_info.file_info_mut(), &parent_attr);
             dir_info.set_name_raw([b'.' as u16, b'.' as u16].as_slice())?;
@@ -313,7 +359,9 @@ impl FileSystemContext for VaultFsContext {
                 continue;
             }
             let child_path = context.path.join(&entry.name);
-            let Ok(attr) = self.engine.getattr(&child_path) else { continue };
+            let Ok(attr) = self.engine.getattr(&child_path) else {
+                continue;
+            };
             dir_info.reset();
             write_file_info(dir_info.file_info_mut(), &attr);
             dir_info.set_name(entry.name.as_str())?;
@@ -333,20 +381,37 @@ impl FileSystemContext for VaultFsContext {
         new_file_name: &U16CStr,
         replace_if_exists: bool,
     ) -> winfsp::Result<()> {
-        let old_parent = context.path.parent().ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?;
-        let old_name =
-            context.path.file_name().ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?.to_string();
+        let old_parent = context
+            .path
+            .parent()
+            .ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?;
+        let old_name = context
+            .path
+            .file_name()
+            .ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?
+            .to_string();
         let new_path = to_virtual_path(new_file_name);
-        let new_parent = new_path.parent().ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?;
-        let new_name = new_path.file_name().ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?.to_string();
+        let new_parent = new_path
+            .parent()
+            .ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?;
+        let new_name = new_path
+            .file_name()
+            .ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?
+            .to_string();
 
         if replace_if_exists
-            && self.engine.getattr(&new_path).map(|a| a.kind == FileKind::File).unwrap_or(false)
+            && self
+                .engine
+                .getattr(&new_path)
+                .map(|a| a.kind == FileKind::File)
+                .unwrap_or(false)
         {
             let _ = self.engine.unlink(&new_parent, &new_name);
         }
 
-        self.engine.rename(&old_parent, &old_name, &new_parent, &new_name).map_err(map_err)
+        self.engine
+            .rename(&old_parent, &old_name, &new_parent, &new_name)
+            .map_err(map_err)
     }
 
     fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> winfsp::Result<()> {
@@ -359,7 +424,8 @@ impl FileSystemContext for VaultFsContext {
     }
 }
 
-/// Mounts `engine` at `mountpoint`, blocks until `stop_rx` receives a
+/// Mounts `engine` at `mountpoint`, calls `on_mounted` once the mount is
+/// actually live (before blocking), then blocks until `stop_rx` receives a
 /// signal, then unmounts cleanly.
 ///
 /// `mountpoint` should be a drive letter ("X:") — verified end-to-end
@@ -369,8 +435,14 @@ impl FileSystemContext for VaultFsContext {
 /// for a directory target even though the mount then worked correctly for
 /// every filesystem operation — an unexplained quirk worth investigating
 /// before that form is exposed as a supported option.
-pub fn mount_and_wait(engine: VolumeEngine, mountpoint: &str, stop_rx: Receiver<()>) -> Result<()> {
-    winfsp::winfsp_init().map_err(|e| anyhow!("WinFsp initialization failed: {e:?} (is WinFsp installed?)"))?;
+pub fn mount_and_wait(
+    engine: VolumeEngine,
+    mountpoint: &str,
+    stop_rx: Receiver<()>,
+    on_mounted: impl FnOnce(),
+) -> Result<()> {
+    winfsp::winfsp_init()
+        .map_err(|e| anyhow!("WinFsp initialization failed: {e:?} (is WinFsp installed?)"))?;
 
     let mut volume_params = VolumeParams::new();
     volume_params
@@ -383,13 +455,20 @@ pub fn mount_and_wait(engine: VolumeEngine, mountpoint: &str, stop_rx: Receiver<
         .flush_and_purge_on_cleanup(true);
 
     let engine = Arc::new(engine);
-    let context = VaultFsContext { engine: Arc::clone(&engine) };
+    let context = VaultFsContext {
+        engine: Arc::clone(&engine),
+    };
     let params = FileSystemParams::default_params(volume_params);
-    let mut host: FileSystemHost<VaultFsContext> = FileSystemHost::new_with_options(params, context)
-        .map_err(|e| anyhow!("failed to create WinFsp filesystem host: {e:?}"))?;
+    let mut host: FileSystemHost<VaultFsContext> =
+        FileSystemHost::new_with_options(params, context)
+            .map_err(|e| anyhow!("failed to create WinFsp filesystem host: {e:?}"))?;
 
-    host.mount(mountpoint).map_err(|e| anyhow!("failed to mount at '{mountpoint}': {e:?}"))?;
-    host.start().map_err(|e| anyhow!("failed to start WinFsp dispatcher: {e:?}"))?;
+    host.mount(mountpoint)
+        .map_err(|e| anyhow!("failed to mount at '{mountpoint}': {e:?}"))?;
+    host.start()
+        .map_err(|e| anyhow!("failed to start WinFsp dispatcher: {e:?}"))?;
+
+    on_mounted();
 
     let _ = stop_rx.recv();
 
@@ -422,37 +501,66 @@ mod tests {
     #[test]
     #[ignore = "requires WinFsp installed and a free drive letter"]
     fn test_real_mount_full_crud_roundtrip() {
-        let mountpoint = find_free_drive_letter().expect("no free drive letter available for the test");
+        let mountpoint =
+            find_free_drive_letter().expect("no free drive letter available for the test");
         let volume_tmp = tempfile::tempdir().expect("tempdir");
 
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let engine = rt.block_on(async {
-            let security = moku_core::SecurityManager::new_with_root(volume_tmp.path().to_path_buf());
-            let master_key = security.initialize_vault("smoke-test-password".to_string()).await.expect("init vault");
+            let security =
+                moku_core::SecurityManager::new_with_root(volume_tmp.path().to_path_buf());
+            let master_key = security
+                .initialize_vault("smoke-test-password".to_string())
+                .await
+                .expect("init vault");
             let keys = moku_vault_fs::derive_volume_keys(&master_key);
-            VolumeEngine::open_volume(volume_tmp.path().join("data"), keys, volume_tmp.path().join("usage.json"), 50_000_000)
-                .expect("open_volume")
+            VolumeEngine::open_volume(
+                volume_tmp.path().join("data"),
+                keys,
+                volume_tmp.path().join("usage.json"),
+                50_000_000,
+            )
+            .expect("open_volume")
         });
 
         let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let (mounted_tx, mounted_rx) = std::sync::mpsc::channel();
         let mount_mountpoint = mountpoint.clone();
-        let mount_thread = std::thread::spawn(move || mount_and_wait(engine, &mount_mountpoint, stop_rx));
+        let mount_thread = std::thread::spawn(move || {
+            mount_and_wait(engine, &mount_mountpoint, stop_rx, move || {
+                let _ = mounted_tx.send(());
+            })
+        });
 
-        std::thread::sleep(std::time::Duration::from_millis(800));
+        mounted_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("on_mounted should fire once the WinFsp mount actually succeeds");
 
         let root = std::path::Path::new(&mountpoint).to_path_buf();
         let result = std::panic::catch_unwind(|| {
-            assert!(std::fs::read_dir(&root).unwrap().next().is_none(), "freshly mounted volume should be empty");
+            assert!(
+                std::fs::read_dir(&root).unwrap().next().is_none(),
+                "freshly mounted volume should be empty"
+            );
 
             std::fs::write(root.join("hello.txt"), b"hello from moku vault").expect("write file");
-            assert_eq!(std::fs::read_to_string(root.join("hello.txt")).unwrap(), "hello from moku vault");
+            assert_eq!(
+                std::fs::read_to_string(root.join("hello.txt")).unwrap(),
+                "hello from moku vault"
+            );
 
             std::fs::create_dir(root.join("notes")).expect("mkdir");
-            std::fs::write(root.join("notes").join("a.md"), b"note content").expect("write nested file");
-            assert_eq!(std::fs::read_to_string(root.join("notes").join("a.md")).unwrap(), "note content");
+            std::fs::write(root.join("notes").join("a.md"), b"note content")
+                .expect("write nested file");
+            assert_eq!(
+                std::fs::read_to_string(root.join("notes").join("a.md")).unwrap(),
+                "note content"
+            );
 
-            let entries: Vec<_> =
-                std::fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+            let entries: Vec<_> = std::fs::read_dir(&root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .collect();
             assert!(entries.contains(&"hello.txt".to_string()));
             assert!(entries.contains(&"notes".to_string()));
 
@@ -466,9 +574,15 @@ mod tests {
         });
 
         let _ = stop_tx.send(());
-        mount_thread.join().expect("mount thread panicked").expect("mount_and_wait failed");
+        mount_thread
+            .join()
+            .expect("mount thread panicked")
+            .expect("mount_and_wait failed");
 
-        assert!(!std::path::Path::new(&format!("{mountpoint}\\")).exists(), "drive must be gone after a clean unmount");
+        assert!(
+            !std::path::Path::new(&format!("{mountpoint}\\")).exists(),
+            "drive must be gone after a clean unmount"
+        );
         result.expect("filesystem operations against the mounted drive failed");
     }
 }

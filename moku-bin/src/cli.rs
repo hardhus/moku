@@ -11,7 +11,10 @@ use moku_core::ModuleId;
 )]
 pub struct Cli {
     /// Initialize portable mode by creating `moku-data` next to the executable
-    #[arg(long, help = "Initialize portable mode by creating `moku-data` next to the executable")]
+    #[arg(
+        long,
+        help = "Initialize portable mode by creating `moku-data` next to the executable"
+    )]
     pub portable: bool,
 
     #[command(subcommand)]
@@ -102,6 +105,10 @@ pub enum VaultCommands {
         /// Use a password independent from moku's own vault password.
         #[arg(long)]
         custom_password: bool,
+        /// Where to create the volume's directory. Defaults to the
+        /// current directory.
+        #[arg(long)]
+        path: Option<String>,
     },
     /// List all encrypted volumes with their usage and mount status.
     List,
@@ -211,7 +218,10 @@ mod tests {
 
     #[test]
     fn test_target_module_resolution() {
-        let cli_none = Cli { command: None, portable: false };
+        let cli_none = Cli {
+            command: None,
+            portable: false,
+        };
         assert_eq!(cli_none.target_module(), ModuleId::LAUNCHER);
 
         let cli_todo = Cli {
@@ -248,13 +258,19 @@ mod tests {
         assert_eq!(cli_daemon.target_module(), ModuleId::DAEMON);
 
         let cli_daemon_start = Cli {
-            command: Some(Commands::Daemon { sub: Some(DaemonCommands::Start { from_autostart: false }) }),
+            command: Some(Commands::Daemon {
+                sub: Some(DaemonCommands::Start {
+                    from_autostart: false,
+                }),
+            }),
             portable: false,
         };
         assert_eq!(cli_daemon_start.target_module(), ModuleId::DAEMON);
 
         let cli_daemon_stop = Cli {
-            command: Some(Commands::Daemon { sub: Some(DaemonCommands::Stop) }),
+            command: Some(Commands::Daemon {
+                sub: Some(DaemonCommands::Stop),
+            }),
             portable: false,
         };
         assert_eq!(cli_daemon_stop.target_module(), ModuleId::DAEMON);
