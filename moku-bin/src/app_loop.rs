@@ -8,7 +8,7 @@ use crossterm::event::EventStream;
 use futures::StreamExt;
 
 use moku_core::{
-    AppContext, AsAny, ModuleId, MokuConfig, Router, SecurityManager, StorageManager, ToastManager,
+    AppContext, ModuleId, MokuConfig, Router, SecurityManager, StorageManager, ToastManager,
     TuiRegistry, VaultSession, keys_match,
 };
 
@@ -229,7 +229,14 @@ async fn enter_module(
             .collect_dashboard_summaries(ModuleId::DASHBOARD, ctx)
             .await;
         if let Some(m) = registry.get_mut(ModuleId::DASHBOARD)
+            // `.as_mut()` derefs through the `Box` to `&mut dyn TuiModule`
+            // first — calling `.as_any_mut()` directly on `&mut Box<dyn
+            // TuiModule>` picks the blanket `AsAny` impl for `Box` itself
+            // (it's `'static` too), type-erasing the *Box*, not the
+            // concrete module inside it, so the downcast below always
+            // failed silently.
             && let Some(dash) = m
+                .as_mut()
                 .as_any_mut()
                 .downcast_mut::<moku_dashboard::DashboardModule>()
         {
@@ -239,4 +246,84 @@ async fn enter_module(
 
     router.switch_to(target);
     Ok(AppState::Unlocked)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{StorageManager, TuiModule};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    // Regression test for a real bug: the downcast used to type-erase
+    // `Box<dyn TuiModule>` itself (its blanket `AsAny` impl is picked over
+    // deref-ing into the boxed module, since it needs zero autoderefs) and
+    // always failed silently, so Dashboard never received any summaries —
+    // "No module status available" no matter what. Fixed by explicitly
+    // `.as_mut()`-ing through the `Box` before calling `.as_any_mut()`.
+    #[tokio::test]
+    async fn test_entering_dashboard_populates_summaries_from_other_modules() {
+        let mut registry = TuiRegistry::new();
+        registry.insert(Box::new(moku_dashboard::DashboardModule::new()));
+        registry.insert(Box::new(moku_todo::TodoModule::new()));
+        registry.insert(Box::new(moku_rss::RssTuiModule::new()));
+        let mut router = Router::new(ModuleId::LAUNCHER);
+        let mut ctx = create_test_context().await;
+
+        let state = enter_module(&mut registry, &mut router, &mut ctx, ModuleId::DASHBOARD)
+            .await
+            .unwrap();
+        assert!(matches!(state, AppState::Unlocked));
+
+        let dash = registry
+            .get_mut(ModuleId::DASHBOARD)
+            .unwrap()
+            .as_mut()
+            .as_any_mut()
+            .downcast_mut::<moku_dashboard::DashboardModule>()
+            .expect("downcast should succeed");
+
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = moku_core::MokuTheme::default();
+        terminal
+            .draw(|f| dash.draw(f, ratatui::layout::Rect::new(0, 0, 60, 20), &theme))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            content.contains("feeds"),
+            "expected RSS's never-lock-gated summary row to be present: {content}"
+        );
+        assert!(
+            !content.contains("No module status available"),
+            "Dashboard must not fall back to its empty state once summaries were collected"
+        );
+    }
 }
