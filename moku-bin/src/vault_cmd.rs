@@ -7,18 +7,58 @@ use moku_vault_daemon::{PasswordMode, registry, size, status, worker};
 
 use crate::cli::VaultCommands;
 
+/// Reads one line of plain (unmasked) input, prompting first — for
+/// non-secret fields like a volume name or size where `rpassword` would be
+/// the wrong (and slower) tool. Never used for passwords.
+fn prompt_line(label: &str) -> Result<String> {
+    use std::io::Write;
+    print!("{label}");
+    std::io::stdout()
+        .flush()
+        .map_err(|e| anyhow!("Failed to write prompt: {e}"))?;
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| anyhow!("Failed to read input: {e}"))?;
+    Ok(line.trim().to_string())
+}
+
 pub async fn handle(sub: &VaultCommands) -> Result<()> {
     match sub {
         VaultCommands::Create {
             name,
             size: size_str,
             custom_password,
+            default_password,
             path,
         } => {
-            let size_bytes = size::parse_size(size_str)?;
+            if *custom_password && *default_password {
+                bail!("--custom-password and --default-password can't both be set");
+            }
+
+            let name = match name {
+                Some(n) => n.clone(),
+                None => prompt_line("Volume name: ")?,
+            };
+            let size_str = match size_str {
+                Some(s) => s.clone(),
+                None => prompt_line("Size (e.g. 512MiB, 10GB): ")?,
+            };
+            let size_bytes = size::parse_size(&size_str)?;
             let base_dir = path.as_deref().map(std::path::PathBuf::from);
 
-            let secret = if *custom_password {
+            let use_custom = if *custom_password {
+                true
+            } else if *default_password {
+                false
+            } else {
+                let answer = prompt_line(
+                    "Use the moku vault password for this volume too? [Y/n] (choosing 'n' lets you set a separate password just for this volume): ",
+                )?;
+                matches!(answer.as_str(), "n" | "N" | "no" | "No" | "NO")
+            };
+
+            let secret = if use_custom {
                 let p1 = rpassword::prompt_password("New volume password: ")
                     .map_err(|e| anyhow!("Failed to read password: {e}"))?;
                 let p2 = rpassword::prompt_password("Confirm volume password: ")
@@ -48,7 +88,7 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
                 VolumeSecret::FromAppVault(key)
             };
 
-            let cfg = registry::create_volume(name, size_bytes, secret, base_dir).await?;
+            let cfg = registry::create_volume(&name, size_bytes, secret, base_dir).await?;
             let dir = registry::volume_dir(&cfg.id)?;
             println!(
                 "✅ Created encrypted volume '{}' (id: {}, size limit: {}) at {}",

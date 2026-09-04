@@ -96,15 +96,24 @@ pub enum Commands {
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
 pub enum VaultCommands {
-    /// Create a new encrypted volume of the given size.
+    /// Create a new encrypted volume. Any of name/size/password-mode left
+    /// unset is asked for interactively, so `moku vault create` alone
+    /// works as a full wizard, while `moku vault create NAME --size ...
+    /// --default-password` skips straight to just the password prompt.
     Create {
-        name: String,
+        name: Option<String>,
         /// Human-readable size, e.g. "10GB" or "512MiB".
         #[arg(long)]
-        size: String,
+        size: Option<String>,
         /// Use a password independent from moku's own vault password.
+        /// Skips the interactive mode question.
         #[arg(long)]
         custom_password: bool,
+        /// Use moku's own vault password for this volume. Skips the
+        /// interactive mode question (the symmetric counterpart to
+        /// --custom-password, for non-interactive/scripted use).
+        #[arg(long)]
+        default_password: bool,
         /// Where to create the volume's directory. Defaults to the
         /// current directory.
         #[arg(long)]
@@ -290,5 +299,66 @@ mod tests {
     fn test_commit_alias_co() {
         let cli = Cli::try_parse_from(["moku", "co"]).unwrap();
         assert_eq!(cli.command, Some(Commands::Commit));
+    }
+
+    #[test]
+    fn test_vault_create_parses_with_no_name_or_size() {
+        // Both are optional now — missing ones fall back to an interactive
+        // prompt at runtime rather than a clap parse error.
+        let cli = Cli::try_parse_from(["moku", "vault", "create"]).unwrap();
+        let Some(Commands::Vault {
+            sub: VaultCommands::Create { name, size, .. },
+        }) = cli.command
+        else {
+            panic!("expected Vault::Create");
+        };
+        assert_eq!(name, None);
+        assert_eq!(size, None);
+    }
+
+    #[test]
+    fn test_vault_create_parses_fully_flag_driven() {
+        let cli = Cli::try_parse_from([
+            "moku",
+            "vault",
+            "create",
+            "myvol",
+            "--size",
+            "10GB",
+            "--default-password",
+        ])
+        .unwrap();
+        let Some(Commands::Vault {
+            sub:
+                VaultCommands::Create {
+                    name,
+                    size,
+                    custom_password,
+                    default_password,
+                    ..
+                },
+        }) = cli.command
+        else {
+            panic!("expected Vault::Create");
+        };
+        assert_eq!(name.as_deref(), Some("myvol"));
+        assert_eq!(size.as_deref(), Some("10GB"));
+        assert!(!custom_password);
+        assert!(default_password);
+    }
+
+    #[test]
+    fn test_vault_create_custom_password_flag_parses() {
+        let cli =
+            Cli::try_parse_from(["moku", "vault", "create", "myvol", "--custom-password"]).unwrap();
+        let Some(Commands::Vault {
+            sub: VaultCommands::Create {
+                custom_password, ..
+            },
+        }) = cli.command
+        else {
+            panic!("expected Vault::Create");
+        };
+        assert!(custom_password);
     }
 }
