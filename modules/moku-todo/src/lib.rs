@@ -15,7 +15,9 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
+use moku_core::{
+    AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
+};
 
 /// A single task. Deliberately shared-friendly: `id`/`parent_id` are the
 /// only structure needed for today's nesting, and are also exactly what a
@@ -517,14 +519,56 @@ impl TuiModule for TodoModule {
 
         frame.render_widget(bottom_content, chunks[1]);
     }
+
+    async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
+        let needs_vault =
+            moku_core::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true);
+        if needs_vault && !ctx.session.is_unlocked() {
+            return Some(ModuleStatus::locked());
+        }
+        let items: Vec<Task> = ctx
+            .storage
+            .load(ModuleId::TODO.as_str(), "items")
+            .await
+            .unwrap_or_default();
+        let done = items.iter().filter(|t| t.completed).count();
+        Some(ModuleStatus::normal(format!(
+            "{} tasks, {} done",
+            items.len(),
+            done
+        )))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use tempfile::tempdir;
 
     use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
 
     fn task(id: &str, title: &str, parent: Option<&str>) -> Task {
         Task {
@@ -714,5 +758,37 @@ mod tests {
             !content.contains("Child Task"),
             "collapsed task's child should not render"
         );
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_locked_when_vault_not_unlocked() {
+        let module = TodoModule::new();
+        let ctx = create_test_context().await;
+        let status = module.dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Locked);
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_reports_counts_when_unlocked() {
+        let module = TodoModule::new();
+        let ctx = create_test_context().await;
+        let key = SecurityManager::derive_key("test-pass", &[7u8; 16])
+            .await
+            .unwrap();
+        ctx.session.unlock(key);
+
+        let items = vec![
+            task("1", "one", None),
+            task("2", "two", None),
+            task("3", "three", None),
+        ];
+        ctx.storage
+            .save(ModuleId::TODO.as_str(), "items", &items, true)
+            .await
+            .unwrap();
+
+        let status = module.dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Normal);
+        assert_eq!(status.text, "3 tasks, 0 done");
     }
 }

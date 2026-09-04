@@ -2,22 +2,19 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::Event;
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::Style,
+    widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 use serde::Deserialize;
-use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 
-use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
-
-#[derive(Deserialize, Default)]
-struct SimpleTodo {
-    completed: bool,
-}
+use moku_core::{
+    AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, StatusTone, TuiModule,
+    resolve_event,
+};
 
 #[derive(Deserialize, Default, Clone)]
 struct DashboardKeyConfig {
@@ -25,41 +22,33 @@ struct DashboardKeyConfig {
     pub keys: HashMap<String, String>,
 }
 
+/// A read-only, at-a-glance overview of every other module's status — not
+/// a system monitor. Each row comes from that module's own
+/// `TuiModule::dashboard_summary`, collected generically by `app_loop`
+/// (see `TuiRegistry::collect_dashboard_summaries`) and handed in via
+/// `set_summaries`. This module never reaches into another module's
+/// storage itself — a new module automatically gains a row here the
+/// moment it overrides `dashboard_summary`, with no change needed in this
+/// crate.
 pub struct DashboardModule {
-    sys: System,
-    todo_count: usize,
-    completed_count: usize,
+    statuses: Vec<(ModuleId, ModuleStatus)>,
 }
 
 impl DashboardModule {
     pub fn new() -> Self {
-        let sys = System::new_with_specifics(
-            RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
-        );
-
         Self {
-            sys,
-            todo_count: 0,
-            completed_count: 0,
+            statuses: Vec::new(),
         }
     }
 
-    async fn refresh_data(&mut self, ctx: &AppContext) {
-        self.sys.refresh_memory();
+    pub fn set_summaries(&mut self, statuses: Vec<(ModuleId, ModuleStatus)>) {
+        self.statuses = statuses;
+    }
+}
 
-        let todo_data: Result<Vec<SimpleTodo>> =
-            ctx.storage.load(ModuleId::TODO.as_str(), "items").await;
-
-        match todo_data {
-            Ok(todos) => {
-                self.todo_count = todos.len();
-                self.completed_count = todos.iter().filter(|t| t.completed).count();
-            }
-            Err(_) => {
-                self.todo_count = 0;
-                self.completed_count = 0;
-            }
-        }
+impl Default for DashboardModule {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -73,144 +62,168 @@ impl ModuleMeta for DashboardModule {
     }
 
     fn encrypt_by_default(&self) -> bool {
-        false // read-only system stats, owns no storage
+        false // owns no storage of its own — just displays other modules' summaries
     }
 }
 
 #[async_trait]
 impl TuiModule for DashboardModule {
-    async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
-        self.refresh_data(ctx).await;
-        Ok(())
-    }
-
     async fn handle_event(&mut self, event: &Event, ctx: &mut AppContext) -> Result<bool> {
-        let mut changed = false;
-
         let module_config: DashboardKeyConfig = ctx
             .config
             .load()
             .resolve_module_config(ModuleId::DASHBOARD.as_str());
-
-        let overrides = Some(&module_config.keys);
-
-        let command = resolve_event(event, &ctx.config.load().keys, overrides);
+        let command = resolve_event(event, &ctx.config.load().keys, Some(&module_config.keys));
 
         match command {
             Command::Quit => {
                 ctx.quit();
-                return Ok(true);
+                Ok(true)
             }
             Command::Back => {
                 ctx.navigate_to(ModuleId::LAUNCHER);
-                return Ok(true);
+                Ok(true)
             }
             Command::Refresh => {
-                self.refresh_data(ctx).await;
-                changed = true;
+                // This module has no way to reach the other modules'
+                // storage itself (see the doc comment above) — re-entering
+                // itself runs the same summary-collection path app_loop
+                // already uses on first entry.
+                ctx.navigate_to(ModuleId::DASHBOARD);
+                Ok(true)
             }
-            _ => {}
+            _ => Ok(false),
         }
-
-        if let Event::Key(key) = event {
-            if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
-                if key.code == KeyCode::Char('r') {
-                    self.refresh_data(ctx).await;
-                    ctx.show_info("Dashboard Updated 🔄");
-                    changed = true;
-                }
-            }
-        }
-
-        Ok(changed)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(6), // Todo Info
-                Constraint::Length(3), // RAM
-                Constraint::Length(3), // Swap
-                Constraint::Min(0),    // Spacer
-                Constraint::Length(3), // Footer
-            ])
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
             .split(area);
 
-        let stats_text = format!(
-            "Total Tasks:  {}\nCompleted:    {}\nTo do:      {}",
-            self.todo_count,
-            self.completed_count,
-            self.todo_count.saturating_sub(self.completed_count)
+        let items: Vec<ListItem> = if self.statuses.is_empty() {
+            vec![
+                ListItem::new("  No module status available.")
+                    .style(Style::default().fg(theme.base_fg)),
+            ]
+        } else {
+            self.statuses
+                .iter()
+                .map(|(id, status)| {
+                    let color = match status.tone {
+                        StatusTone::Normal => theme.base_fg,
+                        StatusTone::Locked => theme.info,
+                        StatusTone::Warning => theme.warning,
+                        StatusTone::Error => theme.error,
+                    };
+                    ListItem::new(format!("  {}: {}", id.title(), status.text))
+                        .style(Style::default().fg(color))
+                })
+                .collect()
+        };
+
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Dashboard ")
+                .title_alignment(Alignment::Center)
+                .border_style(Style::default().fg(theme.border))
+                .style(Style::default().bg(theme.base_bg)),
         );
+        frame.render_widget(list, chunks[0]);
 
-        let stats_block = Paragraph::new(stats_text)
-            .block(
-                Block::default()
-                    .title(" 📝 Moku Summary ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border))
-                    .style(Style::default().bg(theme.base_bg)),
-            )
-            .style(Style::default().fg(theme.info).add_modifier(Modifier::BOLD));
-
-        frame.render_widget(stats_block, chunks[0]);
-
-        // RAM and Swap Gauge renders...
-        let total_mem = self.sys.total_memory() as f64;
-        let used_mem = self.sys.used_memory() as f64;
-        let mem_percent = if total_mem > 0.0 {
-            (used_mem / total_mem * 100.0) as u16
-        } else {
-            0
-        };
-
-        let gauge = Gauge::default()
-            .block(
-                Block::default()
-                    .title(" 🧠 RAM Usage ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border)),
-            )
-            .gauge_style(Style::default().fg(theme.warning))
-            .percent(mem_percent)
-            .label(format!(
-                "{:.1} GB / {:.1} GB",
-                used_mem / 1024.0 / 1024.0 / 1024.0,
-                total_mem / 1024.0 / 1024.0 / 1024.0
-            ));
-
-        frame.render_widget(gauge, chunks[1]);
-
-        let total_swap = self.sys.total_swap() as f64;
-        let used_swap = self.sys.used_swap() as f64;
-        let swap_percent = if total_swap > 0.0 {
-            (used_swap / total_swap * 100.0) as u16
-        } else {
-            0
-        };
-
-        let swap_gauge = Gauge::default()
-            .block(
-                Block::default()
-                    .title(" 💾 Swap Usage ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border)),
-            )
-            .gauge_style(Style::default().fg(theme.error))
-            .percent(swap_percent);
-
-        frame.render_widget(swap_gauge, chunks[2]);
-
-        let footer = Paragraph::new("Refresh: [r] | Menu: [ESC]")
+        let footer = Paragraph::new(" [r] Refresh | [Esc] Back | [q] Quit ")
             .style(Style::default().fg(theme.base_fg))
-            .alignment(ratatui::layout::Alignment::Center)
+            .alignment(Alignment::Center)
             .block(
                 Block::default()
                     .borders(Borders::TOP)
                     .border_style(Style::default().fg(theme.border)),
             );
+        frame.render_widget(footer, chunks[1]);
+    }
+}
 
-        frame.render_widget(footer, chunks[4]);
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+
+    fn rendered_rows(module: &mut DashboardModule) -> Vec<String> {
+        let (width, height) = (60u16, 20u16);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| module.draw(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let content = terminal.backend().buffer().content.clone();
+        (0..height as usize)
+            .map(|y| {
+                content[y * width as usize..(y + 1) * width as usize]
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_ram_and_swap_are_never_rendered() {
+        let mut module = DashboardModule::new();
+        module.set_summaries(vec![(ModuleId::TODO, ModuleStatus::normal("3 tasks"))]);
+        let content = rendered_rows(&mut module).join("");
+        assert!(!content.contains("RAM"));
+        assert!(!content.contains("Swap"));
+        assert!(!content.contains("GB"));
+    }
+
+    #[test]
+    fn test_each_status_renders_as_title_colon_text() {
+        let mut module = DashboardModule::new();
+        module.set_summaries(vec![
+            (ModuleId::TODO, ModuleStatus::normal("3 tasks, 1 done")),
+            (ModuleId::SECRETS, ModuleStatus::locked()),
+        ]);
+        let content = rendered_rows(&mut module).join("");
+        assert!(content.contains(&format!("{}: 3 tasks, 1 done", ModuleId::TODO.title())));
+        assert!(content.contains(&format!("{}: Locked", ModuleId::SECRETS.title())));
+    }
+
+    #[test]
+    fn test_row_color_matches_its_tone() {
+        let mut module = DashboardModule::new();
+        module.set_summaries(vec![
+            (ModuleId::TODO, ModuleStatus::normal("ok")),
+            (ModuleId::SECRETS, ModuleStatus::locked()),
+            (ModuleId::DAEMON, ModuleStatus::warning("Stopped")),
+        ]);
+        let theme = MokuTheme::default();
+        let (width, height) = (60u16, 20u16);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| module.draw(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let find_row_fg = |needle: &str| -> ratatui::style::Color {
+            for y in 0..height {
+                let row: String = (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect();
+                if row.contains(needle) {
+                    return buffer[(1, y)].fg;
+                }
+            }
+            panic!("row containing {needle:?} not found");
+        };
+
+        assert_eq!(find_row_fg("ok"), theme.base_fg);
+        assert_eq!(find_row_fg("Locked"), theme.info);
+        assert_eq!(find_row_fg("Stopped"), theme.warning);
     }
 }

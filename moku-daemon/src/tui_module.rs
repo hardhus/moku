@@ -1,16 +1,18 @@
-use std::time::{Instant, Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
+use moku_core::{
+    AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
+};
 use ratatui::{
     Frame,
-    layout::{Rect, Layout, Constraint},
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, List, ListItem},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
 };
-use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
 
 const AUTOSTART_ARGS: &[&str] = &["daemon", "start", "--from-autostart"];
 
@@ -147,7 +149,11 @@ impl TuiModule for DaemonStatusModule {
                             match crate::autostart::set_autostart(enable, &exe, AUTOSTART_ARGS) {
                                 Ok(_) => {
                                     self.autostart_enabled = enable;
-                                    self.show_temp_message(if enable { "Autostart enabled." } else { "Autostart disabled." });
+                                    self.show_temp_message(if enable {
+                                        "Autostart enabled."
+                                    } else {
+                                        "Autostart disabled."
+                                    });
                                 }
                                 Err(e) => self.show_temp_message(format!("Autostart error: {e}")),
                             }
@@ -192,14 +198,26 @@ impl TuiModule for DaemonStatusModule {
 
         // 1. Title Header
         let header = Paragraph::new(" Daemon Manager ")
-            .style(Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD),
+            )
             .alignment(ratatui::layout::Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border)),
+            );
         frame.render_widget(header, chunks[0]);
 
         // 2. Status Panel
         let daemon_badge = if self.is_running {
-            Span::styled(format!("● Running (PID: {})", self.pid.unwrap_or(0)), Style::default().fg(theme.success))
+            Span::styled(
+                format!("● Running (PID: {})", self.pid.unwrap_or(0)),
+                Style::default().fg(theme.success),
+            )
         } else {
             Span::styled("● Stopped", Style::default().fg(theme.error))
         };
@@ -212,13 +230,21 @@ impl TuiModule for DaemonStatusModule {
             Line::from(vec![Span::raw("  Daemon:     "), daemon_badge]),
             Line::from(vec![Span::raw("  Autostart:  "), autostart_badge]),
             Line::from(Span::styled(
-                format!("  Last check: {}s ago", self.last_checked.elapsed().as_secs()),
+                format!(
+                    "  Last check: {}s ago",
+                    self.last_checked.elapsed().as_secs()
+                ),
                 Style::default().fg(theme.base_fg),
             )),
         ]);
         let info = Paragraph::new(status_lines)
             .style(Style::default().bg(theme.base_bg))
-            .block(Block::default().title(" Status ").borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+            .block(
+                Block::default()
+                    .title(" Status ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border)),
+            );
         frame.render_widget(info, chunks[1]);
 
         // 3. Tasks Panel
@@ -229,41 +255,85 @@ impl TuiModule for DaemonStatusModule {
             .unwrap_or_default();
 
         let task_items: Vec<ListItem> = if task_statuses.is_empty() {
-            vec![ListItem::new("  No task data available. Is the daemon running?")]
+            vec![ListItem::new(
+                "  No task data available. Is the daemon running?",
+            )]
         } else {
             task_statuses
                 .iter()
                 .map(|t| {
-                    let last = t.last_run_secs
+                    let last = t
+                        .last_run_secs
                         .map(format_relative_time)
                         .unwrap_or_else(|| "never".to_string());
                     let status = match &t.last_error {
                         None => format!("OK (processed: {})", t.last_item_count),
                         Some(e) => format!("ERR: {}", &e[..e.len().min(40)]),
                     };
-                    ListItem::new(format!("  • [{}]  Last Run: {}  Status: {}", title_case(&t.id), last, status))
+                    ListItem::new(format!(
+                        "  • [{}]  Last Run: {}  Status: {}",
+                        title_case(&t.id),
+                        last,
+                        status
+                    ))
                 })
                 .collect()
         };
 
         let tasks_list = List::new(task_items)
-            .block(Block::default().title(" Background Tasks ").borders(Borders::ALL).border_style(Style::default().fg(theme.border)))
+            .block(
+                Block::default()
+                    .title(" Background Tasks ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border)),
+            )
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
         frame.render_widget(tasks_list, chunks[2]);
 
         // 4. Message Line
         let msg_content = self.message.clone().unwrap_or_default();
-        let msg_widget = Paragraph::new(format!(" {}", msg_content))
-            .style(Style::default().fg(theme.selection_fg).add_modifier(Modifier::ITALIC));
+        let msg_widget = Paragraph::new(format!(" {}", msg_content)).style(
+            Style::default()
+                .fg(theme.selection_fg)
+                .add_modifier(Modifier::ITALIC),
+        );
         frame.render_widget(msg_widget, chunks[3]);
 
         // 5. Help Bar
-        let autostart_label = if self.autostart_enabled { "Disable Autostart" } else { "Enable Autostart" };
-        let help_text = format!(" [s] Start | [k] Stop | [a] {autostart_label} | [r] Refresh | [Esc] Back ");
+        let autostart_label = if self.autostart_enabled {
+            "Disable Autostart"
+        } else {
+            "Enable Autostart"
+        };
+        let help_text =
+            format!(" [s] Start | [k] Stop | [a] {autostart_label} | [r] Refresh | [Esc] Back ");
         let help = Paragraph::new(help_text)
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border)),
+            );
         frame.render_widget(help, chunks[4]);
+    }
+
+    async fn dashboard_summary(&self, _ctx: &AppContext) -> Option<ModuleStatus> {
+        let running = crate::pid::read()
+            .map(crate::status::pid_is_alive)
+            .unwrap_or(false);
+        let autostart = std::env::current_exe()
+            .map(|exe| crate::autostart::is_autostart_enabled(&exe, AUTOSTART_ARGS))
+            .unwrap_or(false);
+        let text = format!(
+            "{}, autostart {}",
+            if running { "Running" } else { "Stopped" },
+            if autostart { "on" } else { "off" }
+        );
+        Some(if running {
+            ModuleStatus::normal(text)
+        } else {
+            ModuleStatus::warning(text)
+        })
     }
 }
 

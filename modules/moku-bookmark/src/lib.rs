@@ -10,7 +10,9 @@ pub mod io;
 pub mod model;
 pub mod ui;
 
-use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
+use moku_core::{
+    AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
+};
 
 use crate::engine::BookmarkEngine;
 use crate::filter::BookmarkFilter;
@@ -396,5 +398,74 @@ impl TuiModule for BookmarkModule {
             search_mode,
             &mode_name,
         );
+    }
+
+    async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
+        let needs_vault =
+            moku_core::resolve_encryption(&ctx.config.load(), ModuleId::BOOKMARK.as_str(), true);
+        if needs_vault && !ctx.session.is_unlocked() {
+            return Some(ModuleStatus::locked());
+        }
+        let items = BookmarkEngine::load_all(ctx).await.unwrap_or_default();
+        Some(ModuleStatus::normal(format!("{} bookmarks", items.len())))
+    }
+}
+
+#[cfg(test)]
+mod dashboard_summary_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_locked_when_vault_not_unlocked() {
+        let module = BookmarkModule::new();
+        let ctx = create_test_context().await;
+        let status = module.dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Locked);
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_reports_count_when_unlocked() {
+        let module = BookmarkModule::new();
+        let ctx = create_test_context().await;
+        let key = SecurityManager::derive_key("test-pass", &[3u8; 16])
+            .await
+            .unwrap();
+        ctx.session.unlock(key);
+
+        let items = vec![
+            crate::model::Bookmark::new("https://a.example".to_string()),
+            crate::model::Bookmark::new("https://b.example".to_string()),
+        ];
+        crate::engine::BookmarkEngine::save_all(&ctx, &items)
+            .await
+            .unwrap();
+
+        let status = module.dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Normal);
+        assert_eq!(status.text, "2 bookmarks");
     }
 }

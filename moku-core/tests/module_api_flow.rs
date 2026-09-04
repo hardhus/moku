@@ -8,8 +8,8 @@ use tempfile::tempdir;
 
 use moku_core::security::{SecurityManager, VaultSession};
 use moku_core::{
-    AppContext, ModuleId, ModuleMeta, MokuConfig, MokuTheme, StorageManager, ToastType, TuiModule,
-    TuiRegistry,
+    AppContext, ModuleId, ModuleMeta, ModuleStatus, MokuConfig, MokuTheme, StorageManager,
+    ToastType, TuiModule, TuiRegistry,
 };
 
 async fn create_test_context() -> AppContext {
@@ -116,4 +116,65 @@ async fn test_registry_dispatch_simulation() {
         m.handle_event(&event, &mut ctx).await.unwrap();
     }
     assert!(ctx.take_navigation().is_some());
+}
+
+struct SummaryModule {
+    id: ModuleId,
+    status: Option<ModuleStatus>,
+}
+
+impl ModuleMeta for SummaryModule {
+    fn id(&self) -> ModuleId {
+        self.id
+    }
+    fn title(&self) -> &'static str {
+        "Summary"
+    }
+}
+
+#[async_trait]
+impl TuiModule for SummaryModule {
+    async fn handle_event(
+        &mut self,
+        _event: &Event,
+        _ctx: &mut AppContext,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    fn draw(&mut self, _frame: &mut Frame, _area: Rect, _theme: &MokuTheme) {}
+
+    async fn dashboard_summary(&self, _ctx: &AppContext) -> Option<ModuleStatus> {
+        self.status.clone()
+    }
+}
+
+#[tokio::test]
+async fn test_collect_dashboard_summaries_skips_excluded_and_none() {
+    let mut registry = TuiRegistry::new();
+    registry.insert(Box::new(SummaryModule {
+        id: ModuleId::TODO,
+        status: Some(ModuleStatus::normal("2 tasks")),
+    }));
+    registry.insert(Box::new(SummaryModule {
+        id: ModuleId::BOOKMARK,
+        status: None,
+    }));
+    registry.insert(Box::new(SummaryModule {
+        id: ModuleId::DASHBOARD,
+        status: Some(ModuleStatus::normal("should never appear")),
+    }));
+
+    let ctx = create_test_context().await;
+    let summaries = registry
+        .collect_dashboard_summaries(ModuleId::DASHBOARD, &ctx)
+        .await;
+
+    assert_eq!(
+        summaries.len(),
+        1,
+        "only the module with Some(status), excluding Dashboard itself, should appear"
+    );
+    assert_eq!(summaries[0].0, ModuleId::TODO);
+    assert_eq!(summaries[0].1.text, "2 tasks");
 }

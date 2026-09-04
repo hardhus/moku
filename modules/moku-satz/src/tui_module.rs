@@ -15,7 +15,9 @@ use ratatui::{
     },
 };
 
-use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
+use moku_core::{
+    AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
+};
 use satz_core::{DocId, Document, Index, VaultGraph};
 
 use crate::engine::{NotesConfig, build_index, ensure_daily_note, resolve_vault_root};
@@ -57,7 +59,10 @@ struct NoteRow {
 }
 
 fn row_from_doc(doc: &Document) -> NoteRow {
-    NoteRow { id: doc.id.as_str().to_string(), path: doc.path.to_string_lossy().replace('\\', "/") }
+    NoteRow {
+        id: doc.id.as_str().to_string(),
+        path: doc.path.to_string_lossy().replace('\\', "/"),
+    }
 }
 
 pub struct NotesModule {
@@ -75,12 +80,22 @@ impl NotesModule {
     pub fn new() -> Self {
         let mut state = ListState::default();
         state.select(Some(0));
-        Self { vault_root: None, index: None, rows: Vec::new(), state, filter: FilterMode::All, view: View::List, message: None, error: None }
+        Self {
+            vault_root: None,
+            index: None,
+            rows: Vec::new(),
+            state,
+            filter: FilterMode::All,
+            view: View::List,
+            message: None,
+            error: None,
+        }
     }
 
     fn load(&mut self, ctx: &AppContext) {
         let config: NotesConfig = ctx.config.load().resolve_module_config("notes");
-        let result = resolve_vault_root(&config, None).and_then(|root| build_index(&root).map(|idx| (root, idx)));
+        let result = resolve_vault_root(&config, None)
+            .and_then(|root| build_index(&root).map(|idx| (root, idx)));
         match result {
             Ok((root, index)) => {
                 self.vault_root = Some(root);
@@ -104,11 +119,18 @@ impl NotesModule {
         let mut rows: Vec<NoteRow> = match self.filter {
             FilterMode::All => index.documents().map(row_from_doc).collect(),
             FilterMode::Orphans => index.orphan_docs().map(row_from_doc).collect(),
-            FilterMode::Broken => index.docs_with_broken_links().map(|(doc, _)| row_from_doc(doc)).collect(),
+            FilterMode::Broken => index
+                .docs_with_broken_links()
+                .map(|(doc, _)| row_from_doc(doc))
+                .collect(),
         };
         rows.sort_by(|a, b| a.path.cmp(&b.path));
         self.rows = rows;
-        let out_of_range = self.state.selected().map(|i| i >= self.rows.len()).unwrap_or(true);
+        let out_of_range = self
+            .state
+            .selected()
+            .map(|i| i >= self.rows.len())
+            .unwrap_or(true);
         if out_of_range && !self.rows.is_empty() {
             self.state.select(Some(0));
         }
@@ -137,10 +159,17 @@ impl NotesModule {
     }
 
     fn selected_backlinks(&self) -> Vec<String> {
-        let (Some(index), Some(i)) = (&self.index, self.state.selected()) else { return Vec::new() };
-        let Some(row) = self.rows.get(i) else { return Vec::new() };
+        let (Some(index), Some(i)) = (&self.index, self.state.selected()) else {
+            return Vec::new();
+        };
+        let Some(row) = self.rows.get(i) else {
+            return Vec::new();
+        };
         let id = DocId::new(row.id.clone());
-        index.backlinks_of(&id).map(|d| d.as_str().to_string()).collect()
+        index
+            .backlinks_of(&id)
+            .map(|d| d.as_str().to_string())
+            .collect()
     }
 
     fn show_message(&mut self, msg: impl Into<String>) {
@@ -160,14 +189,20 @@ impl NotesModule {
     }
 
     fn draw_list(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
-        let chunks = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+        let chunks = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(area);
 
         let items: Vec<ListItem> = if let Some(err) = &self.error {
             vec![ListItem::new(format!("  Error: {err}")).style(Style::default().fg(theme.error))]
         } else if self.rows.is_empty() {
             vec![ListItem::new("  No notes found (or vault not configured).")]
         } else {
-            self.rows.iter().map(|row| ListItem::new(row.path.clone()).style(Style::default().fg(theme.base_fg))).collect()
+            self.rows
+                .iter()
+                .map(|row| {
+                    ListItem::new(row.path.clone()).style(Style::default().fg(theme.base_fg))
+                })
+                .collect()
         };
         let list = List::new(items)
             .block(
@@ -177,22 +212,43 @@ impl NotesModule {
                     .border_style(Style::default().fg(theme.border))
                     .style(Style::default().bg(theme.base_bg)),
             )
-            .highlight_style(Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol(">> ");
         frame.render_stateful_widget(list, chunks[0], &mut self.state);
 
         let backlinks = self.selected_backlinks();
-        let backlink_text =
-            if backlinks.is_empty() { "  (none)".to_string() } else { backlinks.iter().map(|b| format!("  {b}")).collect::<Vec<_>>().join("\n") };
-        let side = Paragraph::new(backlink_text).style(Style::default().fg(theme.base_fg)).block(
-            Block::default().borders(Borders::ALL).title(" Backlinks ").border_style(Style::default().fg(theme.border)).style(Style::default().bg(theme.base_bg)),
-        );
+        let backlink_text = if backlinks.is_empty() {
+            "  (none)".to_string()
+        } else {
+            backlinks
+                .iter()
+                .map(|b| format!("  {b}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let side = Paragraph::new(backlink_text)
+            .style(Style::default().fg(theme.base_fg))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Backlinks ")
+                    .border_style(Style::default().fg(theme.border))
+                    .style(Style::default().bg(theme.base_bg)),
+            );
         frame.render_widget(side, chunks[1]);
     }
 
     fn draw_graph(&self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
         let Some(index) = &self.index else {
-            frame.render_widget(Paragraph::new("No vault indexed.").style(Style::default().fg(theme.base_fg)), area);
+            frame.render_widget(
+                Paragraph::new("No vault indexed.").style(Style::default().fg(theme.base_fg)),
+                area,
+            );
             return;
         };
         let graph = VaultGraph::build(index);
@@ -215,19 +271,32 @@ impl NotesModule {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!(" Graph ({node_count} notes, {edge_count} links) — [g] back to list "))
+                    .title(format!(
+                        " Graph ({node_count} notes, {edge_count} links) — [g] back to list "
+                    ))
                     .border_style(Style::default().fg(theme.border)),
             )
             .x_bounds([-1.3, 1.3])
             .y_bounds([-1.3, 1.3])
             .paint(move |ctx| {
                 for edge in &edges {
-                    if let (Some(&(x1, y1)), Some(&(x2, y2))) = (positions.get(&edge.source), positions.get(&edge.target)) {
-                        ctx.draw(&CanvasLine { x1, y1, x2, y2, color: Color::DarkGray });
+                    if let (Some(&(x1, y1)), Some(&(x2, y2))) =
+                        (positions.get(&edge.source), positions.get(&edge.target))
+                    {
+                        ctx.draw(&CanvasLine {
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            color: Color::DarkGray,
+                        });
                     }
                 }
                 for &(x, y) in positions.values() {
-                    ctx.draw(&Points { coords: &[(x, y)], color: Color::Cyan });
+                    ctx.draw(&Points {
+                        coords: &[(x, y)],
+                        color: Color::Cyan,
+                    });
                 }
             });
         frame.render_widget(canvas, area);
@@ -276,7 +345,13 @@ impl TuiModule for NotesModule {
         {
             match key.code {
                 KeyCode::Esc if self.view == View::Graph => self.view = View::List,
-                KeyCode::Char('g') => self.view = if self.view == View::List { View::Graph } else { View::List },
+                KeyCode::Char('g') => {
+                    self.view = if self.view == View::List {
+                        View::Graph
+                    } else {
+                        View::List
+                    }
+                }
                 KeyCode::Char('f') => {
                     self.filter = self.filter.next();
                     self.apply_filter();
@@ -310,11 +385,97 @@ impl TuiModule for NotesModule {
             .message
             .as_ref()
             .map(|(m, _)| m.clone())
-            .unwrap_or_else(|| " [f] Filter  [g] Graph  [d] Daily note  [r] Reload  [Esc] Back ".to_string());
+            .unwrap_or_else(|| {
+                " [f] Filter  [g] Graph  [d] Daily note  [r] Reload  [Esc] Back ".to_string()
+            });
         let help_widget = Paragraph::new(help)
             .alignment(Alignment::Left)
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border)),
+            );
         frame.render_widget(help_widget, chunks[1]);
+    }
+
+    // Rebuilds a fresh index instead of relying on `self.index`, so this
+    // works even if the module was never opened this session (unlike
+    // `self.index`, which is only populated by `load()`/`init()`).
+    async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
+        let config: NotesConfig = ctx.config.load().resolve_module_config("notes");
+        match resolve_vault_root(&config, None).and_then(|root| build_index(&root)) {
+            Ok(index) => Some(ModuleStatus::normal(format!(
+                "{} notes",
+                index.documents().count()
+            ))),
+            Err(_) => Some(ModuleStatus::warning("Vault path not configured")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod dashboard_summary_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context(vault_path: Option<&std::path::Path>) -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let mut config = MokuConfig::default();
+        if let Some(vault) = vault_path {
+            let mut table = toml::map::Map::new();
+            table.insert(
+                "vault_path".to_string(),
+                toml::Value::String(vault.to_string_lossy().to_string()),
+            );
+            config
+                .modules
+                .insert("notes".to_string(), toml::Value::Table(table));
+        }
+
+        let config = Arc::new(ArcSwap::from_pointee(config));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_warns_when_vault_path_not_configured() {
+        let module = NotesModule::new();
+        let ctx = create_test_context(None).await;
+        let status = module.dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Warning);
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_counts_notes_without_needing_init() {
+        let vault = tempdir().unwrap();
+        std::fs::write(vault.path().join("a.md"), "# A\n").unwrap();
+        std::fs::write(vault.path().join("b.md"), "# B\n").unwrap();
+
+        let module = NotesModule::new();
+        let ctx = create_test_context(Some(vault.path())).await;
+
+        // Deliberately not calling module.load()/init() — this must work
+        // from a fresh module instance, same as if Notes was never opened
+        // this session.
+        let status = module.dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Normal);
+        assert_eq!(status.text, "2 notes");
     }
 }

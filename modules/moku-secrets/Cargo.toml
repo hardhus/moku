@@ -23,3 +23,4 @@ totp-rs = { version = "5", features = ["otpauth"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+arc-swap.workspace = true

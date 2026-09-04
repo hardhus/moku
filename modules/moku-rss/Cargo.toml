@@ -22,3 +22,7 @@ tokio = { workspace = true }
 ratatui = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
 arboard = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+arc-swap.workspace = true

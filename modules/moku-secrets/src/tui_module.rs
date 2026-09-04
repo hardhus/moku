@@ -10,7 +10,9 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
+use moku_core::{
+    AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
+};
 
 use crate::engine::{self, PlainFormat};
 use crate::generator::{self, CharsetOptions};
@@ -63,11 +65,19 @@ pub struct SecretsModule {
 
 impl SecretsModule {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), state: ListState::default(), reveal: false, message: None, add: None, export: None }
+        Self {
+            entries: Vec::new(),
+            state: ListState::default(),
+            reveal: false,
+            message: None,
+            add: None,
+            export: None,
+        }
     }
 
     async fn save(&self, ctx: &mut AppContext) {
-        if let Err(e) = engine::save_entries(&ctx.storage, &ctx.config.load(), &self.entries).await {
+        if let Err(e) = engine::save_entries(&ctx.storage, &ctx.config.load(), &self.entries).await
+        {
             ctx.show_error(format!("Save error: {e}"));
         }
     }
@@ -103,7 +113,9 @@ impl SecretsModule {
     }
 
     async fn delete_selected(&mut self, ctx: &mut AppContext) {
-        let Some(i) = self.state.selected() else { return };
+        let Some(i) = self.state.selected() else {
+            return;
+        };
         if i >= self.entries.len() {
             return;
         }
@@ -117,11 +129,17 @@ impl SecretsModule {
         self.show_message(format!("Deleted '{}'", removed.name));
     }
 
-    async fn handle_add_key(&mut self, key: crossterm::event::KeyEvent, ctx: &mut AppContext) -> bool {
+    async fn handle_add_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        ctx: &mut AppContext,
+    ) -> bool {
         // Taken out of `self` up front so nothing here holds a `&mut
         // self.add` borrow while also calling `self.show_message`/`self.save`
         // (both take `&mut self`).
-        let Some(mut add) = self.add.take() else { return false };
+        let Some(mut add) = self.add.take() else {
+            return false;
+        };
         let mut keep_open = true;
 
         match key.code {
@@ -142,7 +160,8 @@ impl SecretsModule {
                     if add.value.is_empty() {
                         self.show_message("Value cannot be empty — entry not added.");
                     } else {
-                        self.entries.push(SecretEntry::new(name.clone(), add.value.clone()));
+                        self.entries
+                            .push(SecretEntry::new(name.clone(), add.value.clone()));
                         self.state.select(Some(self.entries.len() - 1));
                         self.save(ctx).await;
                         self.show_message(format!("Added '{name}'"));
@@ -150,7 +169,10 @@ impl SecretsModule {
                 }
             },
             // Ctrl+G on the value field: auto-generate instead of typing.
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) && add.stage == AddStage::Value => {
+            KeyCode::Char('g')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && add.stage == AddStage::Value =>
+            {
                 match generator::generate_charset_password(&CharsetOptions::default()) {
                     Ok(pw) => add.value = pw,
                     Err(e) => self.show_message(format!("Generate failed: {e}")),
@@ -178,7 +200,9 @@ impl SecretsModule {
     }
 
     async fn handle_export_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        let Some(export) = &mut self.export else { return false };
+        let Some(export) = &mut self.export else {
+            return false;
+        };
         match &export.stage {
             ExportStage::ChooseFormat => match key.code {
                 KeyCode::Char('1') => {
@@ -227,56 +251,112 @@ impl SecretsModule {
     }
 
     async fn finish_export(&mut self) {
-        let Some(export) = self.export.take() else { return };
+        let Some(export) = self.export.take() else {
+            return;
+        };
         let Some(kind) = export.kind else { return };
         let result = match kind {
-            ExportKind::Json => engine::export_plain(&self.entries, PlainFormat::Json).and_then(|b| std::fs::write(&export.path, b).map_err(Into::into)),
-            ExportKind::Csv => engine::export_plain(&self.entries, PlainFormat::Csv).and_then(|b| std::fs::write(&export.path, b).map_err(Into::into)),
-            ExportKind::Encrypted => match engine::export_encrypted(&self.entries, &export.password).await {
-                Ok(bytes) => std::fs::write(&export.path, bytes).map_err(Into::into),
-                Err(e) => Err(e),
-            },
+            ExportKind::Json => engine::export_plain(&self.entries, PlainFormat::Json)
+                .and_then(|b| std::fs::write(&export.path, b).map_err(Into::into)),
+            ExportKind::Csv => engine::export_plain(&self.entries, PlainFormat::Csv)
+                .and_then(|b| std::fs::write(&export.path, b).map_err(Into::into)),
+            ExportKind::Encrypted => {
+                match engine::export_encrypted(&self.entries, &export.password).await {
+                    Ok(bytes) => std::fs::write(&export.path, bytes).map_err(Into::into),
+                    Err(e) => Err(e),
+                }
+            }
         };
         match result {
-            Ok(()) => self.show_message(format!("Exported {} entries to {}", self.entries.len(), export.path)),
+            Ok(()) => self.show_message(format!(
+                "Exported {} entries to {}",
+                self.entries.len(),
+                export.path
+            )),
             Err(e) => self.show_message(format!("Export failed: {e}")),
         }
     }
 
     fn draw_add(&self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
         let Some(add) = &self.add else { return };
-        let chunks = Layout::vertical([Constraint::Percentage(40), Constraint::Length(3), Constraint::Length(2), Constraint::Percentage(40)]).split(area);
-        let input_chunk = Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(50), Constraint::Percentage(25)]).split(chunks[1])[1];
+        let chunks = Layout::vertical([
+            Constraint::Percentage(40),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Percentage(40),
+        ])
+        .split(area);
+        let input_chunk = Layout::horizontal([
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+        ])
+        .split(chunks[1])[1];
 
         let (title, shown) = match add.stage {
             AddStage::Name => (" New secret — name ", add.name.clone()),
-            AddStage::Value => (" New secret — value (Ctrl+G to generate) ", "•".repeat(add.value.chars().count())),
+            AddStage::Value => (
+                " New secret — value (Ctrl+G to generate) ",
+                "•".repeat(add.value.chars().count()),
+            ),
         };
         let p = Paragraph::new(shown)
-            .block(Block::default().title(title).title_alignment(Alignment::Center).borders(Borders::ALL).border_style(Style::default().fg(theme.info)))
+            .block(
+                Block::default()
+                    .title(title)
+                    .title_alignment(Alignment::Center)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.info)),
+            )
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
         frame.render_widget(p, input_chunk);
 
-        let hint = Paragraph::new("[Enter] next/confirm  [Esc] cancel").alignment(Alignment::Center).style(Style::default().fg(theme.base_fg));
+        let hint = Paragraph::new("[Enter] next/confirm  [Esc] cancel")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.base_fg));
         frame.render_widget(hint, chunks[2]);
     }
 
     fn draw_export(&self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
         let Some(export) = &self.export else { return };
-        let chunks = Layout::vertical([Constraint::Percentage(40), Constraint::Length(3), Constraint::Length(2), Constraint::Percentage(40)]).split(area);
-        let input_chunk = Layout::horizontal([Constraint::Percentage(20), Constraint::Percentage(60), Constraint::Percentage(20)]).split(chunks[1])[1];
+        let chunks = Layout::vertical([
+            Constraint::Percentage(40),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Percentage(40),
+        ])
+        .split(area);
+        let input_chunk = Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+        ])
+        .split(chunks[1])[1];
 
         let (title, shown) = match export.stage {
-            ExportStage::ChooseFormat => (" Export — [1] Encrypted  [2] JSON  [3] CSV ", String::new()),
+            ExportStage::ChooseFormat => {
+                (" Export — [1] Encrypted  [2] JSON  [3] CSV ", String::new())
+            }
             ExportStage::Path => (" Export — output file path ", export.path.clone()),
-            ExportStage::Password => (" Export — new password for this backup ", "•".repeat(export.password.chars().count())),
+            ExportStage::Password => (
+                " Export — new password for this backup ",
+                "•".repeat(export.password.chars().count()),
+            ),
         };
         let p = Paragraph::new(shown)
-            .block(Block::default().title(title).title_alignment(Alignment::Center).borders(Borders::ALL).border_style(Style::default().fg(theme.info)))
+            .block(
+                Block::default()
+                    .title(title)
+                    .title_alignment(Alignment::Center)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.info)),
+            )
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
         frame.render_widget(p, input_chunk);
 
-        let hint = Paragraph::new("[Enter] confirm  [Esc] cancel").alignment(Alignment::Center).style(Style::default().fg(theme.base_fg));
+        let hint = Paragraph::new("[Enter] confirm  [Esc] cancel")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.base_fg));
         frame.render_widget(hint, chunks[2]);
     }
 }
@@ -307,7 +387,9 @@ impl TuiModule for SecretsModule {
     }
 
     async fn handle_event(&mut self, event: &Event, ctx: &mut AppContext) -> Result<bool> {
-        let Event::Key(key) = event else { return Ok(false) };
+        let Event::Key(key) = event else {
+            return Ok(false);
+        };
         if key.kind != KeyEventKind::Press {
             return Ok(false);
         }
@@ -332,12 +414,21 @@ impl TuiModule for SecretsModule {
 
         match key.code {
             KeyCode::Char('a') => {
-                self.add = Some(AddState { stage: AddStage::Name, name: String::new(), value: String::new() });
+                self.add = Some(AddState {
+                    stage: AddStage::Name,
+                    name: String::new(),
+                    value: String::new(),
+                });
             }
             KeyCode::Char('d') => self.delete_selected(ctx).await,
             KeyCode::Char('r') => self.reveal = !self.reveal,
             KeyCode::Char('e') => {
-                self.export = Some(ExportState { stage: ExportStage::ChooseFormat, kind: None, path: String::new(), password: String::new() });
+                self.export = Some(ExportState {
+                    stage: ExportStage::ChooseFormat,
+                    kind: None,
+                    path: String::new(),
+                    password: String::new(),
+                });
             }
             _ => return Ok(false),
         }
@@ -361,25 +452,48 @@ impl TuiModule for SecretsModule {
         }
 
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
-        let panes = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(chunks[0]);
+        let panes = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(chunks[0]);
 
         let items: Vec<ListItem> = if self.entries.is_empty() {
             vec![ListItem::new("  No secrets yet. [a] to add one.")]
         } else {
             self.entries
                 .iter()
-                .map(|e| ListItem::new(format!("{} [{}]", e.name, e.category.as_deref().unwrap_or("-"))).style(Style::default().fg(theme.base_fg)))
+                .map(|e| {
+                    ListItem::new(format!(
+                        "{} [{}]",
+                        e.name,
+                        e.category.as_deref().unwrap_or("-")
+                    ))
+                    .style(Style::default().fg(theme.base_fg))
+                })
                 .collect()
         };
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Secrets ").border_style(Style::default().fg(theme.border)).style(Style::default().bg(theme.base_bg)))
-            .highlight_style(Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Secrets ")
+                    .border_style(Style::default().fg(theme.border))
+                    .style(Style::default().bg(theme.base_bg)),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol(">> ");
         frame.render_stateful_widget(list, panes[0], &mut self.state);
 
         let detail = if let Some(entry) = self.selected() {
             let masked = "•".repeat(entry.value.chars().count());
-            let value_line = if self.reveal { entry.value.as_str() } else { masked.as_str() };
+            let value_line = if self.reveal {
+                entry.value.as_str()
+            } else {
+                masked.as_str()
+            };
             let totp_line = entry
                 .totp_seed
                 .as_ref()
@@ -403,17 +517,99 @@ impl TuiModule for SecretsModule {
         };
         let detail_widget = Paragraph::new(detail)
             .style(Style::default().fg(theme.base_fg))
-            .block(Block::default().borders(Borders::ALL).title(" Details ").border_style(Style::default().fg(theme.border)).style(Style::default().bg(theme.base_bg)));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Details ")
+                    .border_style(Style::default().fg(theme.border))
+                    .style(Style::default().bg(theme.base_bg)),
+            );
         frame.render_widget(detail_widget, panes[1]);
 
         let help = self
             .message
             .as_ref()
             .map(|(m, _)| m.clone())
-            .unwrap_or_else(|| " [a] Add  [d] Delete  [r] Reveal  [e] Export  [Esc] Back ".to_string());
+            .unwrap_or_else(|| {
+                " [a] Add  [d] Delete  [r] Reveal  [e] Export  [Esc] Back ".to_string()
+            });
         let help_widget = Paragraph::new(help)
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border)),
+            );
         frame.render_widget(help_widget, chunks[1]);
+    }
+
+    async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
+        let needs_vault =
+            moku_core::resolve_encryption(&ctx.config.load(), ModuleId::SECRETS.as_str(), true);
+        if needs_vault && !ctx.session.is_unlocked() {
+            return Some(ModuleStatus::locked());
+        }
+        let entries = engine::load_entries(&ctx.storage).await;
+        Some(ModuleStatus::normal(format!("{} secrets", entries.len())))
+    }
+}
+
+#[cfg(test)]
+mod dashboard_summary_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::model::SecretEntry;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_locked_when_vault_not_unlocked() {
+        let module = SecretsModule::new();
+        let ctx = create_test_context().await;
+        let status = module.dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Locked);
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_reports_count_when_unlocked() {
+        let module = SecretsModule::new();
+        let ctx = create_test_context().await;
+        let key = SecurityManager::derive_key("test-pass", &[5u8; 16])
+            .await
+            .unwrap();
+        ctx.session.unlock(key);
+
+        let entries = vec![
+            SecretEntry::new("github".to_string(), "hunter2".to_string()),
+            SecretEntry::new("aws".to_string(), "sekrit".to_string()),
+        ];
+        engine::save_entries(&ctx.storage, &ctx.config.load(), &entries)
+            .await
+            .unwrap();
+
+        let status = module.dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Normal);
+        assert_eq!(status.text, "2 secrets");
     }
 }

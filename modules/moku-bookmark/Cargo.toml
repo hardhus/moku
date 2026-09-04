@@ -13,3 +13,8 @@ serde.workspace = true
 serde_json.workspace = true
 arboard.workspace = true
 regex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+arc-swap.workspace = true
+tokio.workspace = true

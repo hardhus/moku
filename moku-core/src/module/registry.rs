@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::module::{CliModule, ModuleId, TuiModule};
+use crate::context::AppContext;
+use crate::module::{CliModule, ModuleId, ModuleStatus, TuiModule};
 
 /// Registry for TUI modules, mapping ModuleId to active TuiModule traits.
 pub struct TuiRegistry(HashMap<ModuleId, Box<dyn TuiModule>>);
@@ -20,6 +21,30 @@ impl TuiRegistry {
 
     pub fn contains(&self, id: ModuleId) -> bool {
         self.0.contains_key(&id)
+    }
+
+    /// Collects every visible module's Dashboard summary, skipping `exclude`
+    /// (the Dashboard itself) and any module that reports `None`. Generic
+    /// over `ModuleId::all_visible()` — a new module automatically appears
+    /// here the moment it overrides `dashboard_summary`, with no changes
+    /// needed in this function or in the Dashboard module itself.
+    pub async fn collect_dashboard_summaries(
+        &mut self,
+        exclude: ModuleId,
+        ctx: &AppContext,
+    ) -> Vec<(ModuleId, ModuleStatus)> {
+        let mut out = Vec::new();
+        for id in ModuleId::all_visible() {
+            if id == exclude {
+                continue;
+            }
+            if let Some(m) = self.get_mut(id)
+                && let Some(status) = m.dashboard_summary(ctx).await
+            {
+                out.push((id, status));
+            }
+        }
+        out
     }
 }
 

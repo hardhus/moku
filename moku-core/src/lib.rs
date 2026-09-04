@@ -13,7 +13,10 @@ pub mod util;
 pub use config::{ConfigManager, MokuConfig};
 pub use context::{AppContext, CliContext, DaemonContext};
 pub use keys::{Command, keys_match, resolve_event};
-pub use module::{CliModule, CliRegistry, DaemonTask, ModuleId, ModuleMeta, TuiModule, TuiRegistry};
+pub use module::{
+    AsAny, CliModule, CliRegistry, DaemonTask, ModuleId, ModuleMeta, ModuleStatus, StatusTone,
+    TuiModule, TuiRegistry,
+};
 pub use router::Router;
 pub use security::{SafeKey, SecurityManager, VaultSession};
 pub use storage::{MigrationReport, StorageManager, resolve_encryption};

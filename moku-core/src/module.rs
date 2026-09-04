@@ -2,13 +2,15 @@ mod cli;
 mod daemon;
 mod id;
 mod registry;
+mod status;
 mod tui;
 
 pub use cli::CliModule;
 pub use daemon::DaemonTask;
 pub use id::ModuleId;
 pub use registry::{CliRegistry, TuiRegistry};
-pub use tui::TuiModule;
+pub use status::{ModuleStatus, StatusTone};
+pub use tui::{AsAny, TuiModule};
 
 /// Metadata required for all TUI, CLI, and Daemon modules.
 pub trait ModuleMeta: Send + Sync {

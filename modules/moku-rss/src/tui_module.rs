@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use arboard::Clipboard;
@@ -7,12 +7,14 @@ use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
-    layout::{Rect, Layout, Constraint},
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap, Clear},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
+use moku_core::{
+    AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
+};
 
 use crate::engine::{FeedItem, FeedSubscription, RssEngine};
 
@@ -71,7 +73,11 @@ impl RssTuiModule {
     }
 }
 
-fn get_filtered_items(feeds: &[FeedSubscription], items: &[FeedItem], feed_idx: usize) -> Vec<FeedItem> {
+fn get_filtered_items(
+    feeds: &[FeedSubscription],
+    items: &[FeedItem],
+    feed_idx: usize,
+) -> Vec<FeedItem> {
     if feed_idx == 0 {
         items.to_vec()
     } else if feed_idx - 1 < feeds.len() {
@@ -189,7 +195,11 @@ impl TuiModule for RssTuiModule {
         } = self;
 
         match view {
-            RssView::Split { active_panel, feed_state, item_state } => {
+            RssView::Split {
+                active_panel,
+                feed_state,
+                item_state,
+            } => {
                 match command {
                     Command::Quit | Command::Back => {
                         ctx.navigate_to(ModuleId::LAUNCHER);
@@ -199,7 +209,13 @@ impl TuiModule for RssTuiModule {
                         if *active_panel == Panel::Feeds {
                             if !feeds.is_empty() || feed_state.selected().is_some() {
                                 let i = match feed_state.selected() {
-                                    Some(i) => if i == 0 { feeds.len() } else { i - 1 },
+                                    Some(i) => {
+                                        if i == 0 {
+                                            feeds.len()
+                                        } else {
+                                            i - 1
+                                        }
+                                    }
                                     None => 0,
                                 };
                                 feed_state.select(Some(i));
@@ -217,7 +233,13 @@ impl TuiModule for RssTuiModule {
                             let filtered = get_filtered_items(feeds, items, feed_idx);
                             if !filtered.is_empty() {
                                 let i = match item_state.selected() {
-                                    Some(i) => if i == 0 { filtered.len() - 1 } else { i - 1 },
+                                    Some(i) => {
+                                        if i == 0 {
+                                            filtered.len() - 1
+                                        } else {
+                                            i - 1
+                                        }
+                                    }
                                     None => 0,
                                 };
                                 item_state.select(Some(i));
@@ -228,7 +250,13 @@ impl TuiModule for RssTuiModule {
                     Command::Down => {
                         if *active_panel == Panel::Feeds {
                             let i = match feed_state.selected() {
-                                Some(i) => if i >= feeds.len() { 0 } else { i + 1 },
+                                Some(i) => {
+                                    if i >= feeds.len() {
+                                        0
+                                    } else {
+                                        i + 1
+                                    }
+                                }
                                 None => 0,
                             };
                             feed_state.select(Some(i));
@@ -245,7 +273,13 @@ impl TuiModule for RssTuiModule {
                             let filtered = get_filtered_items(feeds, items, feed_idx);
                             if !filtered.is_empty() {
                                 let i = match item_state.selected() {
-                                    Some(i) => if i >= filtered.len() - 1 { 0 } else { i + 1 },
+                                    Some(i) => {
+                                        if i >= filtered.len() - 1 {
+                                            0
+                                        } else {
+                                            i + 1
+                                        }
+                                    }
                                     None => 0,
                                 };
                                 item_state.select(Some(i));
@@ -269,13 +303,15 @@ impl TuiModule for RssTuiModule {
                             KeyCode::Char('r') => {
                                 if !*is_refreshing {
                                     *is_refreshing = true;
-                                    *status_message = Some(("Refreshing feeds...".to_string(), Instant::now()));
+                                    *status_message =
+                                        Some(("Refreshing feeds...".to_string(), Instant::now()));
                                     let storage = Arc::clone(&ctx.storage);
                                     let config = Arc::clone(&ctx.config);
                                     let result_slot = Arc::clone(refresh_result);
 
                                     tokio::spawn(async move {
-                                        let res = RssEngine::fetch_all(&storage, &config.load()).await;
+                                        let res =
+                                            RssEngine::fetch_all(&storage, &config.load()).await;
                                         if let Err(e) = res {
                                             let mut slot = result_slot.lock().unwrap();
                                             *slot = Some(Err(e.to_string()));
@@ -289,7 +325,9 @@ impl TuiModule for RssTuiModule {
                                 }
                             }
                             KeyCode::Char('a') => {
-                                *view = RssView::AddFeed { input: String::new() };
+                                *view = RssView::AddFeed {
+                                    input: String::new(),
+                                };
                                 changed = true;
                             }
                             KeyCode::Char('f') => {
@@ -297,11 +335,25 @@ impl TuiModule for RssTuiModule {
                                     if let Some(i) = feed_state.selected() {
                                         if i > 0 && i - 1 < feeds.len() {
                                             feeds[i - 1].favorite = !feeds[i - 1].favorite;
-                                            if let Err(e) = RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await {
-                                                *status_message = Some((format!("Save error: {}", e), Instant::now()));
+                                            if let Err(e) = RssEngine::save_feeds(
+                                                &ctx.storage,
+                                                &ctx.config.load(),
+                                                feeds,
+                                            )
+                                            .await
+                                            {
+                                                *status_message = Some((
+                                                    format!("Save error: {}", e),
+                                                    Instant::now(),
+                                                ));
                                             } else {
-                                                let msg = if feeds[i - 1].favorite { "Added to favorites ★" } else { "Removed from favorites" };
-                                                *status_message = Some((msg.to_string(), Instant::now()));
+                                                let msg = if feeds[i - 1].favorite {
+                                                    "Added to favorites ★"
+                                                } else {
+                                                    "Removed from favorites"
+                                                };
+                                                *status_message =
+                                                    Some((msg.to_string(), Instant::now()));
                                             }
                                             changed = true;
                                         }
@@ -313,10 +365,22 @@ impl TuiModule for RssTuiModule {
                                     if let Some(i) = feed_state.selected() {
                                         if i > 0 && i - 1 < feeds.len() {
                                             let removed = feeds.remove(i - 1);
-                                            if let Err(e) = RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await {
-                                                *status_message = Some((format!("Delete error: {}", e), Instant::now()));
+                                            if let Err(e) = RssEngine::save_feeds(
+                                                &ctx.storage,
+                                                &ctx.config.load(),
+                                                feeds,
+                                            )
+                                            .await
+                                            {
+                                                *status_message = Some((
+                                                    format!("Delete error: {}", e),
+                                                    Instant::now(),
+                                                ));
                                             } else {
-                                                *status_message = Some((format!("Removed: {}", removed.url), Instant::now()));
+                                                *status_message = Some((
+                                                    format!("Removed: {}", removed.url),
+                                                    Instant::now(),
+                                                ));
                                                 feed_state.select(Some((i - 1).max(0)));
                                             }
                                             changed = true;
@@ -331,9 +395,21 @@ impl TuiModule for RssTuiModule {
                                     if let Some(i) = item_state.selected() {
                                         if i < filtered.len() {
                                             let link = &filtered[i].link;
-                                            match Clipboard::new().and_then(|mut c| c.set_text(link.to_string())) {
-                                                Ok(_) => *status_message = Some((format!("Copied: {}", link), Instant::now())),
-                                                Err(e) => *status_message = Some((format!("Clipboard error: {}", e), Instant::now())),
+                                            match Clipboard::new()
+                                                .and_then(|mut c| c.set_text(link.to_string()))
+                                            {
+                                                Ok(_) => {
+                                                    *status_message = Some((
+                                                        format!("Copied: {}", link),
+                                                        Instant::now(),
+                                                    ))
+                                                }
+                                                Err(e) => {
+                                                    *status_message = Some((
+                                                        format!("Clipboard error: {}", e),
+                                                        Instant::now(),
+                                                    ))
+                                                }
                                             }
                                             changed = true;
                                         }
@@ -347,7 +423,10 @@ impl TuiModule for RssTuiModule {
                                     if let Some(i) = item_state.selected() {
                                         if i < filtered.len() {
                                             let _ = moku_core::util::open_url(&filtered[i].link);
-                                            *status_message = Some(("Opening in browser...".to_string(), Instant::now()));
+                                            *status_message = Some((
+                                                "Opening in browser...".to_string(),
+                                                Instant::now(),
+                                            ));
                                             changed = true;
                                         }
                                     }
@@ -389,15 +468,26 @@ impl TuiModule for RssTuiModule {
                                 changed = true;
                             }
                             KeyCode::Char('c') => {
-                                match Clipboard::new().and_then(|mut c| c.set_text(item.link.clone())) {
-                                    Ok(_) => *status_message = Some((format!("Copied: {}", item.link), Instant::now())),
-                                    Err(e) => *status_message = Some((format!("Clipboard error: {}", e), Instant::now())),
+                                match Clipboard::new()
+                                    .and_then(|mut c| c.set_text(item.link.clone()))
+                                {
+                                    Ok(_) => {
+                                        *status_message =
+                                            Some((format!("Copied: {}", item.link), Instant::now()))
+                                    }
+                                    Err(e) => {
+                                        *status_message = Some((
+                                            format!("Clipboard error: {}", e),
+                                            Instant::now(),
+                                        ))
+                                    }
                                 }
                                 changed = true;
                             }
                             KeyCode::Char('o') => {
                                 let _ = moku_core::util::open_url(&item.link);
-                                *status_message = Some(("Opening in browser...".to_string(), Instant::now()));
+                                *status_message =
+                                    Some(("Opening in browser...".to_string(), Instant::now()));
                                 changed = true;
                             }
                             _ => {}
@@ -429,14 +519,33 @@ impl TuiModule for RssTuiModule {
                                 let url = input.trim().to_string();
                                 if !url.is_empty() {
                                     if !feeds.iter().any(|f| f.url == url) {
-                                        feeds.push(FeedSubscription { url, title: None, favorite: false });
-                                        if let Err(e) = RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await {
-                                            *status_message = Some((format!("Save failed: {}", e), Instant::now()));
+                                        feeds.push(FeedSubscription {
+                                            url,
+                                            title: None,
+                                            favorite: false,
+                                        });
+                                        if let Err(e) = RssEngine::save_feeds(
+                                            &ctx.storage,
+                                            &ctx.config.load(),
+                                            feeds,
+                                        )
+                                        .await
+                                        {
+                                            *status_message = Some((
+                                                format!("Save failed: {}", e),
+                                                Instant::now(),
+                                            ));
                                         } else {
-                                            *status_message = Some(("Feed added successfully.".to_string(), Instant::now()));
+                                            *status_message = Some((
+                                                "Feed added successfully.".to_string(),
+                                                Instant::now(),
+                                            ));
                                         }
                                     } else {
-                                        *status_message = Some(("Feed already exists.".to_string(), Instant::now()));
+                                        *status_message = Some((
+                                            "Feed already exists.".to_string(),
+                                            Instant::now(),
+                                        ));
                                     }
                                 }
                                 let mut feed_state = ListState::default();
@@ -496,7 +605,11 @@ impl TuiModule for RssTuiModule {
         } = self;
 
         match view {
-            RssView::Split { active_panel, feed_state, item_state } => {
+            RssView::Split {
+                active_panel,
+                feed_state,
+                item_state,
+            } => {
                 let chunks = Layout::vertical([
                     Constraint::Min(0),
                     Constraint::Length(1), // status message
@@ -504,11 +617,9 @@ impl TuiModule for RssTuiModule {
                 ])
                 .split(area);
 
-                let panels = Layout::horizontal([
-                    Constraint::Percentage(30),
-                    Constraint::Percentage(70),
-                ])
-                .split(chunks[0]);
+                let panels =
+                    Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
+                        .split(chunks[0]);
 
                 // Feeds panel
                 let mut feed_items = vec![ListItem::new(" * All Feeds")];
@@ -519,7 +630,9 @@ impl TuiModule for RssTuiModule {
                 }
 
                 let feed_border_style = if *active_panel == Panel::Feeds {
-                    Style::default().fg(theme.selection_bg).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.selection_bg)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.border)
                 };
@@ -534,7 +647,10 @@ impl TuiModule for RssTuiModule {
                     )
                     .style(Style::default().fg(theme.base_fg))
                     .highlight_style(
-                        Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(theme.selection_fg)
+                            .bg(theme.selection_bg)
+                            .add_modifier(Modifier::BOLD),
                     );
 
                 frame.render_stateful_widget(feed_list, panels[0], feed_state);
@@ -549,7 +665,9 @@ impl TuiModule for RssTuiModule {
                     .collect();
 
                 let item_border_style = if *active_panel == Panel::Items {
-                    Style::default().fg(theme.selection_bg).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.selection_bg)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.border)
                 };
@@ -569,7 +687,10 @@ impl TuiModule for RssTuiModule {
                     )
                     .style(Style::default().fg(theme.base_fg))
                     .highlight_style(
-                        Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(theme.selection_fg)
+                            .bg(theme.selection_bg)
+                            .add_modifier(Modifier::BOLD),
                     )
                     .highlight_symbol(">> ");
 
@@ -577,8 +698,11 @@ impl TuiModule for RssTuiModule {
 
                 // Status message
                 if let Some((msg, _)) = status_message {
-                    let msg_p = Paragraph::new(format!(" {}", msg))
-                        .style(Style::default().fg(theme.selection_fg).add_modifier(Modifier::ITALIC));
+                    let msg_p = Paragraph::new(format!(" {}", msg)).style(
+                        Style::default()
+                            .fg(theme.selection_fg)
+                            .add_modifier(Modifier::ITALIC),
+                    );
                     frame.render_widget(msg_p, chunks[1]);
                 }
 
@@ -590,7 +714,11 @@ impl TuiModule for RssTuiModule {
                 };
                 let help = Paragraph::new(help_text)
                     .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-                    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(theme.border)),
+                    );
                 frame.render_widget(help, chunks[2]);
             }
             RssView::Detail { item } => {
@@ -609,10 +737,7 @@ impl TuiModule for RssTuiModule {
                 let inner_area = block.inner(chunks[0]);
                 frame.render_widget(block, chunks[0]);
 
-                let detail_text = format!(
-                    "Title:\n{}\n\nLink:\n{}\n",
-                    item.title, item.link
-                );
+                let detail_text = format!("Title:\n{}\n\nLink:\n{}\n", item.title, item.link);
 
                 let p = Paragraph::new(detail_text)
                     .wrap(Wrap { trim: true })
@@ -621,14 +746,21 @@ impl TuiModule for RssTuiModule {
 
                 // Status message
                 if let Some((msg, _)) = status_message {
-                    let msg_p = Paragraph::new(format!(" {}", msg))
-                        .style(Style::default().fg(theme.selection_fg).add_modifier(Modifier::ITALIC));
+                    let msg_p = Paragraph::new(format!(" {}", msg)).style(
+                        Style::default()
+                            .fg(theme.selection_fg)
+                            .add_modifier(Modifier::ITALIC),
+                    );
                     frame.render_widget(msg_p, chunks[1]);
                 }
 
                 let help = Paragraph::new(" [c] Copy Link | [o] Open Browser | [Esc/q] Back ")
                     .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-                    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.border)));
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(theme.border)),
+                    );
                 frame.render_widget(help, chunks[2]);
             }
             RssView::AddFeed { input } => {
@@ -654,10 +786,79 @@ impl TuiModule for RssTuiModule {
                     .style(Style::default().fg(theme.base_fg));
                 frame.render_widget(input_p, layout[0]);
 
-                let help_p = Paragraph::new(" [Enter] Save | [Esc] Cancel ")
-                    .style(Style::default().fg(theme.base_fg).add_modifier(Modifier::DIM));
+                let help_p = Paragraph::new(" [Enter] Save | [Esc] Cancel ").style(
+                    Style::default()
+                        .fg(theme.base_fg)
+                        .add_modifier(Modifier::DIM),
+                );
                 frame.render_widget(help_p, layout[2]);
             }
         }
+    }
+
+    async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
+        let feeds = RssEngine::load_feeds(&ctx.storage).await;
+        let items = RssEngine::load_items(&ctx.storage).await;
+        Some(ModuleStatus::normal(format!(
+            "{} feeds, {} articles",
+            feeds.len(),
+            items.len()
+        )))
+    }
+}
+
+#[cfg(test)]
+mod dashboard_summary_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_reports_feed_and_article_counts() {
+        let module = RssTuiModule::new();
+        let ctx = create_test_context().await;
+
+        let feeds = vec![FeedSubscription {
+            url: "https://a.example/feed".to_string(),
+            title: Some("A".to_string()),
+            favorite: false,
+        }];
+        RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), &feeds)
+            .await
+            .unwrap();
+
+        let status = module.dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Normal);
+        assert_eq!(status.text, "1 feeds, 0 articles");
+    }
+
+    #[test]
+    fn test_dashboard_summary_never_locked_by_default() {
+        // RSS storage is never encrypted by default (the daemon writes it
+        // headlessly with the vault always locked), so this module's
+        // dashboard summary must not depend on vault-unlock state.
+        assert!(!RssTuiModule::new().encrypt_by_default());
     }
 }

@@ -8,7 +8,7 @@ use crossterm::event::EventStream;
 use futures::StreamExt;
 
 use moku_core::{
-    AppContext, ModuleId, MokuConfig, Router, SecurityManager, StorageManager, ToastManager,
+    AppContext, AsAny, ModuleId, MokuConfig, Router, SecurityManager, StorageManager, ToastManager,
     TuiRegistry, VaultSession, keys_match,
 };
 
@@ -217,6 +217,26 @@ async fn enter_module(
     if let Some(m) = registry.get_mut(target) {
         m.init(ctx).await?;
     }
+
+    // Dashboard has no way to reach other modules' live instances itself
+    // (see `TuiModule::dashboard_summary`'s doc comment) — this is the one
+    // place with access to both the registry and ctx, so it's the one spot
+    // that collects and hands over summaries. A future module gaining a
+    // dashboard row never needs a change here — only `dashboard_summary`
+    // in its own crate.
+    if target == ModuleId::DASHBOARD {
+        let summaries = registry
+            .collect_dashboard_summaries(ModuleId::DASHBOARD, ctx)
+            .await;
+        if let Some(m) = registry.get_mut(ModuleId::DASHBOARD)
+            && let Some(dash) = m
+                .as_any_mut()
+                .downcast_mut::<moku_dashboard::DashboardModule>()
+        {
+            dash.set_summaries(summaries);
+        }
+    }
+
     router.switch_to(target);
     Ok(AppState::Unlocked)
 }
