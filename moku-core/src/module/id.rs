@@ -48,13 +48,18 @@ impl ModuleId {
         }
     }
 
-    /// Returns list of visible TUI modules in the Launcher.
+    /// Returns list of visible TUI modules in the Launcher — every module
+    /// that actually has a TUI (is registered in `build_tui_registry`)
+    /// except the launcher itself (navigating to itself is meaningless).
+    /// CONTEXT/COMMIT are excluded not by an arbitrary allowlist but
+    /// because they genuinely have no TUI — they're CLI-only modules.
     pub fn all_visible() -> Vec<ModuleId> {
         vec![
             Self::DASHBOARD,
             Self::TODO,
             Self::BOOKMARK,
             Self::SETTINGS,
+            Self::LOCK_SCREEN,
             Self::RSS,
             Self::DAEMON,
             Self::VAULT,
@@ -88,6 +93,13 @@ mod tests {
         assert!(ModuleId::all_visible().contains(&ModuleId::TODO));
         assert!(ModuleId::all_visible().contains(&ModuleId::RSS));
         assert!(ModuleId::all_visible().contains(&ModuleId::DAEMON));
+    }
+
+    #[test]
+    fn test_lock_screen_has_a_real_tui_and_is_visible() {
+        // Unlike context/commit, lock_screen is a genuine TuiModule
+        // (registered in build_tui_registry) — it belongs in the menu.
+        assert!(ModuleId::all_visible().contains(&ModuleId::LOCK_SCREEN));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, ListState, Paragraph},
 };
@@ -19,7 +19,12 @@ use moku_core::{
 
 mod fuzzy;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Default cap on how many modules render at once — independent of how
+/// many modules actually exist. Easy to bump in code, and overridable
+/// per-user via `[modules.launcher] max_visible = N` in config.toml.
+const DEFAULT_MAX_VISIBLE_ROWS: usize = 15;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct LauncherModuleConfig {
     /// Existing per-launcher key overrides (`[modules.launcher.keys]`).
@@ -29,6 +34,22 @@ struct LauncherModuleConfig {
     /// order. Written automatically by Shift+Up/Shift+Down (see
     /// `persist_order`), and freely hand-editable in config.toml too.
     order: Vec<String>,
+    /// How many modules are shown at once, independent of the total
+    /// module count — once there are more modules than this, the ring
+    /// crops to a rotating window instead of showing everything (see
+    /// `recompute_ring_viewport`'s `window` parameter). Config-only, no
+    /// in-TUI control (not asked for).
+    max_visible: usize,
+}
+
+impl Default for LauncherModuleConfig {
+    fn default() -> Self {
+        Self {
+            keys: HashMap::new(),
+            order: Vec::new(),
+            max_visible: DEFAULT_MAX_VISIBLE_ROWS,
+        }
+    }
 }
 
 /// Active only while the user is typing a `/` search query.
@@ -45,7 +66,7 @@ struct FilterState {
 }
 
 impl FilterState {
-    fn new(len: usize) -> Self {
+    fn new(len: usize, max_visible: usize) -> Self {
         let mut list_state = ListState::default();
         // Establish the ring's rotated position up front (see
         // recompute_ring_viewport) so the very first render already shows
@@ -53,7 +74,7 @@ impl FilterState {
         // isn't something that only kicks in after the first keypress.
         let viewport_top = if len > 0 {
             list_state.select(Some(0));
-            recompute_ring_viewport(0, 0, len, RING_MARGIN)
+            recompute_ring_viewport(0, 0, len, max_visible.min(len), RING_MARGIN)
         } else {
             0
         };
@@ -72,6 +93,8 @@ pub struct LauncherModule {
     /// Absolute index shown at the top row of the list box — see
     /// `recompute_ring_viewport`.
     viewport_top: i64,
+    /// How many rows render at once — see `LauncherModuleConfig::max_visible`.
+    max_visible: usize,
     filter: Option<FilterState>,
 }
 
@@ -85,11 +108,13 @@ impl LauncherModule {
             config.resolve_module_config(ModuleId::LAUNCHER.as_str());
         let registered_modules =
             merge_order(ModuleId::all_visible(), extra_visible, &settings.order);
+        let max_visible = settings.max_visible;
         let mut state = ListState::default();
         // Same up-front rotation as FilterState::new — see there.
         let viewport_top = if !registered_modules.is_empty() {
             state.select(Some(0));
-            recompute_ring_viewport(0, 0, registered_modules.len(), RING_MARGIN)
+            let window = max_visible.min(registered_modules.len());
+            recompute_ring_viewport(0, 0, registered_modules.len(), window, RING_MARGIN)
         } else {
             0
         };
@@ -97,6 +122,7 @@ impl LauncherModule {
             registered_modules,
             state,
             viewport_top,
+            max_visible,
             filter: None,
         }
     }
@@ -116,10 +142,12 @@ impl LauncherModule {
             None => 0,
         };
         self.state.select(Some(i));
+        let window = self.max_visible.min(self.registered_modules.len());
         self.viewport_top = recompute_ring_viewport(
             self.viewport_top,
             i,
             self.registered_modules.len(),
+            window,
             RING_MARGIN,
         );
         true
@@ -140,10 +168,12 @@ impl LauncherModule {
             None => 0,
         };
         self.state.select(Some(i));
+        let window = self.max_visible.min(self.registered_modules.len());
         self.viewport_top = recompute_ring_viewport(
             self.viewport_top,
             i,
             self.registered_modules.len(),
+            window,
             RING_MARGIN,
         );
         true
@@ -169,17 +199,22 @@ impl LauncherModule {
         let target = target as usize;
         self.registered_modules.swap(i, target);
         self.state.select(Some(target));
+        let window = self.max_visible.min(self.registered_modules.len());
         self.viewport_top = recompute_ring_viewport(
             self.viewport_top,
             target,
             self.registered_modules.len(),
+            window,
             RING_MARGIN,
         );
         true
     }
 
     fn enter_filter_mode(&mut self) {
-        self.filter = Some(FilterState::new(self.registered_modules.len()));
+        self.filter = Some(FilterState::new(
+            self.registered_modules.len(),
+            self.max_visible,
+        ));
     }
 
     fn exit_filter_mode(&mut self) {
@@ -199,6 +234,7 @@ impl LauncherModule {
         scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
         let matches: Vec<usize> = scored.into_iter().map(|(i, _)| i).collect();
 
+        let window = self.max_visible.min(matches.len());
         let Some(filter) = &mut self.filter else {
             return;
         };
@@ -208,7 +244,7 @@ impl LauncherModule {
         // Re-establish the ring's rotated position immediately (same
         // reasoning as FilterState::new) rather than resetting to 0 and
         // waiting for the next arrow press to correct it.
-        filter.viewport_top = recompute_ring_viewport(0, 0, matches.len(), RING_MARGIN);
+        filter.viewport_top = recompute_ring_viewport(0, 0, matches.len(), window, RING_MARGIN);
         filter.matches = matches;
     }
 
@@ -227,6 +263,7 @@ impl LauncherModule {
     }
 
     fn filter_move(&mut self, dir: i32) {
+        let max_visible = self.max_visible;
         let Some(filter) = &mut self.filter else {
             return;
         };
@@ -236,10 +273,12 @@ impl LauncherModule {
         let i = filter.list_state.selected().unwrap_or(0);
         let target = (i as i32 + dir).clamp(0, filter.matches.len() as i32 - 1);
         filter.list_state.select(Some(target as usize));
+        let window = max_visible.min(filter.matches.len());
         filter.viewport_top = recompute_ring_viewport(
             filter.viewport_top,
             target as usize,
             filter.matches.len(),
+            window,
             RING_MARGIN,
         );
     }
@@ -279,29 +318,39 @@ impl LauncherModule {
 }
 
 /// How many rows (0-indexed distance from either edge) the cursor stays
-/// clear of before the ring starts rotating under it. 2 means the cursor
-/// pins at row index 2 (the 3rd row) from the top, and at row index
-/// `n - 1 - 2` from the bottom — everywhere in between is a free zone
-/// where the cursor moves normally.
-const RING_MARGIN: usize = 2;
+/// clear of before the ring starts rotating under it. 3 means the cursor
+/// pins at row index 3 (the 4th row) from the top, and at row index
+/// `window - 1 - 3` from the bottom — everywhere in between is a free
+/// zone where the cursor moves normally.
+const RING_MARGIN: usize = 3;
 
 /// Adjusts `viewport_top` (the item shown at row 0) so the cursor stays
-/// within `RING_MARGIN` of either edge, exactly like `recompute_viewport`
-/// used to — except the `n`-item list is always shown in full (the
-/// window is always `n` rows) and there is no true start/end at all:
-/// positions are tracked modulo `n`, never clamped, so "moving past the
-/// first item" wraps seamlessly to the last one and vice versa. This is
-/// what makes it read as a closed ring/cylinder rather than a bounded
-/// list — the cursor never reaches row 0 or the last row exposing a
-/// boundary, because there isn't one.
-fn recompute_ring_viewport(viewport_top: i64, selected_pos: usize, n: usize, margin: usize) -> i64 {
+/// within `RING_MARGIN` of either edge of a `window`-row view, exactly
+/// like the old bounded `recompute_viewport` used to — except positions
+/// are tracked modulo the *total* `n` (never clamped to `[0, n-window]`),
+/// so "moving past the first item" wraps seamlessly to the last one and
+/// vice versa, however many are shown at once. When `window == n` (the
+/// common case — everything fits), this reduces to true circular
+/// wraparound with no start/end at all, which is what makes it read as a
+/// closed ring/cylinder rather than a bounded list. When `window < n`
+/// (more modules than fit on screen), the same rotate-under-the-cursor
+/// rule crops to a scrolling window — "findable if you scroll enough" —
+/// while still never exposing a hard boundary at the *pinning* edges.
+fn recompute_ring_viewport(
+    viewport_top: i64,
+    selected_pos: usize,
+    n: usize,
+    window: usize,
+    margin: usize,
+) -> i64 {
     if n == 0 {
         return 0;
     }
     let n = n as i64;
+    let window = (window.min(n as usize)).max(1) as i64;
     let cursor_row = (selected_pos as i64 - viewport_top).rem_euclid(n);
     let low = margin as i64;
-    let high = n - 1 - margin as i64;
+    let high = window - 1 - margin as i64;
     if cursor_row < low {
         (selected_pos as i64 - low).rem_euclid(n)
     } else if cursor_row > high {
@@ -325,6 +374,55 @@ fn selected_indent(distance: usize, has_selection: bool) -> usize {
     }
     let d = distance as f32;
     (MAX_SELECTION_INDENT as f32 - d * d * 0.6).max(0.0).round() as usize
+}
+
+/// Never dims a row below this fraction of its base brightness — every
+/// row stays visible, however far it sits from the cursor.
+const FADE_FLOOR: f32 = 0.4;
+
+/// Darkens `base` a little more for each step of `distance` from the
+/// cursor's row, reaching `FADE_FLOOR` brightness at `max_distance` and
+/// never going dimmer than that. Unlike `Modifier::DIM` (a fixed,
+/// terminal-dependent, effectively two-tier reduction), this computes a
+/// real `Color::Rgb` per row — genuinely continuous, and entirely within
+/// what a terminal can already do (this is just picking different literal
+/// colors, not a perspective/3D effect, which a terminal really can't do).
+fn fade_color(base: Color, distance: usize, max_distance: usize) -> Color {
+    let (r, g, b) = color_to_rgb(base);
+    let t = (distance as f32 / (max_distance.max(1) as f32)).min(1.0);
+    let factor = 1.0 - t * (1.0 - FADE_FLOOR);
+    Color::Rgb(
+        (r as f32 * factor).round() as u8,
+        (g as f32 * factor).round() as u8,
+        (b as f32 * factor).round() as u8,
+    )
+}
+
+/// Approximates a ratatui `Color` as an RGB triple for fading purposes.
+/// `Rgb` passes through exactly; named ANSI colors map to their standard
+/// terminal-palette equivalents; anything ambiguous (`Reset`, `Indexed`)
+/// falls back to a neutral mid-gray rather than guessing.
+fn color_to_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Black => (0, 0, 0),
+        Color::Red => (205, 49, 49),
+        Color::Green => (13, 188, 121),
+        Color::Yellow => (229, 229, 16),
+        Color::Blue => (36, 114, 200),
+        Color::Magenta => (188, 63, 188),
+        Color::Cyan => (17, 168, 205),
+        Color::Gray => (192, 192, 192),
+        Color::DarkGray => (102, 102, 102),
+        Color::LightRed => (241, 76, 76),
+        Color::LightGreen => (35, 209, 139),
+        Color::LightYellow => (245, 245, 67),
+        Color::LightBlue => (59, 142, 234),
+        Color::LightMagenta => (214, 112, 214),
+        Color::LightCyan => (41, 184, 219),
+        Color::White => (255, 255, 255),
+        Color::Reset | Color::Indexed(_) => (170, 170, 170),
+    }
 }
 
 /// Orders `all_visible` (+ `extra_visible` appended) according to
@@ -482,12 +580,14 @@ impl TuiModule for LauncherModule {
         ])
         .split(area)[1];
 
-        // Size the list to fit every item at once — nothing is ever
-        // hidden — instead of the terminal's full height. Always based on
-        // the full (unfiltered) module count so the box doesn't resize/
-        // reflow while typing a search query — only which item lands at
-        // the cursor's row changes.
-        let list_height = (self.registered_modules.len().max(1) as u16) + 2;
+        // Size the list to how many rows actually render at once
+        // (max_visible, capped at the total module count) rather than the
+        // terminal's full height. Always based on the full (unfiltered)
+        // module count so the box doesn't resize/reflow while typing a
+        // search query — only which item lands at the cursor's row
+        // changes.
+        let window = self.max_visible.min(self.registered_modules.len().max(1));
+        let list_height = (window as u16) + 2;
         let search_height = if filtering { 3 } else { 0 };
         let content_height = 3 + list_height + search_height + 1;
         let top_pad = area.height.saturating_sub(content_height) / 2;
@@ -567,14 +667,25 @@ impl TuiModule for LauncherModule {
             .max()
             .unwrap_or(0);
         let base_indent = content_width.saturating_sub(max_title_len) / 2;
+        // The box height stays stable while filtering (based on the full
+        // unfiltered count, so it doesn't resize/reflow per keystroke),
+        // but the ring itself is only as big as what's actually being
+        // shown right now (`n_display`, e.g. a handful of filtered
+        // matches) — ring_window is the real "how many rows have content"
+        // count; the rest of `inner_height` just renders blank, and
+        // critically is NOT fed through the modulo below (which would
+        // otherwise wrap around and show duplicates once `r` exceeded the
+        // real ring size).
+        let ring_window = self.max_visible.min(n_display.max(0) as usize);
         // Where the cursor actually lands this frame — usually pinned at
         // RING_MARGIN from an edge, free to sit anywhere in the middle —
-        // this is the taper/dimming's reference point.
+        // this is the taper/fade's reference point.
         let cursor_row =
             selected_pos.map(|p| (p as i64 - viewport_top).rem_euclid(n_display.max(1)));
+        let max_distance = (ring_window / 2).max(1);
 
         for r in 0..inner_height {
-            let text = (n_display > 0).then(|| {
+            let text = (r < ring_window).then(|| {
                 let idx = display_indices[(viewport_top + r as i64).rem_euclid(n_display) as usize];
                 let id = self.registered_modules[idx];
                 let distance = cursor_row
@@ -583,21 +694,16 @@ impl TuiModule for LauncherModule {
                 let indent = base_indent + selected_indent(distance, cursor_row.is_some());
                 format!("{}{}", " ".repeat(indent), id.title())
             });
-            let distance = cursor_row
-                .map(|c| (r as i64 - c).unsigned_abs())
-                .unwrap_or(u64::MAX);
-            let style = if distance == 0 {
-                Style::default()
+            let distance = cursor_row.map(|c| (r as i64 - c).unsigned_abs() as usize);
+            let style = match distance {
+                Some(0) => Style::default()
                     .fg(theme.selection_fg)
                     .bg(theme.selection_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else if distance <= 2 {
-                Style::default().fg(theme.base_fg).bg(theme.base_bg)
-            } else {
-                Style::default()
-                    .fg(theme.base_fg)
-                    .bg(theme.base_bg)
-                    .add_modifier(Modifier::DIM)
+                    .add_modifier(Modifier::BOLD),
+                Some(d) => Style::default()
+                    .fg(fade_color(theme.base_fg, d, max_distance))
+                    .bg(theme.base_bg),
+                None => Style::default().fg(theme.base_fg).bg(theme.base_bg),
             };
             let row_area = Rect {
                 x: list_inner.x,
@@ -676,6 +782,19 @@ mod tests {
 
     fn launcher() -> LauncherModule {
         LauncherModule::new(Vec::new(), &MokuConfig::default())
+    }
+
+    fn launcher_with_max_visible(max_visible: usize) -> LauncherModule {
+        let mut table = toml::value::Table::new();
+        table.insert(
+            "max_visible".to_string(),
+            toml::Value::Integer(max_visible as i64),
+        );
+        let mut config = MokuConfig::default();
+        config
+            .modules
+            .insert("launcher".to_string(), toml::Value::Table(table));
+        LauncherModule::new(Vec::new(), &config)
     }
 
     #[test]
@@ -1078,65 +1197,75 @@ mod tests {
 
     #[test]
     fn test_ring_rotates_one_step_keeping_cursor_row_fixed() {
-        // The exact KARE2 -> KARE3 transition confirmed with the user:
-        // Daemon (index 5) selected, then one more Down to Vault (index
-        // 6) — the cursor's screen row must not change, but the ring
-        // rotates so HTTP (the item that was two rows above Daemon) now
-        // appears at the very top.
+        // The exact KARE2 -> KARE3 transition confirmed with the user (11
+        // modules, margin 3): Vault Security (index 4) selected, then one
+        // more Down to RSS Feed Reader (index 5) — the cursor's screen
+        // row must not change, but the ring rotates so Secrets (the item
+        // that wraps in from the far end) now appears at the very top.
         let mut launcher = launcher();
-        for _ in 0..5 {
-            launcher.next(); // Dashboard -> ... -> Daemon
+        for _ in 0..4 {
+            launcher.next(); // Dashboard -> ... -> Vault Security
         }
-        assert_eq!(launcher.state.selected(), Some(5));
+        assert_eq!(launcher.state.selected(), Some(4));
         let (width, height) = (100usize, 30usize);
         let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
-        let daemon_row =
-            find_row(&mut launcher, width, height, "Daemon Status").unwrap() - list_top;
+        let lock_screen_row =
+            find_row(&mut launcher, width, height, "Vault Security").unwrap() - list_top;
 
-        launcher.next(); // Daemon -> Vault
-        assert_eq!(launcher.state.selected(), Some(6));
+        launcher.next(); // Vault Security -> RSS Feed Reader
+        assert_eq!(launcher.state.selected(), Some(5));
         let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
-        let vault_row =
-            find_row(&mut launcher, width, height, "Encrypted Vaults").unwrap() - list_top;
-        let http_row = find_row(&mut launcher, width, height, "API Client").unwrap() - list_top;
+        let rss_row = find_row(&mut launcher, width, height, "RSS Feed Reader").unwrap() - list_top;
+        let secrets_row = find_row(&mut launcher, width, height, "Secrets").unwrap() - list_top;
 
         assert_eq!(
-            vault_row, daemon_row,
+            rss_row, lock_screen_row,
             "the cursor's screen row should not move once scrolling has engaged"
         );
         assert_eq!(
-            http_row, 0,
+            secrets_row, 0,
             "the ring should have rotated so the wrapped-around item lands at the very top"
         );
     }
 
     #[test]
     fn test_recompute_ring_viewport_stays_put_in_the_free_zone() {
-        // n=10, margin=2: cursor_row in [2, 7] is free — moving within it
-        // never changes viewport_top.
-        assert_eq!(recompute_ring_viewport(8, 1, 10, 2), 8);
-        assert_eq!(recompute_ring_viewport(8, 5, 10, 2), 8);
+        // n=11, window=11 (no cropping), margin=3: cursor_row in [3, 7] is
+        // free — moving within it never changes viewport_top.
+        assert_eq!(recompute_ring_viewport(8, 1, 11, 11, 3), 8);
+        assert_eq!(recompute_ring_viewport(8, 3, 11, 11, 3), 8);
     }
 
     #[test]
     fn test_recompute_ring_viewport_rotates_forward_past_the_bottom_margin() {
-        // The exact KARE1 -> KARE3 sequence confirmed with the user.
-        assert_eq!(recompute_ring_viewport(0, 0, 10, 2), 8); // KARE1: Dashboard selected fresh
-        assert_eq!(recompute_ring_viewport(8, 6, 10, 2), 9); // KARE3: one more Down past the margin
+        // The exact KARE1 -> KARE3 sequence confirmed with the user (11
+        // modules now that Vault Security is included, margin 3).
+        assert_eq!(recompute_ring_viewport(0, 0, 11, 11, 3), 8); // KARE1: Dashboard selected fresh
+        assert_eq!(recompute_ring_viewport(8, 5, 11, 11, 3), 9); // KARE3: one more Down past the margin
     }
 
     #[test]
     fn test_recompute_ring_viewport_rotates_backward_past_the_top_margin() {
-        assert_eq!(recompute_ring_viewport(8, 0, 10, 2), 8); // still in free zone at row 2
-        assert_eq!(recompute_ring_viewport(8, 9, 10, 2), 7); // wraps past Dashboard to the last item
+        assert_eq!(recompute_ring_viewport(8, 0, 11, 11, 3), 8); // still in free zone at row 3
+        assert_eq!(recompute_ring_viewport(8, 10, 11, 11, 3), 7); // wraps past Dashboard to the last item
     }
 
     #[test]
     fn test_recompute_ring_viewport_handles_empty_and_singleton_lists() {
-        assert_eq!(recompute_ring_viewport(5, 0, 0, 2), 0);
+        assert_eq!(recompute_ring_viewport(5, 0, 0, 11, 3), 0);
         // A single item with a margin larger than the list: must not
         // panic, and settles on a stable value.
-        assert_eq!(recompute_ring_viewport(0, 0, 1, 2), 0);
+        assert_eq!(recompute_ring_viewport(0, 0, 1, 1, 3), 0);
+    }
+
+    #[test]
+    fn test_recompute_ring_viewport_with_a_window_smaller_than_n() {
+        // A window narrower than the total (more modules than fit on
+        // screen) should engage rotation earlier than an unwindowed view
+        // over the same n/selection would — proving the window parameter
+        // actually crops rather than being ignored.
+        assert_eq!(recompute_ring_viewport(0, 4, 20, 5, 1), 1);
+        assert_eq!(recompute_ring_viewport(0, 4, 20, 20, 1), 0);
     }
 
     #[test]
@@ -1179,5 +1308,61 @@ mod tests {
             far_right_blank,
             "content should not stretch across a very wide (300-column) terminal"
         );
+    }
+
+    #[test]
+    fn test_max_visible_caps_how_many_items_render_at_once() {
+        let mut launcher = launcher_with_max_visible(5);
+        assert_eq!(
+            launcher.registered_modules.len(),
+            11,
+            "total module count should be unaffected"
+        );
+        let content = rendered_content(&mut launcher);
+        let visible_count = launcher
+            .registered_modules
+            .iter()
+            .filter(|id| content.contains(id.title()))
+            .count();
+        assert_eq!(
+            visible_count, 5,
+            "only max_visible items should render simultaneously when the total exceeds it"
+        );
+    }
+
+    #[test]
+    fn test_fade_color_never_drops_below_the_floor() {
+        let white = Color::Rgb(255, 255, 255);
+        assert_eq!(fade_color(white, 0, 4), white, "no distance, no fade");
+        let floor = fade_color(white, 4, 4);
+        assert_eq!(
+            floor,
+            Color::Rgb(102, 102, 102),
+            "at max_distance, brightness should sit exactly at FADE_FLOOR"
+        );
+        // Even far beyond max_distance, it must never dim further.
+        assert_eq!(
+            fade_color(white, 40, 4),
+            floor,
+            "fading should never go past the floor, however far distance grows"
+        );
+    }
+
+    #[test]
+    fn test_fade_gradient_is_strictly_monotonic_with_distance() {
+        let white = Color::Rgb(255, 255, 255);
+        let brightness = |c: Color| match c {
+            Color::Rgb(r, _, _) => r,
+            _ => panic!("expected Rgb"),
+        };
+        let samples: Vec<u8> = (0..=6)
+            .map(|d| brightness(fade_color(white, d, 6)))
+            .collect();
+        for pair in samples.windows(2) {
+            assert!(
+                pair[1] < pair[0],
+                "each step further from the cursor should be strictly dimmer than the last (got {samples:?})"
+            );
+        }
     }
 }
