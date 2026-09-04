@@ -15,6 +15,13 @@ sysinfo.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 async-trait.workspace = true
+secrecy.workspace = true
+
+# Derives a per-volume master key from moku's app-vault master key
+# (Default password mode) — same crates, same scoped-not-workspace
+# rationale as moku-vault-fs's own HKDF usage.
+hkdf = "0.12"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -12,9 +12,12 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
+use moku_core::{
+    AppContext, Command, ModuleId, ModuleMeta, MokuTheme, SafeKey, TuiModule, resolve_event,
+};
+use secrecy::SecretBox;
 
-use crate::registry::{self, PasswordMode, VolumeConfig};
+use crate::registry::{self, PasswordMode, VolumeConfig, VolumeSecret};
 use crate::worker::{self, StopOutcome};
 use crate::{size, status};
 
@@ -214,14 +217,49 @@ impl VaultManagerModule {
         self.show_message("Mounting...");
     }
 
+    /// Same as `start_mount`, but for a Default-mode volume mounted with
+    /// moku's already-unlocked app-vault key instead of a typed password —
+    /// the no-reprompt fast path (see the `KeyCode::Char('m') | KeyCode::
+    /// Enter` handler below for when this is used instead of `start_mount`).
+    fn start_mount_with_key(
+        &mut self,
+        volume_id: String,
+        display_name: String,
+        mountpoint: String,
+        key: Arc<SecretBox<SafeKey>>,
+    ) {
+        let slot = Arc::clone(&self.action_result);
+        tokio::spawn(async move {
+            let msg = match worker::spawn_mount_process_with_key(
+                &volume_id,
+                &mountpoint,
+                key.as_ref(),
+            )
+            .await
+            {
+                Ok(worker::MountOutcome::Ready { pid }) => {
+                    format!("Mounted '{display_name}' at {mountpoint} (worker PID: {pid}).")
+                }
+                Ok(worker::MountOutcome::Failed { message }) => {
+                    format!("Mount failed: {message}")
+                }
+                Ok(worker::MountOutcome::TimedOut { pid }) => format!(
+                    "'{display_name}' is still starting (worker PID: {pid}) — check back shortly."
+                ),
+                Err(e) => format!("Mount failed: {e}"),
+            };
+            *slot.lock().unwrap() = Some(msg);
+        });
+        self.show_message("Mounting...");
+    }
+
     fn start_create(&mut self, name: String, size_bytes: u64, password: String) {
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
             let msg = match registry::create_volume(
                 &name,
                 size_bytes,
-                PasswordMode::Custom,
-                password,
+                VolumeSecret::Password(password),
                 None,
             )
             .await
@@ -519,13 +557,42 @@ impl TuiModule for VaultManagerModule {
                         if row.mounted {
                             self.show_message("Already mounted.");
                         } else {
-                            let mountpoint = Self::default_mountpoint(&row.cfg.id);
-                            self.prompt = Some(PasswordPrompt {
-                                volume_id: row.cfg.id.clone(),
-                                display_name: row.cfg.display_name.clone(),
-                                mountpoint,
-                                input: String::new(),
-                            });
+                            let volume_id = row.cfg.id.clone();
+                            let display_name = row.cfg.display_name.clone();
+                            let mountpoint = Self::default_mountpoint(&volume_id);
+
+                            // No-reprompt fast path: a Default-mode volume
+                            // created under the new scheme (no vault/
+                            // meta.json of its own — see
+                            // registry::has_own_vault) derives its key from
+                            // moku's app vault, so if that vault is already
+                            // unlocked there's a real key sitting in
+                            // ctx.session right now and nothing left to ask
+                            // the user for.
+                            let fast_path = row.cfg.password_mode == PasswordMode::Default
+                                && ctx.session.is_unlocked()
+                                && registry::volume_dir(&volume_id)
+                                    .map(|dir| !registry::has_own_vault(&dir))
+                                    .unwrap_or(false);
+
+                            match fast_path.then(|| ctx.session.current()).flatten() {
+                                Some(key) => {
+                                    self.start_mount_with_key(
+                                        volume_id,
+                                        display_name,
+                                        mountpoint,
+                                        key,
+                                    );
+                                }
+                                None => {
+                                    self.prompt = Some(PasswordPrompt {
+                                        volume_id,
+                                        display_name,
+                                        mountpoint,
+                                        input: String::new(),
+                                    });
+                                }
+                            }
                         }
                     }
                 }

@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 
+use moku_core::SecurityManager;
+use moku_vault_daemon::registry::VolumeSecret;
 use moku_vault_daemon::worker::{MountOutcome, StopOutcome};
 use moku_vault_daemon::{PasswordMode, registry, size, status, worker};
 
@@ -14,15 +16,39 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
             path,
         } => {
             let size_bytes = size::parse_size(size_str)?;
-            let mode = if *custom_password {
-                PasswordMode::Custom
-            } else {
-                PasswordMode::Default
-            };
-            let password = prompt_new_password(mode)?;
             let base_dir = path.as_deref().map(std::path::PathBuf::from);
 
-            let cfg = registry::create_volume(name, size_bytes, mode, password, base_dir).await?;
+            let secret = if *custom_password {
+                let p1 = rpassword::prompt_password("New volume password: ")
+                    .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+                let p2 = rpassword::prompt_password("Confirm volume password: ")
+                    .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+                if p1 != p2 {
+                    bail!("passwords did not match");
+                }
+                VolumeSecret::Password(p1)
+            } else {
+                // Default mode: the volume gets no password of its own —
+                // its key is derived from moku's real app vault, so this
+                // must actually be verified against it (not just typed
+                // twice and assumed to match, which is what silently
+                // failed before this).
+                let app_security = SecurityManager::new().map_err(|e| anyhow!("{e}"))?;
+                if !app_security.is_vault_initialized() {
+                    bail!(
+                        "moku's vault isn't set up yet — initialize it first from the Vault Security screen in the TUI, or create this volume with --custom-password instead."
+                    );
+                }
+                let password = rpassword::prompt_password("Moku vault password: ")
+                    .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+                let key = app_security
+                    .unlock_vault(password)
+                    .await
+                    .map_err(|e| anyhow!("failed to unlock moku vault: {e}"))?;
+                VolumeSecret::FromAppVault(key)
+            };
+
+            let cfg = registry::create_volume(name, size_bytes, secret, base_dir).await?;
             let dir = registry::volume_dir(&cfg.id)?;
             println!(
                 "✅ Created encrypted volume '{}' (id: {}, size limit: {}) at {}",
@@ -159,23 +185,4 @@ async fn unmount(name: &str) -> Result<()> {
         StopOutcome::Forced => println!("✅ Unmounted '{}' (forced).", cfg.display_name),
     }
     Ok(())
-}
-
-fn prompt_new_password(mode: PasswordMode) -> Result<String> {
-    match mode {
-        PasswordMode::Default => {
-            rpassword::prompt_password("Moku vault password (this volume's default password too): ")
-                .map_err(|e| anyhow!("Failed to read password: {e}"))
-        }
-        PasswordMode::Custom => {
-            let p1 = rpassword::prompt_password("New volume password: ")
-                .map_err(|e| anyhow!("Failed to read password: {e}"))?;
-            let p2 = rpassword::prompt_password("Confirm volume password: ")
-                .map_err(|e| anyhow!("Failed to read password: {e}"))?;
-            if p1 != p2 {
-                bail!("passwords did not match");
-            }
-            Ok(p1)
-        }
-    }
 }
