@@ -272,7 +272,7 @@ impl CliModule for SecretsCliModule {
                 println!(
                     "Value:    {}",
                     if reveal {
-                        entry.value.clone()
+                        entry.value.to_string()
                     } else {
                         "•".repeat(entry.value.chars().count())
                     }
@@ -353,8 +353,10 @@ async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
         return Ok(());
     }
 
-    let password = rpassword::prompt_password("Moku vault password: ")
-        .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+    let password = zeroize::Zeroizing::new(
+        rpassword::prompt_password("Moku vault password: ")
+            .map_err(|e| anyhow!("Failed to read password: {e}"))?,
+    );
     let result = if security.is_vault_initialized() {
         security.unlock_vault(password).await
     } else {

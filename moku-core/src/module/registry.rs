@@ -19,6 +19,10 @@ impl TuiRegistry {
         self.0.get_mut(&id)
     }
 
+    pub fn get(&self, id: ModuleId) -> Option<&Box<dyn TuiModule>> {
+        self.0.get(&id)
+    }
+
     pub fn contains(&self, id: ModuleId) -> bool {
         self.0.contains_key(&id)
     }
@@ -28,23 +32,32 @@ impl TuiRegistry {
     /// over `ModuleId::all_visible()` — a new module automatically appears
     /// here the moment it overrides `dashboard_summary`, with no changes
     /// needed in this function or in the Dashboard module itself.
+    ///
+    /// `dashboard_summary` takes `&self`, so every module's summary is
+    /// provably independent of every other — fetched concurrently via
+    /// `join_all` instead of one at a time, so the Dashboard's total load
+    /// time is bounded by the slowest module, not their sum.
     pub async fn collect_dashboard_summaries(
         &mut self,
         exclude: ModuleId,
         ctx: &AppContext,
     ) -> Vec<(ModuleId, ModuleStatus)> {
-        let mut out = Vec::new();
-        for id in ModuleId::all_visible() {
-            if id == exclude {
-                continue;
-            }
-            if let Some(m) = self.get_mut(id)
-                && let Some(status) = m.dashboard_summary(ctx).await
-            {
-                out.push((id, status));
-            }
-        }
-        out
+        let ids: Vec<ModuleId> = ModuleId::all_visible()
+            .into_iter()
+            .filter(|&id| id != exclude && self.contains(id))
+            .collect();
+
+        let futures = ids.iter().map(|&id| {
+            self.get(id)
+                .expect("just checked via contains")
+                .dashboard_summary(ctx)
+        });
+        let results = futures::future::join_all(futures).await;
+
+        ids.into_iter()
+            .zip(results)
+            .filter_map(|(id, status)| status.map(|s| (id, s)))
+            .collect()
     }
 }
 

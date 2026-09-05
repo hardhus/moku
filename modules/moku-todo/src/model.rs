@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::RngCore;
@@ -81,24 +81,45 @@ pub(crate) struct ViewRow {
 /// as today's flat list already relies on `Vec` order for top-level
 /// ordering, so no separate "order" field is needed.
 pub(crate) fn build_view(items: &[Task], collapsed: &HashSet<String>) -> Vec<ViewRow> {
-    let mut view = Vec::new();
-    walk_children(items, None, 0, collapsed, &mut view);
+    // Pre-index parent -> children once (O(n)) instead of having
+    // `walk_children` rescan the whole slice at every recursion level
+    // (which was O(n^2) overall for a tree of n tasks).
+    let mut children_of: HashMap<Option<&str>, Vec<usize>> = HashMap::new();
+    for (index, task) in items.iter().enumerate() {
+        children_of
+            .entry(task.parent_id.as_deref())
+            .or_default()
+            .push(index);
+    }
+
+    let mut view = Vec::with_capacity(items.len());
+    walk_children(items, &children_of, None, 0, collapsed, &mut view);
     view
 }
 
-fn walk_children(
-    items: &[Task],
-    parent_id: Option<&str>,
+fn walk_children<'a>(
+    items: &'a [Task],
+    children_of: &HashMap<Option<&'a str>, Vec<usize>>,
+    parent_id: Option<&'a str>,
     depth: usize,
     collapsed: &HashSet<String>,
     view: &mut Vec<ViewRow>,
 ) {
-    for (index, task) in items.iter().enumerate() {
-        if task.parent_id.as_deref() == parent_id {
-            view.push(ViewRow { index, depth });
-            if !collapsed.contains(&task.id) {
-                walk_children(items, Some(task.id.as_str()), depth + 1, collapsed, view);
-            }
+    let Some(indices) = children_of.get(&parent_id) else {
+        return;
+    };
+    for &index in indices {
+        let task = &items[index];
+        view.push(ViewRow { index, depth });
+        if !collapsed.contains(&task.id) {
+            walk_children(
+                items,
+                children_of,
+                Some(task.id.as_str()),
+                depth + 1,
+                collapsed,
+                view,
+            );
         }
     }
 }

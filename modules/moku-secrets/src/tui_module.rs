@@ -7,8 +7,10 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
+    text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
+use zeroize::Zeroizing;
 
 use moku_core::{
     AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
@@ -18,40 +20,56 @@ use crate::engine::{self, PlainFormat};
 use crate::generator::{self, CharsetOptions};
 use crate::model::SecretEntry;
 
-/// Which field of the (name, value) quick-add flow is currently being
-/// typed. v1's TUI add flow is deliberately scoped to just these two
-/// fields — category/username/url/notes stay CLI-only, same kind of
-/// scope cut as `VaultManagerModule` not exposing `create`/`resize`.
-#[derive(PartialEq, Eq)]
-enum AddStage {
+/// Which field of the (name, value) quick-add form currently has keyboard
+/// focus. Both fields are shown at once — `Tab` switches focus, `Enter`
+/// submits from either — matching `moku-vault-daemon`'s `CreateForm`/
+/// `CreateField` shape, not a sequential per-field wizard. v1's TUI add
+/// flow is deliberately scoped to just these two fields —
+/// category/username/url/notes stay CLI-only, same kind of scope cut as
+/// `VaultManagerModule` not exposing `create`/`resize`.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum AddField {
     Name,
     Value,
 }
 
 struct AddState {
-    stage: AddStage,
+    focus: AddField,
     name: String,
-    value: String,
+    /// Zeroized on drop — this is the secret itself while it's being
+    /// typed, not just a display string.
+    value: Zeroizing<String>,
+    error: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ExportKind {
     Encrypted,
     Json,
     Csv,
 }
 
-enum ExportStage {
-    ChooseFormat,
+/// Which field of the export form has focus — `Format` isn't a text field
+/// (`←`/`→`/`Space` cycle it, same as `CreateForm`'s `Mode`); `Password`
+/// only matters (and is only reachable via `Tab`) when `kind ==
+/// Encrypted`.
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum ExportField {
+    Format,
     Path,
     Password,
 }
 
 struct ExportState {
-    stage: ExportStage,
-    kind: Option<ExportKind>,
+    focus: ExportField,
+    kind: ExportKind,
     path: String,
-    password: String,
+    /// Zeroized on drop — a fresh backup password, typed once (no
+    /// confirmation field: unlike a vault's own password this only
+    /// protects a single throwaway export file, so a typo just means a
+    /// bad backup rather than a locked-out vault).
+    password: Zeroizing<String>,
+    error: Option<String>,
 }
 
 pub struct SecretsModule {
@@ -170,52 +188,56 @@ impl SecretsModule {
 
         match key.code {
             KeyCode::Esc => keep_open = false,
-            KeyCode::Enter => match add.stage {
-                AddStage::Name => {
-                    if add.name.trim().is_empty() {
-                        self.show_message("Name cannot be empty.");
-                    } else if engine::find_by_name(&self.entries, &add.name).is_some() {
-                        self.show_message(format!("'{}' already exists.", add.name));
-                    } else {
-                        add.stage = AddStage::Value;
-                    }
-                }
-                AddStage::Value => {
+            KeyCode::Tab => {
+                add.focus = match add.focus {
+                    AddField::Name => AddField::Value,
+                    AddField::Value => AddField::Name,
+                };
+            }
+            KeyCode::Enter => {
+                let name = add.name.trim().to_string();
+                if name.is_empty() {
+                    add.error = Some("Name cannot be empty.".to_string());
+                } else if engine::find_by_name(&self.entries, &name).is_some() {
+                    add.error = Some(format!("'{name}' already exists."));
+                } else if add.value.is_empty() {
+                    add.error = Some("Value cannot be empty.".to_string());
+                } else {
                     keep_open = false;
-                    let name = add.name.trim().to_string();
-                    if add.value.is_empty() {
-                        self.show_message("Value cannot be empty — entry not added.");
-                    } else {
-                        self.entries
-                            .push(SecretEntry::new(name.clone(), add.value.clone()));
-                        self.state.select(Some(self.entries.len() - 1));
-                        self.save(ctx).await;
-                        self.show_message(format!("Added '{name}'"));
-                    }
-                }
-            },
-            // Ctrl+G on the value field: auto-generate instead of typing.
-            KeyCode::Char('g')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && add.stage == AddStage::Value =>
-            {
-                match generator::generate_charset_password(&CharsetOptions::default()) {
-                    Ok(pw) => add.value = pw,
-                    Err(e) => self.show_message(format!("Generate failed: {e}")),
+                    self.entries
+                        .push(SecretEntry::new(name.clone(), add.value.to_string()));
+                    self.state.select(Some(self.entries.len() - 1));
+                    self.save(ctx).await;
+                    self.show_message(format!("Added '{name}'"));
                 }
             }
-            KeyCode::Char(c) => match add.stage {
-                AddStage::Name => add.name.push(c),
-                AddStage::Value => add.value.push(c),
-            },
-            KeyCode::Backspace => match add.stage {
-                AddStage::Name => {
-                    add.name.pop();
+            // Ctrl+G on the value field: auto-generate instead of typing.
+            KeyCode::Char('g')
+                if key.modifiers.contains(KeyModifiers::CONTROL) && add.focus == AddField::Value =>
+            {
+                match generator::generate_charset_password(&CharsetOptions::default()) {
+                    Ok(pw) => add.value = Zeroizing::new(pw),
+                    Err(e) => add.error = Some(format!("Generate failed: {e}")),
                 }
-                AddStage::Value => {
-                    add.value.pop();
+            }
+            KeyCode::Char(c) => {
+                match add.focus {
+                    AddField::Name => add.name.push(c),
+                    AddField::Value => add.value.push(c),
                 }
-            },
+                add.error = None;
+            }
+            KeyCode::Backspace => {
+                match add.focus {
+                    AddField::Name => {
+                        add.name.pop();
+                    }
+                    AddField::Value => {
+                        add.value.pop();
+                    }
+                }
+                add.error = None;
+            }
             _ => {}
         }
 
@@ -229,49 +251,54 @@ impl SecretsModule {
         let Some(export) = &mut self.export else {
             return false;
         };
-        match &export.stage {
-            ExportStage::ChooseFormat => match key.code {
-                KeyCode::Char('1') => {
-                    export.kind = Some(ExportKind::Encrypted);
-                    export.stage = ExportStage::Path;
+        match key.code {
+            KeyCode::Esc => self.export = None,
+            KeyCode::Tab => {
+                export.focus = match export.focus {
+                    ExportField::Format => ExportField::Path,
+                    ExportField::Path if export.kind == ExportKind::Encrypted => ExportField::Password,
+                    ExportField::Path => ExportField::Format,
+                    ExportField::Password => ExportField::Format,
+                };
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if export.focus == ExportField::Format =>
+            {
+                export.kind = match export.kind {
+                    ExportKind::Encrypted => ExportKind::Json,
+                    ExportKind::Json => ExportKind::Csv,
+                    ExportKind::Csv => ExportKind::Encrypted,
+                };
+                export.error = None;
+            }
+            KeyCode::Enter => {
+                if export.path.trim().is_empty() {
+                    export.error = Some("Path cannot be empty.".to_string());
+                } else {
+                    self.finish_export().await;
                 }
-                KeyCode::Char('2') => {
-                    export.kind = Some(ExportKind::Json);
-                    export.stage = ExportStage::Path;
+            }
+            KeyCode::Char(c) => {
+                match export.focus {
+                    ExportField::Format => {}
+                    ExportField::Path => export.path.push(c),
+                    ExportField::Password => export.password.push(c),
                 }
-                KeyCode::Char('3') => {
-                    export.kind = Some(ExportKind::Csv);
-                    export.stage = ExportStage::Path;
-                }
-                KeyCode::Esc => self.export = None,
-                _ => return false,
-            },
-            ExportStage::Path => match key.code {
-                KeyCode::Enter => {
-                    if export.path.trim().is_empty() {
-                        self.show_message("Path cannot be empty.");
-                    } else if export.kind == Some(ExportKind::Encrypted) {
-                        export.stage = ExportStage::Password;
-                    } else {
-                        self.finish_export().await;
+                export.error = None;
+            }
+            KeyCode::Backspace => {
+                match export.focus {
+                    ExportField::Format => {}
+                    ExportField::Path => {
+                        export.path.pop();
+                    }
+                    ExportField::Password => {
+                        export.password.pop();
                     }
                 }
-                KeyCode::Esc => self.export = None,
-                KeyCode::Char(c) => export.path.push(c),
-                KeyCode::Backspace => {
-                    export.path.pop();
-                }
-                _ => return false,
-            },
-            ExportStage::Password => match key.code {
-                KeyCode::Enter => self.finish_export().await,
-                KeyCode::Esc => self.export = None,
-                KeyCode::Char(c) => export.password.push(c),
-                KeyCode::Backspace => {
-                    export.password.pop();
-                }
-                _ => return false,
-            },
+                export.error = None;
+            }
+            _ => return false,
         }
         true
     }
@@ -280,15 +307,18 @@ impl SecretsModule {
         let Some(export) = self.export.take() else {
             return;
         };
-        let Some(kind) = export.kind else { return };
-        let result = match kind {
-            ExportKind::Json => engine::export_plain(&self.entries, PlainFormat::Json)
-                .and_then(|b| std::fs::write(&export.path, b).map_err(Into::into)),
-            ExportKind::Csv => engine::export_plain(&self.entries, PlainFormat::Csv)
-                .and_then(|b| std::fs::write(&export.path, b).map_err(Into::into)),
+        let result: Result<()> = match export.kind {
+            ExportKind::Json => match engine::export_plain(&self.entries, PlainFormat::Json) {
+                Ok(bytes) => tokio::fs::write(&export.path, bytes).await.map_err(Into::into),
+                Err(e) => Err(e),
+            },
+            ExportKind::Csv => match engine::export_plain(&self.entries, PlainFormat::Csv) {
+                Ok(bytes) => tokio::fs::write(&export.path, bytes).await.map_err(Into::into),
+                Err(e) => Err(e),
+            },
             ExportKind::Encrypted => {
                 match engine::export_encrypted(&self.entries, &export.password).await {
-                    Ok(bytes) => std::fs::write(&export.path, bytes).map_err(Into::into),
+                    Ok(bytes) => tokio::fs::write(&export.path, bytes).await.map_err(Into::into),
                     Err(e) => Err(e),
                 }
             }
@@ -346,38 +376,55 @@ impl SecretsModule {
     fn draw_add(&self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
         let Some(add) = &self.add else { return };
         let chunks = Layout::vertical([
-            Constraint::Percentage(40),
-            Constraint::Length(3),
+            Constraint::Percentage(35),
+            Constraint::Length(4),
             Constraint::Length(2),
-            Constraint::Percentage(40),
+            Constraint::Percentage(35),
         ])
         .split(area);
-        let input_chunk = Layout::horizontal([
-            Constraint::Percentage(25),
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
+        let box_area = Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
         ])
         .split(chunks[1])[1];
 
-        let (title, shown) = match add.stage {
-            AddStage::Name => (" New secret — name ", add.name.clone()),
-            AddStage::Value => (
-                " New secret — value (Ctrl+G to generate) ",
-                "•".repeat(add.value.chars().count()),
-            ),
+        let field_style = |focused: bool| {
+            if focused {
+                Style::default().fg(theme.selection_fg)
+            } else {
+                Style::default().fg(theme.base_fg)
+            }
         };
-        let p = Paragraph::new(shown)
+        let marker = |focused: bool| if focused { ">" } else { " " };
+
+        let masked_value: String = add.value.chars().map(|_| '•').collect();
+        let mut lines = vec![
+            Line::styled(
+                format!("{} Name:  {}", marker(add.focus == AddField::Name), add.name),
+                field_style(add.focus == AddField::Name),
+            ),
+            Line::styled(
+                format!("{} Value: {}", marker(add.focus == AddField::Value), masked_value),
+                field_style(add.focus == AddField::Value),
+            ),
+        ];
+        if let Some(err) = &add.error {
+            lines.push(Line::styled(format!("  {err}"), Style::default().fg(theme.error)));
+        }
+
+        let p = Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title(title)
+                    .title(" New Secret ")
                     .title_alignment(Alignment::Center)
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.info)),
             )
-            .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
-        frame.render_widget(p, input_chunk);
+            .style(Style::default().bg(theme.base_bg));
+        frame.render_widget(p, box_area);
 
-        let hint = Paragraph::new("[Enter] next/confirm  [Esc] cancel")
+        let hint = Paragraph::new("[Tab] Switch field  [Ctrl+G] Generate  [Enter] Add  [Esc] Cancel")
             .alignment(Alignment::Center)
             .style(Style::default().fg(theme.base_fg));
         frame.render_widget(hint, chunks[2]);
@@ -386,41 +433,75 @@ impl SecretsModule {
     fn draw_export(&self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
         let Some(export) = &self.export else { return };
         let chunks = Layout::vertical([
-            Constraint::Percentage(40),
-            Constraint::Length(3),
+            Constraint::Percentage(35),
+            Constraint::Length(5),
             Constraint::Length(2),
-            Constraint::Percentage(40),
+            Constraint::Percentage(35),
         ])
         .split(area);
-        let input_chunk = Layout::horizontal([
+        let box_area = Layout::horizontal([
             Constraint::Percentage(20),
             Constraint::Percentage(60),
             Constraint::Percentage(20),
         ])
         .split(chunks[1])[1];
 
-        let (title, shown) = match export.stage {
-            ExportStage::ChooseFormat => {
-                (" Export — [1] Encrypted  [2] JSON  [3] CSV ", String::new())
+        let field_style = |focused: bool| {
+            if focused {
+                Style::default().fg(theme.selection_fg)
+            } else {
+                Style::default().fg(theme.base_fg)
             }
-            ExportStage::Path => (" Export — output file path ", export.path.clone()),
-            ExportStage::Password => (
-                " Export — new password for this backup ",
-                "•".repeat(export.password.chars().count()),
-            ),
         };
-        let p = Paragraph::new(shown)
+        let marker = |focused: bool| if focused { ">" } else { " " };
+
+        let format_label = match export.kind {
+            ExportKind::Encrypted => "Encrypted",
+            ExportKind::Json => "JSON",
+            ExportKind::Csv => "CSV",
+        };
+
+        let mut lines = vec![
+            Line::styled(
+                format!(
+                    "{} Format: {}  (\u{2190}/\u{2192} to change)",
+                    marker(export.focus == ExportField::Format),
+                    format_label
+                ),
+                field_style(export.focus == ExportField::Format),
+            ),
+            Line::styled(
+                format!("{} Path:   {}", marker(export.focus == ExportField::Path), export.path),
+                field_style(export.focus == ExportField::Path),
+            ),
+        ];
+        if export.kind == ExportKind::Encrypted {
+            let masked_password: String = export.password.chars().map(|_| '•').collect();
+            lines.push(Line::styled(
+                format!(
+                    "{} Password: {}",
+                    marker(export.focus == ExportField::Password),
+                    masked_password
+                ),
+                field_style(export.focus == ExportField::Password),
+            ));
+        }
+        if let Some(err) = &export.error {
+            lines.push(Line::styled(format!("  {err}"), Style::default().fg(theme.error)));
+        }
+
+        let p = Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title(title)
+                    .title(" Export Secrets ")
                     .title_alignment(Alignment::Center)
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.info)),
             )
-            .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
-        frame.render_widget(p, input_chunk);
+            .style(Style::default().bg(theme.base_bg));
+        frame.render_widget(p, box_area);
 
-        let hint = Paragraph::new("[Enter] confirm  [Esc] cancel")
+        let hint = Paragraph::new("[Tab] Switch field  [\u{2190}/\u{2192}] Change format  [Enter] Export  [Esc] Cancel")
             .alignment(Alignment::Center)
             .style(Style::default().fg(theme.base_fg));
         frame.render_widget(hint, chunks[2]);
@@ -492,9 +573,10 @@ impl TuiModule for SecretsModule {
         match key.code {
             KeyCode::Char('a') => {
                 self.add = Some(AddState {
-                    stage: AddStage::Name,
+                    focus: AddField::Name,
                     name: String::new(),
-                    value: String::new(),
+                    value: Zeroizing::new(String::new()),
+                    error: None,
                 });
             }
             KeyCode::Char('d') => {
@@ -505,10 +587,11 @@ impl TuiModule for SecretsModule {
             KeyCode::Char('r') => self.reveal = !self.reveal,
             KeyCode::Char('e') => {
                 self.export = Some(ExportState {
-                    stage: ExportStage::ChooseFormat,
-                    kind: None,
+                    focus: ExportField::Format,
+                    kind: ExportKind::Encrypted,
                     path: String::new(),
-                    password: String::new(),
+                    password: Zeroizing::new(String::new()),
+                    error: None,
                 });
             }
             _ => return Ok(false),
@@ -794,5 +877,265 @@ mod dashboard_summary_tests {
         let status = module.dashboard_summary(&ctx).await.unwrap();
         assert_eq!(status.tone, moku_core::StatusTone::Normal);
         assert_eq!(status.text, "2 secrets");
+    }
+}
+
+#[cfg(test)]
+mod add_export_form_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::empty()))
+    }
+
+    fn new_add_module() -> SecretsModule {
+        let mut module = SecretsModule::new();
+        module.add = Some(AddState {
+            focus: AddField::Name,
+            name: String::new(),
+            value: Zeroizing::new(String::new()),
+            error: None,
+        });
+        module
+    }
+
+    fn new_export_module() -> SecretsModule {
+        let mut module = SecretsModule::new();
+        module.export = Some(ExportState {
+            focus: ExportField::Format,
+            kind: ExportKind::Encrypted,
+            path: String::new(),
+            password: Zeroizing::new(String::new()),
+            error: None,
+        });
+        module
+    }
+
+    #[tokio::test]
+    async fn test_add_tab_cycles_focus_between_name_and_value() {
+        let mut module = new_add_module();
+        let mut ctx = create_test_context().await;
+
+        assert_eq!(module.add.as_ref().unwrap().focus, AddField::Name);
+        module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
+        assert_eq!(module.add.as_ref().unwrap().focus, AddField::Value);
+        module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
+        assert_eq!(module.add.as_ref().unwrap().focus, AddField::Name);
+    }
+
+    #[tokio::test]
+    async fn test_add_char_input_routes_to_the_focused_field() {
+        let mut module = new_add_module();
+        let mut ctx = create_test_context().await;
+
+        module.handle_event(&key(KeyCode::Char('g')), &mut ctx).await.unwrap();
+        assert_eq!(module.add.as_ref().unwrap().name, "g");
+
+        module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
+        module.handle_event(&key(KeyCode::Char('h')), &mut ctx).await.unwrap();
+        assert_eq!(module.add.as_ref().unwrap().value.as_str(), "h");
+    }
+
+    #[tokio::test]
+    async fn test_add_enter_with_empty_name_sets_error_and_keeps_form_open() {
+        let mut module = new_add_module();
+        let mut ctx = create_test_context().await;
+
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+        let add = module.add.as_ref().expect("form should stay open");
+        assert!(add.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_add_enter_with_empty_value_sets_error_and_keeps_form_open() {
+        let mut module = new_add_module();
+        module.add.as_mut().unwrap().name = "github".to_string();
+        let mut ctx = create_test_context().await;
+
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+        let add = module.add.as_ref().expect("form should stay open");
+        assert!(add.error.as_ref().unwrap().contains("Value"));
+    }
+
+    #[tokio::test]
+    async fn test_add_enter_with_valid_fields_submits_and_closes() {
+        let mut module = new_add_module();
+        {
+            let add = module.add.as_mut().unwrap();
+            add.name = "github".to_string();
+            add.value = Zeroizing::new("hunter2".to_string());
+        }
+        let mut ctx = create_test_context().await;
+
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+        assert!(module.add.is_none(), "valid fields should submit and close the form");
+        assert_eq!(module.entries.len(), 1);
+        assert_eq!(module.entries[0].name, "github");
+        assert_eq!(module.entries[0].value.as_str(), "hunter2");
+    }
+
+    #[tokio::test]
+    async fn test_add_esc_cancels_the_form() {
+        let mut module = new_add_module();
+        let mut ctx = create_test_context().await;
+
+        module.handle_event(&key(KeyCode::Esc), &mut ctx).await.unwrap();
+        assert!(module.add.is_none());
+    }
+
+    #[test]
+    fn test_add_render_shows_masked_value_not_plaintext() {
+        let mut module = new_add_module();
+        module.add.as_mut().unwrap().value = Zeroizing::new("hunter2".to_string());
+
+        let (width, height) = (60u16, 20u16);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| module.draw(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!content.contains("hunter2"));
+        assert!(content.contains("•"));
+    }
+
+    #[tokio::test]
+    async fn test_export_tab_cycles_through_password_when_encrypted() {
+        let mut module = new_export_module(); // kind starts as Encrypted
+        let mut ctx = create_test_context().await;
+
+        assert_eq!(module.export.as_ref().unwrap().focus, ExportField::Format);
+        module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
+        assert_eq!(module.export.as_ref().unwrap().focus, ExportField::Path);
+        module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
+        assert_eq!(module.export.as_ref().unwrap().focus, ExportField::Password);
+        module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
+        assert_eq!(module.export.as_ref().unwrap().focus, ExportField::Format);
+    }
+
+    #[tokio::test]
+    async fn test_export_tab_skips_password_when_not_encrypted() {
+        let mut module = new_export_module();
+        module.export.as_mut().unwrap().kind = ExportKind::Json;
+        let mut ctx = create_test_context().await;
+
+        module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
+        assert_eq!(module.export.as_ref().unwrap().focus, ExportField::Path);
+        module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
+        assert_eq!(
+            module.export.as_ref().unwrap().focus,
+            ExportField::Format,
+            "JSON/CSV exports have no password field to tab into"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_left_right_cycles_format() {
+        let mut module = new_export_module();
+        let mut ctx = create_test_context().await;
+
+        assert_eq!(module.export.as_ref().unwrap().kind, ExportKind::Encrypted);
+        module.handle_event(&key(KeyCode::Right), &mut ctx).await.unwrap();
+        assert_eq!(module.export.as_ref().unwrap().kind, ExportKind::Json);
+        module.handle_event(&key(KeyCode::Right), &mut ctx).await.unwrap();
+        assert_eq!(module.export.as_ref().unwrap().kind, ExportKind::Csv);
+        module.handle_event(&key(KeyCode::Right), &mut ctx).await.unwrap();
+        assert_eq!(module.export.as_ref().unwrap().kind, ExportKind::Encrypted);
+    }
+
+    #[tokio::test]
+    async fn test_export_enter_with_empty_path_sets_error_and_keeps_form_open() {
+        let mut module = new_export_module();
+        let mut ctx = create_test_context().await;
+
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+        let export = module.export.as_ref().expect("form should stay open");
+        assert!(export.error.as_ref().unwrap().contains("Path"));
+    }
+
+    #[tokio::test]
+    async fn test_export_esc_cancels_the_form() {
+        let mut module = new_export_module();
+        let mut ctx = create_test_context().await;
+
+        module.handle_event(&key(KeyCode::Esc), &mut ctx).await.unwrap();
+        assert!(module.export.is_none());
+    }
+
+    #[test]
+    fn test_export_render_hides_password_field_for_non_encrypted_format() {
+        let mut module = new_export_module();
+        module.export.as_mut().unwrap().kind = ExportKind::Json;
+
+        let (width, height) = (60u16, 20u16);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| module.draw(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!content.contains("Password"));
+    }
+
+    #[test]
+    fn test_export_render_shows_password_field_for_encrypted_format() {
+        let mut module = new_export_module(); // kind starts as Encrypted
+
+        let (width, height) = (60u16, 20u16);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = MokuTheme::default();
+        terminal
+            .draw(|frame| module.draw(frame, Rect::new(0, 0, width, height), &theme))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("Password"));
     }
 }

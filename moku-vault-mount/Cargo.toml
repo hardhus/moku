@@ -35,3 +35,4 @@ libc = "0.2"
 moku-core.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
+zeroize.workspace = true

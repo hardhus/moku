@@ -13,3 +13,5 @@ mlua.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true
+arc-swap.workspace = true

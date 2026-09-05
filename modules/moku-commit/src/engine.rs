@@ -100,7 +100,7 @@ impl CommitEngine {
         let truncated_diff = if diff.len() > self.settings.char_limit {
             format!(
                 "{}\n\n[... DIFF TRUNCATED (Limit: {}) ...]",
-                &diff[..self.settings.char_limit],
+                moku_core::util::truncate_at_char_boundary(diff, self.settings.char_limit),
                 self.settings.char_limit
             )
         } else {
@@ -110,7 +110,10 @@ impl CommitEngine {
         let prompt = build_prompt(&self.settings, &truncated_diff);
         let url = build_api_url(&self.settings);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .context("failed to build HTTP client")?;
         let response = client
             .post(&url)
             .header("x-goog-api-key", api_key)

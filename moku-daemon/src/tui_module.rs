@@ -123,13 +123,21 @@ impl TuiModule for DaemonStatusModule {
                                     use std::os::windows::process::CommandExt;
                                     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
                                 }
-                                let _ = cmd.spawn();
-                                tokio::time::sleep(Duration::from_millis(200)).await;
-                                self.refresh_status();
-                                if self.is_running {
-                                    self.show_temp_message("Daemon started successfully.");
-                                } else {
-                                    self.show_temp_message("Daemon starting spawned.");
+                                match cmd.spawn() {
+                                    Ok(_) => {
+                                        tokio::time::sleep(Duration::from_millis(200)).await;
+                                        self.refresh_status();
+                                        if self.is_running {
+                                            self.show_temp_message("Daemon started successfully.");
+                                        } else {
+                                            self.show_temp_message("Daemon starting spawned.");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.show_temp_message(format!(
+                                            "Failed to start daemon: {e}"
+                                        ));
+                                    }
                                 }
                             } else {
                                 self.show_temp_message("Failed to find current executable path.");
@@ -274,7 +282,9 @@ impl TuiModule for DaemonStatusModule {
                         .unwrap_or_else(|| "never".to_string());
                     let status = match &t.last_error {
                         None => format!("OK (processed: {})", t.last_item_count),
-                        Some(e) => format!("ERR: {}", &e[..e.len().min(40)]),
+                        Some(e) => {
+                            format!("ERR: {}", moku_core::util::truncate_at_char_boundary(e, 40))
+                        }
                     };
                     ListItem::new(format!(
                         "  • [{}]  Last Run: {}  Status: {}",

@@ -9,3 +9,9 @@ anyhow.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 async-trait.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+arc-swap.workspace = true

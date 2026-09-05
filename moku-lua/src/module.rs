@@ -99,7 +99,13 @@ impl TuiModule for LuaModule {
         let key_str = key_event_to_string(key);
 
         let lua_changed = match self.lua.globals().get::<mlua::Function>("on_event") {
-            Ok(func) => func.call::<bool>(key_str).unwrap_or(false),
+            Ok(func) => match func.call::<bool>(key_str) {
+                Ok(changed) => changed,
+                Err(e) => {
+                    ctx.show_error(format!("Lua on_event error: {e}"));
+                    false
+                }
+            },
             Err(_) => false,
         };
 
@@ -195,5 +201,177 @@ mod tests {
         let script = write_temp_script("this is not valid lua ((((");
         let module = LuaModule::load(ModuleId::new("test_lua_bad"), "Bad", script.path());
         assert!(module.is_err());
+    }
+
+    async fn build_test_context() -> AppContext {
+        use std::sync::Arc;
+
+        use arc_swap::ArcSwap;
+        use moku_core::security::{SecurityManager, VaultSession};
+        use moku_core::{MokuConfig, StorageManager};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    fn empty_module() -> LuaModule {
+        let script = write_temp_script("-- no handlers defined");
+        LuaModule::load(ModuleId::new("test_lua_empty"), "Empty", script.path()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_drain_bridge_applies_navigate_to_launcher() {
+        let module = empty_module();
+        module.bridge.lock().unwrap().navigate_to = Some("launcher".to_string());
+        let mut ctx = build_test_context().await;
+
+        let changed = module.drain_bridge(&mut ctx);
+        assert!(changed);
+        assert_eq!(ctx.take_navigation(), Some(ModuleId::LAUNCHER));
+    }
+
+    #[tokio::test]
+    async fn test_drain_bridge_warns_on_unknown_navigate_target() {
+        let module = empty_module();
+        module.bridge.lock().unwrap().navigate_to = Some("some-other-plugin".to_string());
+        let mut ctx = build_test_context().await;
+
+        module.drain_bridge(&mut ctx);
+        assert!(ctx.take_navigation().is_none());
+        let toasts = ctx.drain_toasts();
+        assert_eq!(toasts.len(), 1);
+        assert!(toasts[0].0.contains("some-other-plugin"));
+    }
+
+    #[tokio::test]
+    async fn test_drain_bridge_applies_toasts_of_each_kind() {
+        let module = empty_module();
+        {
+            let mut b = module.bridge.lock().unwrap();
+            b.toasts.push(("info msg".to_string(), ToastKind::Info));
+            b.toasts.push(("warn msg".to_string(), ToastKind::Warning));
+            b.toasts.push(("err msg".to_string(), ToastKind::Error));
+        }
+        let mut ctx = build_test_context().await;
+
+        let changed = module.drain_bridge(&mut ctx);
+        assert!(changed);
+        let toasts = ctx.drain_toasts();
+        assert_eq!(toasts.len(), 3);
+        assert_eq!(toasts[0].0, "info msg");
+        assert_eq!(toasts[1].0, "warn msg");
+        assert_eq!(toasts[2].0, "err msg");
+    }
+
+    #[tokio::test]
+    async fn test_drain_bridge_applies_quit() {
+        let module = empty_module();
+        module.bridge.lock().unwrap().quit = true;
+        let mut ctx = build_test_context().await;
+
+        let changed = module.drain_bridge(&mut ctx);
+        assert!(changed);
+        assert!(ctx.should_quit());
+    }
+
+    #[tokio::test]
+    async fn test_drain_bridge_reports_no_change_when_bridge_is_empty() {
+        let module = empty_module();
+        let mut ctx = build_test_context().await;
+
+        assert!(!module.drain_bridge(&mut ctx));
+    }
+
+    #[test]
+    fn test_key_event_to_string_plain_char() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty());
+        assert_eq!(key_event_to_string(&key), "q");
+    }
+
+    #[test]
+    fn test_key_event_to_string_with_modifiers_in_ctrl_alt_shift_order() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+        );
+        assert_eq!(key_event_to_string(&key), "ctrl-alt-shift-s");
+    }
+
+    #[test]
+    fn test_key_event_to_string_named_keys() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        assert_eq!(
+            key_event_to_string(&KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+            "enter"
+        );
+        assert_eq!(
+            key_event_to_string(&KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            "esc"
+        );
+        assert_eq!(
+            key_event_to_string(&KeyEvent::new(KeyCode::Up, KeyModifiers::empty())),
+            "up"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_calls_on_event_and_returns_its_result() {
+        let script = write_temp_script(
+            r#"
+            function on_event(key)
+                return key == "q"
+            end
+            "#,
+        );
+        let mut module = LuaModule::load(ModuleId::new("test_lua_event"), "Event", script.path()).unwrap();
+        let mut ctx = build_test_context().await;
+
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        let mut key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty());
+        key.kind = KeyEventKind::Press;
+        let changed = module.handle_event(&Event::Key(key), &mut ctx).await.unwrap();
+        assert!(changed, "on_event returning true should report a change");
+
+        let mut key2 = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty());
+        key2.kind = KeyEventKind::Press;
+        let changed2 = module.handle_event(&Event::Key(key2), &mut ctx).await.unwrap();
+        assert!(!changed2, "on_event returning false should report no change");
+    }
+
+    #[tokio::test]
+    async fn test_handle_event_surfaces_lua_runtime_error_via_show_error() {
+        let script = write_temp_script(
+            r#"
+            function on_event(key)
+                error("boom")
+            end
+            "#,
+        );
+        let mut module = LuaModule::load(ModuleId::new("test_lua_err"), "Err", script.path()).unwrap();
+        let mut ctx = build_test_context().await;
+
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        let mut key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty());
+        key.kind = KeyEventKind::Press;
+        let changed = module.handle_event(&Event::Key(key), &mut ctx).await.unwrap();
+        assert!(!changed);
+
+        let toasts = ctx.drain_toasts();
+        assert_eq!(toasts.len(), 1, "a Lua runtime error must surface as a toast, not vanish silently");
+        assert!(toasts[0].0.contains("boom"));
     }
 }

@@ -175,7 +175,9 @@ async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
         return Ok(());
     }
 
-    let password = rpassword::prompt_password("Moku vault password: ").map_err(|e| anyhow!("Failed to read password: {e}"))?;
+    let password = zeroize::Zeroizing::new(
+        rpassword::prompt_password("Moku vault password: ").map_err(|e| anyhow!("Failed to read password: {e}"))?,
+    );
     let result = if security.is_vault_initialized() { security.unlock_vault(password).await } else { security.initialize_vault(password).await };
     match result {
         Ok(key) => {

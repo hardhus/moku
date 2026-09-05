@@ -3,12 +3,33 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+/// Bridges `Zeroizing<String>` through serde as a plain string — needed
+/// because `Zeroizing<T>` doesn't implement `Serialize`/`Deserialize`
+/// itself. `SecretEntry` is still encrypted at rest by `StorageManager`
+/// exactly as before; this only guarantees the decrypted value is wiped
+/// from memory on drop, closing the "secret held in a plain `String` for
+/// the module's whole lifetime" gap.
+mod zeroizing_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S: Serializer>(value: &Zeroizing<String>, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(value)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Zeroizing<String>, D::Error> {
+        Ok(Zeroizing::new(String::deserialize(deserializer)?))
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SecretEntry {
     pub id: String,
     pub name: String,
-    pub value: String,
+    #[serde(with = "zeroizing_string")]
+    pub value: Zeroizing<String>,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
@@ -30,7 +51,7 @@ impl SecretEntry {
         Self {
             id: random_id(),
             name,
-            value,
+            value: Zeroizing::new(value),
             category: None,
             username: None,
             url: None,

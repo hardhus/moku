@@ -5,6 +5,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use moku_core::SafeKey;
 use moku_vault_fs::{VolumeEngine, derive_volume_keys};
 use secrecy::SecretBox;
+use zeroize::Zeroizing;
 
 use crate::registry;
 use crate::status;
@@ -26,7 +27,7 @@ const MOUNT_READY_SENTINEL: &str = "MOKU_MOUNT_READY";
 /// no-reprompt fast path for Default-mode volumes — see
 /// `registry::resolve_volume_master_key`).
 fn read_mount_secret_from_stdin() -> Result<registry::MountSecret> {
-    let mut buf = Vec::new();
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
     std::io::stdin()
         .read_to_end(&mut buf)
         .context("failed to read mount secret from stdin")?;
@@ -39,8 +40,9 @@ fn read_mount_secret_from_stdin() -> Result<registry::MountSecret> {
             ))))
         }
         Some((0x00, rest)) => {
-            let password =
-                String::from_utf8(rest.to_vec()).context("password payload was not valid UTF-8")?;
+            let password: Zeroizing<String> = Zeroizing::new(
+                String::from_utf8(rest.to_vec()).context("password payload was not valid UTF-8")?,
+            );
             Ok(registry::MountSecret::Password(
                 password.trim_end_matches(['\n', '\r']).to_string(),
             ))
@@ -180,7 +182,7 @@ enum WorkerEvent {
 fn spawn_mount_process_inner(
     volume_id: &str,
     mountpoint: &str,
-    stdin_payload: Vec<u8>,
+    stdin_payload: Zeroizing<Vec<u8>>,
 ) -> Result<(u32, tokio::sync::mpsc::UnboundedReceiver<WorkerEvent>)> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow!("failed to resolve current executable: {e}"))?;
@@ -270,7 +272,7 @@ fn spawn_mount_process_inner(
 async fn run_and_wait_for_outcome(
     volume_id: &str,
     mountpoint: &str,
-    stdin_payload: Vec<u8>,
+    stdin_payload: Zeroizing<Vec<u8>>,
 ) -> Result<MountOutcome> {
     let (pid, mut rx) = spawn_mount_process_inner(volume_id, mountpoint, stdin_payload)?;
     let mut last_stderr_line: Option<String> = None;
@@ -312,7 +314,7 @@ pub async fn spawn_mount_process(
     mountpoint: &str,
     password: &str,
 ) -> Result<MountOutcome> {
-    let mut payload = vec![0x00u8];
+    let mut payload: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0x00u8]);
     payload.extend_from_slice(password.as_bytes());
     run_and_wait_for_outcome(volume_id, mountpoint, payload).await
 }
@@ -329,7 +331,7 @@ pub async fn spawn_mount_process_with_key(
     key: &SecretBox<SafeKey>,
 ) -> Result<MountOutcome> {
     use secrecy::ExposeSecret;
-    let mut payload = vec![0x01u8];
+    let mut payload: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0x01u8]);
     payload.extend_from_slice(&key.expose_secret().0);
     run_and_wait_for_outcome(volume_id, mountpoint, payload).await
 }

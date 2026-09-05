@@ -49,13 +49,31 @@ pub async fn resolve_secret_refs(raw_source: &str, storage: &StorageManager, var
     for name in names {
         let entry = moku_secrets::engine::find_by_name(&entries, &name)
             .ok_or_else(|| anyhow!("secrets.{name} is referenced but no such secret exists"))?;
-        vars.insert(format!("secrets.{name}"), entry.value.clone());
+        vars.insert(format!("secrets.{name}"), entry.value.to_string());
     }
     Ok(())
 }
 
 fn to_json_body(value: &toml::Value) -> Result<serde_json::Value> {
     serde_json::to_value(value).context("failed to convert body_json to JSON")
+}
+
+/// Replaces every resolved `secrets.*` value found in `vars` with `***`
+/// inside `text`. Guards against a secret leaking into user-visible/logged
+/// text via an interpolated URL — e.g. `reqwest::Error`'s `Display` embeds
+/// the full request URL, so a transport failure on a request whose URL
+/// contains `{{secrets.NAME}}` would otherwise print the raw secret (same
+/// class of bug already fixed for the Gemini API key in
+/// modules/moku-commit/src/engine.rs, generalized here since moku-http
+/// lets *any* request field reference a secret).
+fn redact_secrets(text: &str, vars: &HashMap<String, String>) -> String {
+    let mut redacted = text.to_string();
+    for (key, value) in vars {
+        if key.starts_with("secrets.") && !value.is_empty() {
+            redacted = redacted.replace(value.as_str(), "***");
+        }
+    }
+    redacted
 }
 
 pub async fn run_request(client: &reqwest::Client, def: &RequestDef, vars: &mut HashMap<String, String>) -> RunResult {
@@ -72,7 +90,7 @@ pub async fn run_request(client: &reqwest::Client, def: &RequestDef, vars: &mut 
             duration,
             assertion_results: Vec::new(),
             body_preview: String::new(),
-            error: Some(e.to_string()),
+            error: Some(redact_secrets(&e.to_string(), vars)),
         },
     }
 }
@@ -162,7 +180,10 @@ pub async fn run_collection(
         resolve_secret_refs(&raw, storage, &mut vars).await?;
     }
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
     let mut results = Vec::new();
     for req in &collection.requests {
         if only.is_some_and(|name| name != req.name) {

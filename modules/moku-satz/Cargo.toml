@@ -11,6 +11,7 @@ clap.workspace = true
 serde.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+tokio.workspace = true
 
 # satz-core is the user's own Markdown-vault library (github.com/hardhus/satz,
 # a workspace with satz-core/satz-cli/satz-lsp members) — pulled as a git

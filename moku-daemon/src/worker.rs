@@ -93,7 +93,7 @@ pub async fn run_worker() -> Result<()> {
                 // at a time; release it here so the TUI/CLI can open the
                 // same DB between ticks (see DaemonTask::storage_module_ids).
                 for mid in task.storage_module_ids() {
-                    let _ = ctx.storage.close_db(mid);
+                    ctx.storage.close_db(mid).await;
                 }
 
                 let mut lock = statuses.lock().await;

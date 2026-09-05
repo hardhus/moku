@@ -149,8 +149,11 @@ pub fn write_range(
     let (logical_size, num_blocks) = logical_layout(physical_before);
     let cipher = BlockCipher::new(content_key);
 
+    let write_end = offset
+        .checked_add(data.len() as u64)
+        .ok_or_else(|| anyhow!("write offset overflow"))?;
     let start_block = offset / BLOCK_SIZE as u64;
-    let end_block = (offset + data.len() as u64 - 1) / BLOCK_SIZE as u64;
+    let end_block = (write_end - 1) / BLOCK_SIZE as u64;
     let last_existing_block = if num_blocks == 0 { None } else { Some(num_blocks - 1) };
 
     let tail_affected = match last_existing_block {
@@ -182,7 +185,7 @@ pub fn write_range(
     // physical layout would have a gap the contiguous-block scheme can't
     // represent.
     let tail_start = last_existing_block.map(|l| l.min(start_block)).unwrap_or(0);
-    let new_logical_size = logical_size.max(offset + data.len() as u64);
+    let new_logical_size = logical_size.max(write_end);
     let new_last_block = (new_logical_size - 1) / BLOCK_SIZE as u64;
 
     let mut appended = Vec::new();

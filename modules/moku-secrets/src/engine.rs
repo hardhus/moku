@@ -164,7 +164,7 @@ mod tests {
         let bytes = export_encrypted(&entries, "correct horse battery staple").await.unwrap();
         let imported = import_encrypted(&bytes, "correct horse battery staple").await.unwrap();
         assert_eq!(imported.len(), 2);
-        assert_eq!(imported[1].value, "sekrit");
+        assert_eq!(imported[1].value.as_str(), "sekrit");
     }
 
     #[tokio::test]

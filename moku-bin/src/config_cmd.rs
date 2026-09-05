@@ -10,8 +10,12 @@ use crate::cli::ConfigCommands;
 /// (module id, ModuleMeta::encrypt_by_default()) for every module whose
 /// storage encryption is actually resolved via moku_core::resolve_encryption
 /// today (see Faz 5) — kept in sync with the ModuleMeta::encrypt_by_default
-/// overrides in moku-todo, moku-bookmark and moku-rss.
-const ENCRYPTABLE_MODULES: &[(&str, bool)] = &[("todo", true), ("bookmark", true), ("rss", false)];
+/// overrides in moku-todo, moku-bookmark, moku-rss and moku-secrets, and
+/// with modules/moku-settings/src/tabs/storage.rs's identical list for the
+/// TUI equivalent. `secrets` is included so `config migrate` can also
+/// re-key it to the current per-module HKDF storage key scheme.
+const ENCRYPTABLE_MODULES: &[(&str, bool)] =
+    &[("todo", true), ("bookmark", true), ("rss", false), ("secrets", true)];
 
 pub async fn handle(
     sub: &ConfigCommands,
@@ -96,8 +100,10 @@ async fn ensure_unlocked_if_needed(
         return Ok(());
     }
 
-    let password = rpassword::prompt_password("Vault password: ")
-        .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+    let password = zeroize::Zeroizing::new(
+        rpassword::prompt_password("Vault password: ")
+            .map_err(|e| anyhow!("Failed to read password: {e}"))?,
+    );
 
     let result = if security.is_vault_initialized() {
         security.unlock_vault(password).await

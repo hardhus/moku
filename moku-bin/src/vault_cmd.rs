@@ -79,8 +79,10 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
                         "moku's vault isn't set up yet — initialize it first from the Vault Security screen in the TUI, or create this volume with --custom-password instead."
                     );
                 }
-                let password = rpassword::prompt_password("Moku vault password: ")
-                    .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+                let password = zeroize::Zeroizing::new(
+                    rpassword::prompt_password("Moku vault password: ")
+                        .map_err(|e| anyhow!("Failed to read password: {e}"))?,
+                );
                 let key = app_security
                     .unlock_vault(password)
                     .await

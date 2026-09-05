@@ -1,5 +1,19 @@
 use anyhow::{Result, bail};
 
+/// Truncates `s` to at most `max_bytes` bytes without splitting a UTF-8
+/// code point — plain `&s[..max_bytes]` panics ("byte index is not a char
+/// boundary") whenever `max_bytes` lands mid-codepoint, which is a real
+/// risk for any text of external origin (a git diff, an RSS feed's error
+/// text, ...) that isn't guaranteed ASCII. Any byte-offset truncation of
+/// such text should go through this helper instead of a raw slice index.
+pub fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Varsayılan tarayıcıda (ya da ilişkili uygulamada) bir URL/dosya açar.
 /// RSS modülünün "tarayıcıda aç" tuşu VE bildirim tıklama aksiyonları
 /// bu tek yeri paylaşır — mantık iki kez yazılmıyor. `url` bir RSS
@@ -100,5 +114,27 @@ mod tests {
     fn test_require_http_scheme_rejects_malformed_urls() {
         assert!(require_http_scheme("not a url at all").is_err());
         assert!(require_http_scheme("").is_err());
+    }
+
+    #[test]
+    fn test_truncate_at_char_boundary_ascii() {
+        assert_eq!(truncate_at_char_boundary("hello world", 5), "hello");
+        assert_eq!(truncate_at_char_boundary("hi", 10), "hi");
+        assert_eq!(truncate_at_char_boundary("hello", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_at_char_boundary_never_splits_a_codepoint() {
+        // "é" is 2 bytes (U+00E9 in UTF-8: 0xC3 0xA9) — a byte offset of 1
+        // would land mid-codepoint and panic on a raw `&s[..1]`.
+        let s = "é";
+        assert_eq!(s.len(), 2);
+        assert_eq!(truncate_at_char_boundary(s, 1), "");
+        assert_eq!(truncate_at_char_boundary(s, 2), "é");
+
+        // A multi-byte emoji mid-string, offset landing inside it.
+        let s = "ab🎉cd";
+        let emoji_start = "ab".len();
+        assert_eq!(truncate_at_char_boundary(s, emoji_start + 1), "ab");
     }
 }

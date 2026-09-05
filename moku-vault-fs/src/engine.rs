@@ -210,7 +210,10 @@ impl VolumeEngine {
         let (backing, file_id) = self.lookup_open(fh)?;
         let mut file = OpenOptions::new().read(true).write(true).open(&backing)?;
         let physical_before = file.metadata()?.len();
-        let projected_growth = (offset + data.len() as u64).saturating_sub(physical_before);
+        let write_end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| VaultFsError::Other(anyhow::anyhow!("write offset overflow")))?;
+        let projected_growth = write_end.saturating_sub(physical_before);
         if !self.quota.try_grow(projected_growth) {
             return Err(VaultFsError::QuotaExceeded);
         }
@@ -247,7 +250,15 @@ impl VolumeEngine {
         if actual < reserved {
             self.quota.shrink(reserved - actual);
         } else if actual > reserved {
-            let _ = self.quota.try_grow(actual - reserved);
+            let shortfall = actual - reserved;
+            if !self.quota.try_grow(shortfall) {
+                tracing::warn!(
+                    shortfall,
+                    "quota reservation shortfall: actual growth exceeded the upfront estimate \
+                     and remaining quota could not cover the difference — tracked usage now \
+                     undercounts real disk usage by this amount"
+                );
+            }
         }
     }
 

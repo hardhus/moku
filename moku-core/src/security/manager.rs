@@ -10,7 +10,7 @@ use rand::RngCore;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::dirs;
 
@@ -112,7 +112,10 @@ impl SecurityManager {
         self.get_meta_path().exists()
     }
 
-    pub async fn initialize_vault(&self, password: String) -> Result<SecretBox<SafeKey>> {
+    pub async fn initialize_vault(
+        &self,
+        password: Zeroizing<String>,
+    ) -> Result<SecretBox<SafeKey>> {
         let salt = Self::generate_salt(16);
         let key = Self::derive_key(&password, &salt).await?;
 
@@ -135,7 +138,7 @@ impl SecurityManager {
         Ok(key)
     }
 
-    pub async fn unlock_vault(&self, password: String) -> Result<SecretBox<SafeKey>> {
+    pub async fn unlock_vault(&self, password: Zeroizing<String>) -> Result<SecretBox<SafeKey>> {
         let path = self.get_meta_path();
         let content = fs::read_to_string(&path)
             .await
@@ -212,7 +215,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let manager = SecurityManager::new_with_root(temp.path().to_path_buf());
 
-        let password = "unit_test_password".to_string();
+        let password = Zeroizing::new("unit_test_password".to_string());
 
         assert!(!manager.is_vault_initialized());
 
@@ -225,7 +228,9 @@ mod tests {
         let unlocked_key = manager.unlock_vault(password).await.expect("Unlock failed");
         assert_eq!(key.expose_secret().0, unlocked_key.expose_secret().0);
 
-        let wrong_result = manager.unlock_vault("wrong".to_string()).await;
+        let wrong_result = manager
+            .unlock_vault(Zeroizing::new("wrong".to_string()))
+            .await;
         assert!(wrong_result.is_err());
     }
 

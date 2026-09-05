@@ -465,8 +465,13 @@ pub fn mount_and_wait(
 
     host.mount(mountpoint)
         .map_err(|e| anyhow!("failed to mount at '{mountpoint}': {e:?}"))?;
-    host.start()
-        .map_err(|e| anyhow!("failed to start WinFsp dispatcher: {e:?}"))?;
+    if let Err(e) = host.start() {
+        // Mount already attached the volume to the OS; without this it
+        // would be left stuck (drive letter reserved, nothing servicing
+        // I/O) until the whole worker process exits.
+        host.unmount();
+        return Err(anyhow!("failed to start WinFsp dispatcher: {e:?}"));
+    }
 
     on_mounted();
 
@@ -510,7 +515,7 @@ mod tests {
             let security =
                 moku_core::SecurityManager::new_with_root(volume_tmp.path().to_path_buf());
             let master_key = security
-                .initialize_vault("smoke-test-password".to_string())
+                .initialize_vault(zeroize::Zeroizing::new("smoke-test-password".to_string()))
                 .await
                 .expect("init vault");
             let keys = moku_vault_fs::derive_volume_keys(&master_key);

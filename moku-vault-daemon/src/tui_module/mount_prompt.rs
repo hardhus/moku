@@ -17,6 +17,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use secrecy::SecretBox;
+use zeroize::Zeroizing;
 
 use moku_core::{MokuTheme, SafeKey};
 
@@ -45,7 +46,9 @@ pub(super) struct PasswordPrompt {
     pub(super) display_name: String,
     pub(super) mountpoint: String,
     pub(super) focus: MountField,
-    pub(super) input: String,
+    /// Zeroized on drop — the actual mount password while it's being
+    /// typed, not just a display string.
+    pub(super) input: Zeroizing<String>,
     /// Some(key): the app vault's already-unlocked master key (Default
     /// mode, verified when the main vault was unlocked) — no password
     /// field is shown or needed, Enter mounts with just the mountpoint.
@@ -77,7 +80,7 @@ impl VaultManagerModule {
                         self.start_mount_with_key(volume_id, display_name, mountpoint, key);
                     }
                     None => {
-                        let password = prompt.input.clone();
+                        let password = prompt.input.to_string();
                         self.prompt = None;
                         self.start_mount(volume_id, display_name, mountpoint, password);
                     }
@@ -219,7 +222,7 @@ mod tests {
             display_name: "vol-1".to_string(),
             mountpoint: "M:".to_string(),
             focus: MountField::Mountpoint,
-            input: String::new(),
+            input: Zeroizing::new(String::new()),
             key,
         }
     }
@@ -284,7 +287,7 @@ mod tests {
         let mut module = VaultManagerModule::new();
         let mut prompt = mount_prompt(None);
         prompt.focus = MountField::Password;
-        prompt.input = "hunter2".to_string();
+        prompt.input = Zeroizing::new("hunter2".to_string());
         module.prompt = Some(prompt);
         let mut ctx = create_test_context().await;
 

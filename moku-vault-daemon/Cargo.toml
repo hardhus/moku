@@ -16,6 +16,7 @@ ratatui.workspace = true
 crossterm.workspace = true
 async-trait.workspace = true
 secrecy.workspace = true
+zeroize.workspace = true
 
 # Derives a per-volume master key from moku's app-vault master key
 # (Default password mode) — same crates, same scoped-not-workspace

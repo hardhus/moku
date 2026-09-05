@@ -472,7 +472,7 @@ impl TuiModule for VaultManagerModule {
                                 display_name,
                                 mountpoint,
                                 focus: MountField::Mountpoint,
-                                input: String::new(),
+                                input: zeroize::Zeroizing::new(String::new()),
                                 key,
                             });
                         }

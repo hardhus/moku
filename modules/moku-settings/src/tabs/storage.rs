@@ -17,9 +17,15 @@ use moku_core::{AppContext, Command, MokuConfig, resolve_event};
 use super::SettingsTab;
 
 /// (module id, ModuleMeta::encrypt_by_default()) — kept in sync with the
-/// overrides in moku-todo/moku-bookmark/moku-rss (see Faz 5) and with
-/// moku-bin/src/config_cmd.rs's identical list for the CLI equivalent.
-const ENCRYPTABLE_MODULES: &[(&str, bool)] = &[("todo", true), ("bookmark", true), ("rss", false)];
+/// overrides in moku-todo/moku-bookmark/moku-rss/moku-secrets (see Faz 5)
+/// and with moku-bin/src/config_cmd.rs's identical list for the CLI
+/// equivalent. `secrets` is included so `[m]`/`[Shift+M]` can also
+/// re-key it to the current per-module HKDF storage key scheme (see
+/// `moku-core/src/storage/keys.rs`) — without it here, a user's real
+/// secrets would never get an in-app trigger to migrate off the legacy
+/// raw-master-key scheme.
+const ENCRYPTABLE_MODULES: &[(&str, bool)] =
+    &[("todo", true), ("bookmark", true), ("rss", false), ("secrets", true)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StorageOption {
@@ -52,6 +58,12 @@ pub struct StorageTab {
     status_message: Option<(String, Instant)>,
     migration_result: Arc<Mutex<Option<String>>>,
     vault_unlocked: bool,
+    /// Guards against mashing `m`/`Shift+M` before a prior migration's
+    /// result has landed — without it, two concurrent
+    /// `migrate_module_encryption` calls for the same module race on the
+    /// same sled keys (same pattern/reasoning as
+    /// `moku-vault-daemon`'s `busy` flag).
+    busy: bool,
 }
 
 impl StorageTab {
@@ -67,6 +79,7 @@ impl StorageTab {
             status_message: None,
             migration_result: Arc::new(Mutex::new(None)),
             vault_unlocked: false,
+            busy: false,
         }
     }
 
@@ -152,6 +165,11 @@ impl StorageTab {
     /// pattern — SettingsTab::draw() only gets `&MokuConfig`, not
     /// `&mut AppContext`, so a toast can't be raised directly from there.
     fn migrate(&mut self, ctx: &AppContext, modules: Vec<(&'static str, bool)>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+
         let storage = Arc::clone(&ctx.storage);
         let session = Arc::clone(&ctx.session);
         let slot = Arc::clone(&self.migration_result);
@@ -182,6 +200,7 @@ impl StorageTab {
     fn poll_migration_result(&mut self) {
         let result = self.migration_result.lock().unwrap().take();
         if let Some(msg) = result {
+            self.busy = false;
             self.show_status(msg);
         }
     }
@@ -329,5 +348,62 @@ impl SettingsTab for StorageTab {
         let status_widget = Paragraph::new(status).style(Style::default().fg(status_color));
         frame.render_widget(status_widget, chunks[1]);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    #[tokio::test]
+    async fn test_busy_guard_blocks_a_second_migrate_while_one_is_in_flight() {
+        let mut tab = StorageTab::new(&MokuConfig::default());
+        let ctx = create_test_context().await;
+        assert!(!tab.busy);
+
+        tab.migrate(&ctx, vec![("todo", false)]);
+        assert!(tab.busy, "starting a migration must set the busy flag");
+
+        // Mashing 'm'/'Shift+M' again before the first migration's result
+        // lands must not spawn a second concurrent
+        // migrate_module_encryption call for the same module.
+        tab.migrate(&ctx, vec![("todo", false)]);
+        assert!(tab.busy);
+    }
+
+    #[test]
+    fn test_poll_migration_result_clears_busy_flag() {
+        let mut tab = StorageTab::new(&MokuConfig::default());
+        tab.busy = true;
+        *tab.migration_result.lock().unwrap() = Some("done".to_string());
+        tab.poll_migration_result();
+        assert!(
+            !tab.busy,
+            "picking up a finished migration's result must clear busy so the next one can start"
+        );
     }
 }

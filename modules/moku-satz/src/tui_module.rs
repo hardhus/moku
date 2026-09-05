@@ -8,7 +8,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::{
         Block, Borders, List, ListItem, ListState, Paragraph,
         canvas::{Canvas, Line as CanvasLine, Points},
@@ -47,7 +47,7 @@ impl FilterMode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum View {
     List,
     Graph,
@@ -92,10 +92,25 @@ impl NotesModule {
         }
     }
 
-    fn load(&mut self, ctx: &AppContext) {
+    // `build_index` walks the whole notes vault on disk and parses every
+    // file — synchronous and potentially slow for a large vault. Run it on
+    // tokio's blocking-thread pool so it never freezes the single-threaded
+    // TUI's event loop/redraws (same reasoning as Argon2 in
+    // `SecurityManager::derive_key`); `resolve_vault_root` itself is cheap
+    // (no I/O), so only the walk needs offloading.
+    async fn load(&mut self, ctx: &AppContext) {
         let config: NotesConfig = ctx.config.load().resolve_module_config("notes");
-        let result = resolve_vault_root(&config, None)
-            .and_then(|root| build_index(&root).map(|idx| (root, idx)));
+        let result = match resolve_vault_root(&config, None) {
+            Ok(root) => {
+                let root_for_index = root.clone();
+                match tokio::task::spawn_blocking(move || build_index(&root_for_index)).await {
+                    Ok(Ok(index)) => Ok((root, index)),
+                    Ok(Err(e)) => Err(e),
+                    Err(join_err) => Err(anyhow::anyhow!("index build task panicked: {join_err}")),
+                }
+            }
+            Err(e) => Err(e),
+        };
         match result {
             Ok((root, index)) => {
                 self.vault_root = Some(root);
@@ -266,6 +281,8 @@ impl NotesModule {
         let edges = data.edges.clone();
         let node_count = data.nodes.len();
         let edge_count = data.edges.len();
+        let edge_color = theme.border;
+        let node_color = theme.info;
 
         let canvas = Canvas::default()
             .block(
@@ -288,14 +305,14 @@ impl NotesModule {
                             y1,
                             x2,
                             y2,
-                            color: Color::DarkGray,
+                            color: edge_color,
                         });
                     }
                 }
                 for &(x, y) in positions.values() {
                     ctx.draw(&Points {
                         coords: &[(x, y)],
-                        color: Color::Cyan,
+                        color: node_color,
                     });
                 }
             });
@@ -324,7 +341,7 @@ impl ModuleMeta for NotesModule {
 #[async_trait]
 impl TuiModule for NotesModule {
     async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
-        self.load(ctx);
+        self.load(ctx).await;
         Ok(())
     }
 
@@ -357,7 +374,7 @@ impl TuiModule for NotesModule {
                     self.apply_filter();
                 }
                 KeyCode::Char('r') => {
-                    self.load(ctx);
+                    self.load(ctx).await;
                     self.show_message("Reloaded.");
                 }
                 KeyCode::Char('d') => self.create_daily(),
@@ -477,5 +494,151 @@ mod dashboard_summary_tests {
         let status = module.dashboard_summary(&ctx).await.unwrap();
         assert_eq!(status.tone, moku_core::StatusTone::Normal);
         assert_eq!(status.text, "2 notes");
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context(vault_path: &std::path::Path) -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let mut config = MokuConfig::default();
+        let mut table = toml::map::Map::new();
+        table.insert(
+            "vault_path".to_string(),
+            toml::Value::String(vault_path.to_string_lossy().to_string()),
+        );
+        config.modules.insert("notes".to_string(), toml::Value::Table(table));
+
+        let config = Arc::new(ArcSwap::from_pointee(config));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    /// `a` links to `b` (so `b` has an incoming backlink, `a` doesn't); `c`
+    /// has no links either way; `d` links to a target that doesn't exist.
+    /// Orphans (no *incoming* backlink): a, c, d. Broken links: d only.
+    async fn loaded_module_with_fixture_vault() -> (NotesModule, tempfile::TempDir) {
+        let vault = tempdir().unwrap();
+        std::fs::write(vault.path().join("a.md"), "# A\n\n[[b]]\n").unwrap();
+        std::fs::write(vault.path().join("b.md"), "# B\n").unwrap();
+        std::fs::write(vault.path().join("c.md"), "# C\n").unwrap();
+        std::fs::write(vault.path().join("d.md"), "# D\n\n[[nonexistent]]\n").unwrap();
+
+        let mut module = NotesModule::new();
+        let ctx = create_test_context(vault.path()).await;
+        module.load(&ctx).await;
+        (module, vault)
+    }
+
+    #[tokio::test]
+    async fn test_apply_filter_all_returns_every_document() {
+        let (mut module, _vault) = loaded_module_with_fixture_vault().await;
+        module.filter = FilterMode::All;
+        module.apply_filter();
+        assert_eq!(module.rows.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_apply_filter_orphans_returns_docs_with_no_incoming_backlink() {
+        let (mut module, _vault) = loaded_module_with_fixture_vault().await;
+        module.filter = FilterMode::Orphans;
+        module.apply_filter();
+        let ids: Vec<&str> = module.rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(module.rows.len(), 3, "expected a, c, d as orphans, got {ids:?}");
+        assert!(ids.contains(&"a.md"));
+        assert!(ids.contains(&"c.md"));
+        assert!(ids.contains(&"d.md"));
+        assert!(!ids.contains(&"b.md"), "b has an incoming link from a, not an orphan");
+    }
+
+    #[tokio::test]
+    async fn test_apply_filter_broken_returns_only_docs_with_unresolvable_links() {
+        let (mut module, _vault) = loaded_module_with_fixture_vault().await;
+        module.filter = FilterMode::Broken;
+        module.apply_filter();
+        assert_eq!(module.rows.len(), 1);
+        assert_eq!(module.rows[0].id, "d.md");
+    }
+
+    #[tokio::test]
+    async fn test_select_next_wraps_around_to_start() {
+        let (mut module, _vault) = loaded_module_with_fixture_vault().await;
+        module.filter = FilterMode::All;
+        module.apply_filter();
+        let last = module.rows.len() - 1;
+        module.state.select(Some(last));
+
+        module.select_next();
+        assert_eq!(module.state.selected(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_select_previous_wraps_around_to_end() {
+        let (mut module, _vault) = loaded_module_with_fixture_vault().await;
+        module.filter = FilterMode::All;
+        module.apply_filter();
+        module.state.select(Some(0));
+
+        module.select_previous();
+        assert_eq!(module.state.selected(), Some(module.rows.len() - 1));
+    }
+
+    #[test]
+    fn test_select_next_and_previous_are_noop_when_empty() {
+        let mut module = NotesModule::new();
+        module.state.select(None);
+        module.select_next();
+        assert_eq!(module.state.selected(), None);
+        module.select_previous();
+        assert_eq!(module.state.selected(), None);
+    }
+
+    #[test]
+    fn test_create_daily_shows_message_when_vault_not_configured() {
+        let mut module = NotesModule::new();
+        module.create_daily();
+        assert!(
+            module
+                .message
+                .as_ref()
+                .unwrap()
+                .0
+                .contains("No vault configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_view_toggle_g_switches_between_list_and_graph() {
+        let mut module = NotesModule::new();
+        let mut ctx = create_test_context(std::path::Path::new("/nonexistent")).await;
+
+        assert_eq!(module.view, View::List);
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('g'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+        assert_eq!(module.view, View::Graph);
+        module.handle_event(&event, &mut ctx).await.unwrap();
+        assert_eq!(module.view, View::List);
     }
 }

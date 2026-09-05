@@ -7,11 +7,15 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, Borders, Paragraph},
 };
+use zeroize::Zeroizing;
 
 use moku_core::{AppContext, ModuleId, ModuleMeta, MokuTheme, TuiModule};
 
 pub struct LockScreenModule {
-    input: String,
+    /// The vault password, accumulated keystroke-by-keystroke — zeroized
+    /// on drop/clear since this is the actual secret, not just a display
+    /// string, for as long as this screen is open.
+    input: Zeroizing<String>,
     is_setup_mode: bool,
     error_msg: Option<String>,
 }
@@ -19,7 +23,7 @@ pub struct LockScreenModule {
 impl LockScreenModule {
     pub fn new() -> Self {
         Self {
-            input: String::new(),
+            input: Zeroizing::new(String::new()),
             is_setup_mode: false,
             error_msg: None,
         }
@@ -165,5 +169,169 @@ impl TuiModule for LockScreenModule {
                 .alignment(ratatui::layout::Alignment::Center);
             frame.render_widget(error_p, chunks[2]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use moku_core::security::{SecurityManager, VaultSession};
+    use moku_core::{MokuConfig, StorageManager};
+    use tempfile::tempdir;
+
+    use super::*;
+
+    async fn create_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::empty()))
+    }
+
+    #[tokio::test]
+    async fn test_init_sets_setup_mode_when_vault_not_initialized() {
+        let mut module = LockScreenModule::new();
+        let mut ctx = create_test_context().await;
+
+        module.init(&mut ctx).await.unwrap();
+        assert!(module.is_setup_mode);
+    }
+
+    #[tokio::test]
+    async fn test_init_sets_login_mode_when_vault_already_initialized() {
+        let mut module = LockScreenModule::new();
+        let mut ctx = create_test_context().await;
+        ctx.security
+            .initialize_vault(Zeroizing::new("existing-pass".to_string()))
+            .await
+            .unwrap();
+
+        module.init(&mut ctx).await.unwrap();
+        assert!(!module.is_setup_mode);
+    }
+
+    #[tokio::test]
+    async fn test_enter_with_empty_password_shows_error_and_does_not_unlock_session() {
+        let mut module = LockScreenModule::new();
+        let mut ctx = create_test_context().await;
+        module.init(&mut ctx).await.unwrap();
+
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+        assert_eq!(module.error_msg.as_deref(), Some("Password cannot be empty!"));
+        assert!(!ctx.session.is_unlocked());
+    }
+
+    #[tokio::test]
+    async fn test_enter_in_setup_mode_initializes_vault_and_unlocks_session() {
+        let mut module = LockScreenModule::new();
+        let mut ctx = create_test_context().await;
+        module.init(&mut ctx).await.unwrap(); // setup mode: vault not initialized yet
+
+        for c in "new-password".chars() {
+            module.handle_event(&key(KeyCode::Char(c)), &mut ctx).await.unwrap();
+        }
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+
+        assert!(module.error_msg.is_none());
+        assert!(ctx.session.is_unlocked());
+        assert!(ctx.security.is_vault_initialized());
+        assert!(module.input.is_empty(), "input should be cleared after a successful auth");
+    }
+
+    #[tokio::test]
+    async fn test_enter_in_login_mode_with_correct_password_unlocks_session() {
+        let mut ctx = create_test_context().await;
+        ctx.security
+            .initialize_vault(Zeroizing::new("correct-pass".to_string()))
+            .await
+            .unwrap();
+        let mut module = LockScreenModule::new();
+        module.init(&mut ctx).await.unwrap(); // login mode: vault already initialized
+
+        for c in "correct-pass".chars() {
+            module.handle_event(&key(KeyCode::Char(c)), &mut ctx).await.unwrap();
+        }
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+
+        assert!(module.error_msg.is_none());
+        assert!(ctx.session.is_unlocked());
+    }
+
+    #[tokio::test]
+    async fn test_enter_in_login_mode_with_wrong_password_shows_error_and_clears_input() {
+        let mut ctx = create_test_context().await;
+        ctx.security
+            .initialize_vault(Zeroizing::new("correct-pass".to_string()))
+            .await
+            .unwrap();
+        let mut module = LockScreenModule::new();
+        module.init(&mut ctx).await.unwrap();
+
+        for c in "wrong-pass".chars() {
+            module.handle_event(&key(KeyCode::Char(c)), &mut ctx).await.unwrap();
+        }
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+
+        assert_eq!(
+            module.error_msg.as_deref(),
+            Some("Incorrect password or initialization error!")
+        );
+        assert!(!ctx.session.is_unlocked());
+        assert!(module.input.is_empty(), "input should be cleared after a failed auth");
+    }
+
+    #[tokio::test]
+    async fn test_char_input_accumulates_and_clears_a_prior_error() {
+        let mut module = LockScreenModule::new();
+        let mut ctx = create_test_context().await;
+        module.init(&mut ctx).await.unwrap();
+        module.error_msg = Some("stale error".to_string());
+
+        module.handle_event(&key(KeyCode::Char('a')), &mut ctx).await.unwrap();
+        assert_eq!(module.input.as_str(), "a");
+        assert!(module.error_msg.is_none());
+
+        module.handle_event(&key(KeyCode::Char('b')), &mut ctx).await.unwrap();
+        assert_eq!(module.input.as_str(), "ab");
+    }
+
+    #[tokio::test]
+    async fn test_backspace_removes_last_character() {
+        let mut module = LockScreenModule::new();
+        let mut ctx = create_test_context().await;
+        module.init(&mut ctx).await.unwrap();
+        module.input = Zeroizing::new("ab".to_string());
+
+        module.handle_event(&key(KeyCode::Backspace), &mut ctx).await.unwrap();
+        assert_eq!(module.input.as_str(), "a");
+    }
+
+    #[tokio::test]
+    async fn test_esc_navigates_to_launcher_and_clears_input() {
+        let mut module = LockScreenModule::new();
+        let mut ctx = create_test_context().await;
+        module.init(&mut ctx).await.unwrap();
+        module.input = Zeroizing::new("partial".to_string());
+
+        module.handle_event(&key(KeyCode::Esc), &mut ctx).await.unwrap();
+        assert_eq!(ctx.take_navigation(), Some(ModuleId::LAUNCHER));
+        assert!(module.input.is_empty());
     }
 }

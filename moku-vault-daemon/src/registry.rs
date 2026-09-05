@@ -113,7 +113,7 @@ pub async fn resolve_volume_master_key(
         };
         let security = SecurityManager::new_with_root(volume_dir.to_path_buf());
         return security
-            .unlock_vault(password)
+            .unlock_vault(zeroize::Zeroizing::new(password))
             .await
             .map_err(|e| anyhow!("failed to unlock volume '{}': {e}", cfg.id));
     }
@@ -124,7 +124,7 @@ pub async fn resolve_volume_master_key(
     let app_key = match secret {
         MountSecret::Key(key) => key,
         MountSecret::Password(password) => SecurityManager::new()?
-            .unlock_vault(password)
+            .unlock_vault(zeroize::Zeroizing::new(password))
             .await
             .map_err(|e| anyhow!("wrong moku vault password: {e}"))?,
     };
@@ -340,7 +340,7 @@ pub async fn create_volume(
     if let VolumeSecret::Password(password) = secret {
         let security = SecurityManager::new_with_root(dir.clone());
         security
-            .initialize_vault(password)
+            .initialize_vault(zeroize::Zeroizing::new(password))
             .await
             .context("failed to initialize volume vault")?;
     }
@@ -729,7 +729,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let security = SecurityManager::new_with_root(dir.path().to_path_buf());
         security
-            .initialize_vault("volume-own-pw".to_string())
+            .initialize_vault(zeroize::Zeroizing::new("volume-own-pw".to_string()))
             .await
             .unwrap();
         let cfg = fake_config("old-scheme-vol", PasswordMode::Default);
