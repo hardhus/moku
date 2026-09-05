@@ -203,12 +203,6 @@ async fn mount(name: &str, mountpoint: &str) -> Result<()> {
             );
         }
         MountOutcome::Failed { message } => bail!("Mount failed: {message}"),
-        MountOutcome::TimedOut { pid } => {
-            println!(
-                "⏳ '{}' is starting in the background (worker PID: {}) — check `moku vault status {}` to confirm.",
-                cfg.display_name, pid, name
-            );
-        }
     }
     Ok(())
 }

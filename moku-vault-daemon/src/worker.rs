@@ -1,6 +1,5 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::Stdio;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use moku_core::SafeKey;
@@ -16,17 +15,6 @@ use crate::status;
 /// line before declaring success, instead of the previous fire-and-forget
 /// "spawned, therefore succeeded" assumption.
 const MOUNT_READY_SENTINEL: &str = "MOKU_MOUNT_READY";
-
-/// How long `spawn_mount_process` waits for the worker to either report
-/// `MOUNT_READY_SENTINEL` or fail before giving up and reporting
-/// `MountOutcome::TimedOut` (the worker itself keeps running either way —
-/// this is just how long the *caller* waits for an initial answer). Kept
-/// short deliberately: a real mount or a bad-password failure both
-/// resolve in well under a second in practice, and the caller (CLI or
-/// TUI) should feel like it returns control immediately rather than
-/// hanging around "just in case" — `TimedOut` isn't treated as an error,
-/// just "still going, check status".
-const MOUNT_READY_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Reads the mount secret from stdin (piped by the parent process — see
 /// `spawn_mount_process`/`spawn_mount_process_with_key` below) rather than
@@ -147,6 +135,12 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
 }
 
 /// What `spawn_mount_process` learned about the worker it just spawned.
+/// Always one or the other — the caller waits as long as it takes for a
+/// real answer (see `run_and_wait_for_outcome`) rather than giving up
+/// early on an arbitrary clock and leaving the user to guess. A real mount
+/// or a bad-password failure both eventually resolve; a genuinely stuck
+/// worker just means the wait takes longer; it does not hang the *caller*
+/// either way (see `spawn_mount_process_inner`'s doc comment).
 #[derive(Debug, Clone)]
 pub enum MountOutcome {
     /// WinFsp confirmed the mount is live (`MOUNT_READY_SENTINEL` seen).
@@ -155,11 +149,6 @@ pub enum MountOutcome {
     /// stderr line (the real `anyhow::Error` text from `mount_and_wait`),
     /// or a generic fallback if it produced no output at all.
     Failed { message: String },
-    /// Neither a ready signal nor an exit happened within
-    /// `MOUNT_READY_TIMEOUT` — the worker (pid) is still running; it may
-    /// yet succeed (e.g. unusually slow disk/key-derivation), so it's left
-    /// running rather than killed.
-    TimedOut { pid: u32 },
 }
 
 /// One line/event read off the spawned worker's stdout, stderr, or its
@@ -260,10 +249,24 @@ fn spawn_mount_process_inner(
     Ok((pid, rx))
 }
 
-/// Drives `spawn_mount_process_inner`'s event channel to a `MountOutcome`,
-/// giving up after `MOUNT_READY_TIMEOUT` — shared by `spawn_mount_process`
-/// (password) and `spawn_mount_process_with_key` (already-unlocked app-
-/// vault key), which differ only in what they put in `stdin_payload`.
+/// Drives `spawn_mount_process_inner`'s event channel to a definitive
+/// `MountOutcome` — shared by `spawn_mount_process` (password) and
+/// `spawn_mount_process_with_key` (already-unlocked app-vault key), which
+/// differ only in what they put in `stdin_payload`.
+///
+/// Waits as long as it takes rather than giving up on a clock: a CLI mount
+/// always pays a real Argon2id cost (deliberately expensive — see
+/// `moku-core/src/security/manager.rs`) verifying the password against the
+/// real app vault, which can easily take longer than a short fixed
+/// timeout would allow, while the TUI's already-unlocked fast path
+/// resolves almost instantly with no Argon2 at all. An earlier, shorter
+/// version of this wait gave up after 1.5s and reported an ambiguous
+/// "still starting" status — which the CLI path would hit *routinely*
+/// (not as a rare edge case), leaving the user unable to tell whether
+/// their password was even right, since the real answer arrived after the
+/// caller had already given up and exited. Safe to simply await
+/// indefinitely: `spawn_mount_process_inner`'s raw, unmanaged threads
+/// never block process shutdown regardless of how long this waits.
 async fn run_and_wait_for_outcome(
     volume_id: &str,
     mountpoint: &str,
@@ -272,33 +275,26 @@ async fn run_and_wait_for_outcome(
     let (pid, mut rx) = spawn_mount_process_inner(volume_id, mountpoint, stdin_payload)?;
     let mut last_stderr_line: Option<String> = None;
 
-    let wait_for_outcome = async {
-        loop {
-            match rx.recv().await {
-                Some(WorkerEvent::Stdout(l)) if l.trim() == MOUNT_READY_SENTINEL => {
-                    return MountOutcome::Ready { pid };
-                }
-                Some(WorkerEvent::Stdout(_)) => {}
-                Some(WorkerEvent::Stderr(l)) => last_stderr_line = Some(l),
-                Some(WorkerEvent::Exited(status)) => {
-                    let message = last_stderr_line.clone().unwrap_or_else(|| match status {
-                        Ok(s) => format!("mount worker exited ({s}) with no error output"),
-                        Err(e) => format!("failed to wait for mount worker: {e}"),
-                    });
-                    return MountOutcome::Failed { message };
-                }
-                None => {
-                    return MountOutcome::Failed {
-                        message: "mount worker's status channel closed unexpectedly".to_string(),
-                    };
-                }
+    loop {
+        match rx.recv().await {
+            Some(WorkerEvent::Stdout(l)) if l.trim() == MOUNT_READY_SENTINEL => {
+                return Ok(MountOutcome::Ready { pid });
+            }
+            Some(WorkerEvent::Stdout(_)) => {}
+            Some(WorkerEvent::Stderr(l)) => last_stderr_line = Some(l),
+            Some(WorkerEvent::Exited(status)) => {
+                let message = last_stderr_line.clone().unwrap_or_else(|| match status {
+                    Ok(s) => format!("mount worker exited ({s}) with no error output"),
+                    Err(e) => format!("failed to wait for mount worker: {e}"),
+                });
+                return Ok(MountOutcome::Failed { message });
+            }
+            None => {
+                return Ok(MountOutcome::Failed {
+                    message: "mount worker's status channel closed unexpectedly".to_string(),
+                });
             }
         }
-    };
-
-    match tokio::time::timeout(MOUNT_READY_TIMEOUT, wait_for_outcome).await {
-        Ok(outcome) => Ok(outcome),
-        Err(_) => Ok(MountOutcome::TimedOut { pid }),
     }
 }
 
