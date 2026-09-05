@@ -16,14 +16,47 @@ storage, security, module traits, keybinding resolution).
   Derive independent subkeys via HKDF-SHA256 with a fixed, versioned
   domain-separation `info` string per purpose, e.g.
   `moku-vault-fs/content-key/v1` / `moku-vault-fs/name-key/v1`
-  (`moku-vault-fs/src/keys.rs`), or per-volume via `moku-vault-daemon/src/
-  registry.rs`'s `derive_default_volume_master_key`. One `Hkdf::new(None,
-  master)` + one `hk.expand(info, &mut out)` call per subkey. Bump the `/v1`
-  suffix (not the string itself) if a derivation ever needs to change
-  incompatibly.
+  (`moku-vault-fs/src/keys.rs`), per-volume via `moku-vault-daemon/src/
+  registry.rs`'s `derive_default_volume_master_key`, or per-module via
+  `moku-core/src/storage/keys.rs`'s `derive_module_storage_key` (info
+  string `moku-core/storage/<module_id>/v1` — see below). One
+  `Hkdf::new(None, master)` + one `hk.expand(info, &mut out)` call per
+  subkey. Bump the `/v1` suffix (not the string itself) if a derivation
+  ever needs to change incompatibly.
+- **`moku-core`'s general storage layer (`StorageManager::save`/`load`) now
+  uses per-module HKDF subkeys, not the raw vault master key directly.**
+  Every module's encrypted data (todo/bookmark/secrets/rss/...) is
+  encrypted under `derive_module_storage_key(master, module_id)`, never
+  the raw master key — closing the same "raw key as cipher key" gap the
+  bullet above already covered for `moku-vault-fs`/`moku-vault-daemon`.
+  `StorageEnvelope.key_scheme` (`KeyScheme::Legacy` vs. `PerModuleV1`,
+  `#[serde(default)]` so it's `Legacy` on every pre-existing on-disk
+  record) tracks which scheme a given record was written under — `load()`
+  picks the matching key automatically, so old records keep reading
+  correctly forever with zero action required. A user re-triggers the
+  existing "migrate to encrypted" action (Settings → Storage tab's
+  `m`/`Shift+M`, or `moku config migrate`) to explicitly upgrade a
+  module's Legacy-scheme records to `PerModuleV1` — `migrate_one_key`
+  already treats a stale key scheme as "needs migration" even when
+  `EncryptionStatus` already matches the target, so no new command/UI was
+  needed for this. **Any new module added to `ENCRYPTABLE_MODULES`
+  (`modules/moku-settings/src/tabs/storage.rs`) must also be added to the
+  identical list in `moku-bin/src/config_cmd.rs`** — the two are meant to
+  stay in sync (TUI vs. CLI equivalents of the same migration action).
 - **Every secret value in memory is `secrecy::SecretBox<T>` where `T:
-  Zeroize`.** Never a plain `String`/`[u8; N]` for a password, key, or seed
-  that outlives a single local computation.
+  Zeroize`, or `zeroize::Zeroizing<T>` for a plain owned value like a
+  password `String` that isn't going through `SecretBox`'s access-control
+  API.** Never a plain `String`/`[u8; N]` for a password, key, or seed
+  that outlives a single local computation — this includes TUI input
+  buffers accumulating a password/secret keystroke-by-keystroke
+  (`moku-lock-screen`'s `input`, `moku-vault-daemon`'s `CreateForm`/
+  `PasswordPrompt` fields, `moku-secrets`'s `AddState.value`/
+  `ExportState.password`, `SecretEntry.value`) and byte buffers crossing a
+  process boundary (`moku-vault-daemon/src/worker.rs`'s mount-secret stdin
+  protocol). `SecurityManager::initialize_vault`/`unlock_vault` take
+  `Zeroizing<String>`, not `String` — wrap a freshly-read
+  `rpassword::prompt_password()` result in `Zeroizing::new(...)`
+  immediately, don't let it sit as a bare `String` even briefly.
 - **Secrets are never CLI flags/arguments.** Not `--password`, not
   `--totp-seed`, nothing that would show up in `ps`/Task Manager/shell
   history. Always prompt interactively via `rpassword::prompt_password`
@@ -50,12 +83,24 @@ storage, security, module traits, keybinding resolution).
   latter lets `cmd.exe`'s own re-parsing turn a feed-supplied URL containing
   shell metacharacters into a second command). Apply the same instinct to
   any other input that ends up passed to an OS API — parse/allowlist first.
-- **Anything that becomes part of a URL is a leak surface.** An API key or
-  token must never sit in a URL query string — `reqwest::Error`'s `Display`
-  includes the failed request URL, so a transport failure wrapped in
-  `anyhow` can print it straight to the terminal. Send credentials as a
-  header (`x-goog-api-key`-style) instead; see `modules/moku-commit/src/
-  engine.rs`.
+- **Anything that becomes part of a URL — or a value interpolated into
+  one — is a leak surface.** An API key or token must never sit in a URL
+  query string — `reqwest::Error`'s `Display` includes the failed request
+  URL, so a transport failure wrapped in `anyhow` can print it straight to
+  the terminal. Send credentials as a header (`x-goog-api-key`-style)
+  instead; see `modules/moku-commit/src/engine.rs`. Where a request
+  definition lets a user interpolate a resolved secret into *any* field
+  (`modules/moku-http`'s `{{secrets.NAME}}`), also redact every resolved
+  secret value out of error/log text before it's shown — see
+  `modules/moku-http/src/engine.rs`'s `redact_secrets`.
+- **Give every `reqwest::Client` a bounded `.timeout(...)`** — never
+  `reqwest::Client::new()`/bare `reqwest::get` with no timeout. See
+  `modules/moku-rss/src/engine.rs::build_client` for the pattern (also
+  applied in `modules/moku-http`, `modules/moku-commit`).
+- **A byte-offset string truncation must never be a raw `&s[..n]` slice.**
+  Text of external origin (a git diff, a feed/task error string) isn't
+  guaranteed ASCII, so an arbitrary byte offset can land mid-codepoint and
+  panic. Always go through `moku_core::util::truncate_at_char_boundary`.
 
 ## Theme / UI conventions
 
@@ -67,7 +112,11 @@ storage, security, module traits, keybinding resolution).
 - **Forms show every field at once; `Tab` moves focus; `Enter` submits from
   any field.** No sequential per-field wizard (ask name, then ask size,
   then ask password...). See `moku-vault-daemon`'s `CreateForm`/
-  `PasswordPrompt` and `modules/moku-rss`'s `EditFeed` view for the pattern.
+  `PasswordPrompt`, `modules/moku-rss`'s `EditFeed` view, and
+  `modules/moku-secrets`'s `AddState`/`ExportState` for the pattern — the
+  latter two used to be sequential per-field wizards (`AddStage`/
+  `ExportStage`) and were converted to this shape; if you ever find a
+  `*Stage`/`*Step` enum driving a form, that's the signal to convert it.
 - Render tests use `ratatui::backend::TestBackend` + `Terminal::new` +
   `terminal.draw(...)`, then scan `terminal.backend().buffer().content` for
   expected substrings/positions. This is the standard way to assert on TUI
@@ -98,7 +147,9 @@ storage, security, module traits, keybinding resolution).
   - Keep as one file when it's a cohesive module of related free functions
     with no independent per-variant state (e.g. `moku-vault-daemon/src/
     registry.rs` — a god-struct split would just add file-jumping cost with
-    no behavioral payoff).
+    no behavioral payoff; `moku-launcher/src/lib.rs` at ~1200 lines is the
+    same story — one cohesive filter+browse state machine, not several
+    independent flows, so it stays one file despite its size).
 - **`model.rs` pattern**: pure data types + their id-generation/tree
   helpers live in `model.rs`, separate from the TUI/CLI code that uses
   them. Established by `moku-bookmark`/`moku-http`/`moku-secrets`, applied
@@ -111,12 +162,16 @@ storage, security, module traits, keybinding resolution).
 
 - Use `ctx.show_info` / `ctx.show_warning` / `ctx.show_error` consistently
   for user-visible toasts — don't print, log-only, or silently no-op a
-  result the user needs to see.
+  result the user needs to see. This includes a plugin runtime surfacing
+  its own errors to the user: `moku-lua`'s `on_event`/`on_init` call
+  failures go through `ctx.show_error`, not a swallowed `unwrap_or`.
 - `let _ = fallible_call();` is only acceptable when the call is genuinely
   best-effort AND a comment says why (e.g. an unmount attempt before a
   delete, where failure just means "wasn't mounted, continue anyway").
   Otherwise propagate with `?` or match `Ok`/`Err` and call `ctx.show_error`
-  — don't let a real failure look like unconditional success.
+  — don't let a real failure look like unconditional success. This
+  includes a background process spawn (`cmd.spawn()`) — match on the
+  `Result` rather than assuming a spawned process implies success.
 - Never `unwrap()`/`expect()` on fallible user- or filesystem-derived
   input. If an invariant genuinely can't fail, prefer an explicit
   `let Some(x) = ... else { ... }`/comment over a bare `unwrap()`, so the
@@ -125,15 +180,34 @@ storage, security, module traits, keybinding resolution).
 - Prefer a single-in-flight-action guard (`busy: bool` or equivalent) for
   any module that spawns a background task from a keypress — otherwise key-
   mashing can spawn duplicate concurrent operations. Pattern used by
-  `moku-rss` (`is_refreshing`), `moku-http` (`is_running`), and
-  `moku-vault-daemon` (`busy`).
-- Give any network call a bounded timeout and, where a module fetches from
-  more than one source, fan them out concurrently (`futures::future::
-  join_all`) rather than serially — a single slow/unresponsive source
-  should never block the rest or the whole UI. See `modules/moku-rss/src/
-  engine.rs`.
+  `moku-rss` (`is_refreshing`), `moku-http` (`is_running`),
+  `moku-vault-daemon` (`busy`), and `modules/moku-settings`'s Storage tab
+  (`busy`, guarding `migrate_module_encryption` — a real race, not just a
+  wasted-work perf issue, since two concurrent migrations of the same
+  module race on the same sled keys).
+- Give any network call a bounded timeout (see the crypto section above)
+  and, where a module fetches from more than one source, fan them out
+  concurrently (`futures::future::join_all`) rather than serially — a
+  single slow/unresponsive source should never block the rest or the whole
+  UI. See `modules/moku-rss/src/engine.rs`'s feed fetch and
+  `moku-core/src/module/registry.rs::collect_dashboard_summaries` (every
+  visible module's Dashboard summary fetched concurrently, since
+  `dashboard_summary` takes `&self` and is therefore provably independent
+  across modules).
+- **Offload genuinely slow/blocking work (a full filesystem walk, `sled`'s
+  first `open` on a path, a large synchronous write) to
+  `tokio::task::spawn_blocking`** rather than running it inline on an
+  async fn called from the TUI event loop — a single-threaded TUI freezes
+  for the whole duration otherwise. See `modules/moku-satz`'s vault index
+  build, `moku-core/src/storage/manager.rs::get_or_open_db`.
+- **A tree/list flattened for display from a flat `Vec<T>` + parent-id
+  links should be built with a pre-indexed `parent -> children` map (one
+  pass, O(n)), not by having the recursive walk rescan the whole slice at
+  every level (O(n²)).** See `modules/moku-todo/src/model.rs::build_view`.
 
-## Health-check pass — 2026-09-04/05
+## Health-check passes
+
+### 2026-09-04/05 (first pass)
 
 Full-repo review (security/crypto, correctness, performance, code
 organization) requested and completed across these commits on `dev`:
@@ -146,7 +220,64 @@ task-status read added to the daemon dashboard), `5b13526` (RSS
 create_form), `e90b87e` (moku-todo model.rs, moku-launcher viewport.rs,
 registry.rs unwrap guard). No feature was added or removed — every change
 here is either a security fix, a real (small) behavior-bug fix, or a pure
-refactor with an unchanged test count before/after. See this file's other
-sections for the conventions that came out of that pass; don't redo this
-same full-repo sweep without a specific new reason — check `git log`
-for what's changed since.
+refactor with an unchanged test count before/after.
+
+### 2026-09-05 (second pass)
+
+A deeper, from-scratch re-audit requested after the first pass, this time
+covering modules the first pass touched less (moku-satz, moku-lock-screen,
+moku-settings, moku-http, moku-vault-fs, moku-vault-mount, moku-lua,
+moku-commit) via three parallel security/performance/quality review
+agents. Two larger architectural changes were made with explicit user
+sign-off (both described in the crypto section above): (1) `moku-core`'s
+storage layer moved from encrypting every module directly with the raw
+vault master key to per-module HKDF subkeys, with a transparent
+backward-compatible read path (`KeyScheme::Legacy`) so no existing user's
+data needed any migration to keep working, and an existing UI action
+(Settings → Storage `m`/`Shift+M`) transparently doubling as the explicit
+upgrade trigger; (2) `modules/moku-secrets`'s `SecretEntry.value` moved
+from a plain `String` to `Zeroizing<String>` (with the module's
+sequential Add/Export forms converted to the standard all-fields-at-once
+shape while those files were already being touched). Everything else was
+a smaller, self-contained fix: an unchecked-overflow write path in
+`moku-vault-fs`, a mount left stuck on `moku-vault-mount`'s WinFsp start
+failure, missing `reqwest` timeouts in `moku-http`/`moku-commit`, a
+secret-redaction gap in `moku-http`'s error text, un-zeroized stdin
+buffers in the vault mount-worker protocol, an O(n²) tree-flatten in
+`moku-todo`, a blocking vault walk in `moku-satz`, a serial Dashboard
+summary fetch, a missing busy-guard on the Settings storage migration
+action (a real correctness race, not just perf), two byte-slice
+char-boundary panics (`moku-commit`'s diff truncation, `moku-daemon`'s
+error truncation — now sharing `moku_core::util::truncate_at_char_boundary`),
+a couple of hardcoded theme colors in `moku-satz`'s graph view, a
+swallowed Lua runtime error in `on_event`, a silent quota-accounting
+drift in `moku-vault-fs`, and a misleading "started" toast on a daemon
+spawn failure. Test coverage was also added for three previously-untested
+modules: `moku-lock-screen` (had zero tests), `moku-satz`'s pure
+list/filter logic, and `moku-lua`'s bridge-draining/event-dispatch logic.
+
+**Deliberately NOT changed this pass** (evaluated, judged out of scope or
+already-accepted):
+- `moku-vault-daemon/src/control.rs`'s control-channel named pipe uses the
+  OS default DACL (same class as the vault-mount pipe's already-accepted
+  limitation) — local-only, same-user DoS risk (a forced unmount), no
+  confidentiality impact. Fixing it needs a real Windows security-
+  descriptor (not just a doc comment), which is a meaningfully separate
+  chunk of work from everything else in this pass.
+- `sled`'s long-standing lack of active maintenance — an informational,
+  forward-looking note, not something to react to by swapping storage
+  backends in a pass whose explicit goal was "same behavior, safer/
+  cleaner code."
+- `VolumeSecret::Password`/`MountSecret::Password` (moku-vault-daemon,
+  worker.rs) still carry a plain `String`, not `Zeroizing<String>` — the
+  same class of gap the crypto section's TUI-input-buffer fix addresses,
+  but scoped out here since it cascades through the whole per-volume-vault
+  subsystem (registry.rs, worker.rs, several CLI commands) rather than
+  being a contained, single-file change like the others. Worth doing in a
+  dedicated pass.
+- `modules/moku-secrets`'s CLI `Show`/export code paths and
+  `delete_volume`'s lack of secure-overwrite remain as previously
+  documented/accepted.
+
+Don't redo this same full-repo sweep without a specific new reason —
+check `git log` for what's changed since.

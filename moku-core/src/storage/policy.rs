@@ -62,7 +62,9 @@ mod tests {
 
         let mut table = toml::map::Map::new();
         table.insert("encrypt".to_string(), toml::Value::Boolean(true));
-        config.modules.insert("rss".to_string(), toml::Value::Table(table));
+        config
+            .modules
+            .insert("rss".to_string(), toml::Value::Table(table));
 
         // module_default = false, global default = false, but the
         // explicit per-module override still forces true.
@@ -76,7 +78,9 @@ mod tests {
 
         let mut table = toml::map::Map::new();
         table.insert("encrypt".to_string(), toml::Value::Boolean(false));
-        config.modules.insert("todo".to_string(), toml::Value::Table(table));
+        config
+            .modules
+            .insert("todo".to_string(), toml::Value::Table(table));
 
         assert!(!resolve_encryption(&config, "todo", true));
     }
