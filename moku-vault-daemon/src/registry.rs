@@ -204,6 +204,39 @@ fn update_index(mutate: impl FnOnce(&mut HashMap<String, PathBuf>)) -> Result<()
     save_index(&index)
 }
 
+/// Loads the index and forgets any entry whose directory is *completely
+/// gone* — e.g. deleted by hand with `rm -rf` instead of `vault delete`,
+/// which previously left a permanent ghost: `unique_id` saw the old id as
+/// still taken forever, so recreating a volume under the same name kept
+/// accumulating `-2`, `-3`, ... suffixes instead of ever reusing the
+/// original. Deliberately checks `Path::exists()` rather than trying to
+/// load `volume.json` — a directory that exists but is temporarily
+/// unreadable (a not-currently-mounted removable/network drive, say)
+/// should never be pruned just because it can't be read *right now*; only
+/// outright absence is treated as "really deleted". Used by both
+/// `list_volumes` (so listings don't show ghosts) and `unique_id` (so a
+/// name freed up by deleting its old directory is immediately reusable).
+fn pruned_index() -> HashMap<String, PathBuf> {
+    let index = load_index();
+    let mut alive = HashMap::new();
+    let mut stale = Vec::new();
+    for (id, dir) in index {
+        if dir.exists() {
+            alive.insert(id, dir);
+        } else {
+            stale.push(id);
+        }
+    }
+    if !stale.is_empty() {
+        let _ = update_index(|index| {
+            for id in &stale {
+                index.remove(id);
+            }
+        });
+    }
+    alive
+}
+
 fn slugify(name: &str) -> String {
     let mapped: String = name
         .to_ascii_lowercase()
@@ -228,7 +261,7 @@ fn slugify(name: &str) -> String {
 /// `volumes_root()` (covers ids taken by pre-index volumes).
 fn unique_id(name: &str, base: &Path) -> Result<String> {
     let stem = slugify(name);
-    let index = load_index();
+    let index = pruned_index();
     let root = volumes_root()?;
     let mut candidate = stem.clone();
     let mut n = 2;
@@ -370,8 +403,11 @@ pub async fn list_volumes() -> Result<Vec<VolumeConfig>> {
     let mut out = Vec::new();
 
     // Index-registered volumes first (created anywhere via `create_volume`,
-    // including the new CWD default and `--path`).
-    for (id, dir) in load_index() {
+    // including the new CWD default and `--path`). `pruned_index` already
+    // dropped entries whose directory is completely gone; a directory
+    // that exists but fails to load (corrupt/unreadable) is still just
+    // skipped here, same as before.
+    for (id, dir) in pruned_index() {
         if let Ok(cfg) = load_config(&dir).await {
             seen_ids.insert(id);
             out.push(cfg);
@@ -413,6 +449,22 @@ pub async fn resize_volume(name_or_id: &str, new_size_bytes: u64) -> Result<Volu
     cfg.size_limit_bytes = new_size_bytes;
     save_config(&volume_dir(&cfg.id)?, &cfg).await?;
     Ok(cfg)
+}
+
+/// Permanently deletes a volume: its whole backing directory (all its
+/// data, gone) and its index entry. Does not check whether it's currently
+/// mounted — deleting a live-mounted volume's backing files out from
+/// under WinFsp is unsafe, so callers (the CLI/TUI delete commands) are
+/// responsible for unmounting first.
+pub async fn delete_volume(id: &str) -> Result<()> {
+    let dir = volume_dir(id)?;
+    tokio::fs::remove_dir_all(&dir)
+        .await
+        .with_context(|| format!("failed to delete {}", dir.display()))?;
+    update_index(|index| {
+        index.remove(id);
+    })?;
+    Ok(())
 }
 
 /// Reads a volume's cached physical-bytes usage counter directly, without
@@ -465,6 +517,105 @@ mod tests {
         let id = unique_id("claude-plan-test-7a21bd", dir.path()).unwrap();
         assert_ne!(id, "claude-plan-test-7a21bd");
         assert!(id.starts_with("claude-plan-test-7a21bd-"));
+    }
+
+    #[test]
+    fn test_pruned_index_removes_entries_whose_directory_is_completely_gone() {
+        let id = "claude-prune-test-gone-1a2b";
+        let dir = tempfile::tempdir().unwrap();
+        let vol_dir = dir.path().join("vol");
+        std::fs::create_dir_all(&vol_dir).unwrap();
+        update_index(|index| {
+            index.insert(id.to_string(), vol_dir.clone());
+        })
+        .unwrap();
+
+        std::fs::remove_dir_all(&vol_dir).unwrap(); // simulate `rm -rf` by hand
+
+        let pruned = pruned_index();
+        assert!(
+            !pruned.contains_key(id),
+            "a completely deleted directory's index entry must be forgotten"
+        );
+    }
+
+    #[test]
+    fn test_pruned_index_keeps_entries_whose_directory_still_exists() {
+        let id = "claude-prune-test-alive-3c4d";
+        let dir = tempfile::tempdir().unwrap();
+        let vol_dir = dir.path().join("vol");
+        std::fs::create_dir_all(&vol_dir).unwrap();
+        update_index(|index| {
+            index.insert(id.to_string(), vol_dir.clone());
+        })
+        .unwrap();
+
+        let pruned = pruned_index();
+        assert!(
+            pruned.contains_key(id),
+            "a still-existing directory must not be pruned"
+        );
+
+        remove_index_entry(id);
+    }
+
+    #[tokio::test]
+    async fn test_unique_id_reuses_a_name_after_its_directory_was_deleted_by_hand() {
+        let base = tempfile::tempdir().unwrap();
+        let name = "claude-reuse-test-5e6f";
+
+        let cfg = create_volume(
+            name,
+            1024,
+            VolumeSecret::Password("pw".to_string()),
+            Some(base.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cfg.id, name);
+
+        // The user's exact scenario: delete the directory by hand (not via
+        // `vault delete`), leaving the index entry orphaned.
+        std::fs::remove_dir_all(base.path().join(&cfg.id)).unwrap();
+
+        let cfg2 = create_volume(
+            name,
+            1024,
+            VolumeSecret::Password("pw".to_string()),
+            Some(base.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            cfg2.id, name,
+            "a name freed up by deleting its directory by hand must be reusable immediately, not suffixed with -2"
+        );
+
+        let _ = std::fs::remove_dir_all(base.path().join(&cfg2.id));
+        remove_index_entry(&cfg2.id);
+    }
+
+    #[tokio::test]
+    async fn test_delete_volume_removes_directory_and_index_entry() {
+        let base = tempfile::tempdir().unwrap();
+        let cfg = create_volume(
+            "claude-delete-test-7g8h",
+            1024,
+            VolumeSecret::Password("pw".to_string()),
+            Some(base.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+        let dir = volume_dir(&cfg.id).unwrap();
+        assert!(dir.exists());
+
+        delete_volume(&cfg.id).await.unwrap();
+
+        assert!(!dir.exists(), "the volume's directory must be gone");
+        assert!(
+            !load_index().contains_key(&cfg.id),
+            "the volume's index entry must be gone"
+        );
     }
 
     // `import_volume` writes into the real, shared `volumes_root()/index.json`

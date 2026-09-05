@@ -116,12 +116,17 @@ pub struct VaultManagerModule {
     message: Option<(String, Instant)>,
     prompt: Option<PasswordPrompt>,
     create_form: Option<CreateForm>,
-    /// Result of an in-flight mount/unmount/create, written by a spawned
-    /// task and picked up at the top of `handle_event` — same pattern as
-    /// `modules/moku-settings/src/tabs/storage.rs`'s `migration_result`,
-    /// required here for the same reason: `draw()` only gets `&MokuTheme`,
-    /// not `&mut AppContext`, so a background task can't raise a toast
-    /// directly.
+    /// Volume id pending delete confirmation — `d`/`Command::Delete` sets
+    /// this instead of deleting immediately; `Shift+D`
+    /// (`moku_core::is_delete_bypass`) skips it entirely. Same shape as
+    /// `modules/moku-todo/src/lib.rs`'s `confirm_delete`.
+    confirm_delete: Option<String>,
+    /// Result of an in-flight mount/unmount/create/delete, written by a
+    /// spawned task and picked up at the top of `handle_event` — same
+    /// pattern as `modules/moku-settings/src/tabs/storage.rs`'s
+    /// `migration_result`, required here for the same reason: `draw()`
+    /// only gets `&MokuTheme`, not `&mut AppContext`, so a background task
+    /// can't raise a toast directly.
     action_result: Arc<Mutex<Option<String>>>,
 }
 
@@ -135,6 +140,7 @@ impl VaultManagerModule {
             message: None,
             prompt: None,
             create_form: None,
+            confirm_delete: None,
             action_result: Arc::new(Mutex::new(None)),
         }
     }
@@ -314,6 +320,34 @@ impl VaultManagerModule {
         self.show_message("Unmounting...");
     }
 
+    /// Opens the delete-confirmation prompt for the selected volume, if
+    /// any — mirrors `modules/moku-todo/src/lib.rs`'s
+    /// `start_confirm_delete`.
+    fn start_confirm_delete(&mut self) -> bool {
+        let Some(row) = self.selected() else {
+            return false;
+        };
+        self.confirm_delete = Some(row.cfg.id.clone());
+        true
+    }
+
+    fn start_delete(&mut self, volume_id: String, display_name: String) {
+        let slot = Arc::clone(&self.action_result);
+        tokio::spawn(async move {
+            // Always attempt an unmount first — a harmless no-op
+            // (StopOutcome::NotMounted) if it wasn't mounted, and the
+            // required first step if it was: deleting a live-mounted
+            // volume's backing files out from under WinFsp is unsafe.
+            let _ = worker::stop_mount_process(&volume_id).await;
+            let msg = match registry::delete_volume(&volume_id).await {
+                Ok(()) => format!("Deleted '{display_name}'."),
+                Err(e) => format!("Delete failed: {e}"),
+            };
+            *slot.lock().unwrap() = Some(msg);
+        });
+        self.show_message("Deleting...");
+    }
+
     fn draw_prompt(
         &self,
         frame: &mut Frame,
@@ -384,6 +418,51 @@ impl VaultManagerModule {
             .alignment(Alignment::Center)
             .style(Style::default().fg(theme.base_fg));
         frame.render_widget(hint, chunks[2]);
+    }
+
+    fn draw_confirm_delete(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &MokuTheme,
+        display_name: &str,
+    ) {
+        let chunks = Layout::vertical([
+            Constraint::Percentage(40),
+            Constraint::Length(4),
+            Constraint::Percentage(40),
+        ])
+        .split(area);
+        let box_area = Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+        ])
+        .split(chunks[1])[1];
+
+        let lines = vec![
+            Line::styled(
+                format!("Delete '{display_name}' and ALL its data?"),
+                Style::default().fg(theme.error),
+            ),
+            Line::raw("This cannot be undone."),
+            Line::raw(""),
+            Line::styled(
+                "[y]/[Enter] Confirm   [n]/[Esc] Cancel",
+                Style::default().fg(theme.base_fg),
+            ),
+        ];
+        let p = Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .title(" Delete Volume ")
+                    .title_alignment(Alignment::Center)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.error)),
+            )
+            .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
+        frame.render_widget(p, box_area);
     }
 
     fn draw_create_form(
@@ -688,6 +767,42 @@ impl TuiModule for VaultManagerModule {
             return Ok(true);
         }
 
+        if let Some(id) = self.confirm_delete.clone() {
+            let Event::Key(key) = event else {
+                return Ok(false);
+            };
+            if key.kind != KeyEventKind::Press {
+                return Ok(false);
+            }
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    self.confirm_delete = None;
+                    let display_name = self
+                        .rows
+                        .iter()
+                        .find(|r| r.cfg.id == id)
+                        .map(|r| r.cfg.display_name.clone())
+                        .unwrap_or_else(|| id.clone());
+                    self.start_delete(id, display_name);
+                }
+                KeyCode::Esc | KeyCode::Char('n') => self.confirm_delete = None,
+                _ => return Ok(false),
+            }
+            return Ok(true);
+        }
+
+        // Shift+D (moku_core::is_delete_bypass) deletes the selected
+        // volume immediately, skipping the confirmation prompt plain `d`
+        // shows — same convention as Todo/Bookmark/Secrets/RSS.
+        if moku_core::is_delete_bypass(event) {
+            if let Some(row) = self.selected() {
+                let volume_id = row.cfg.id.clone();
+                let display_name = row.cfg.display_name.clone();
+                self.start_delete(volume_id, display_name);
+            }
+            return Ok(true);
+        }
+
         let command = resolve_event(event, &ctx.config.load().keys, None);
         match command {
             Command::Up => self.select_previous(),
@@ -759,6 +874,9 @@ impl TuiModule for VaultManagerModule {
                         }
                     }
                 }
+                KeyCode::Char('d') => {
+                    self.start_confirm_delete();
+                }
                 _ => return Ok(false),
             }
         }
@@ -779,6 +897,17 @@ impl TuiModule for VaultManagerModule {
 
         if let Some(form) = &self.create_form {
             self.draw_create_form(frame, area, theme, form);
+            return;
+        }
+
+        if let Some(id) = &self.confirm_delete {
+            let display_name = self
+                .rows
+                .iter()
+                .find(|r| &r.cfg.id == id)
+                .map(|r| r.cfg.display_name.as_str())
+                .unwrap_or(id.as_str());
+            self.draw_confirm_delete(frame, area, theme, display_name);
             return;
         }
 
@@ -833,7 +962,8 @@ impl TuiModule for VaultManagerModule {
             .as_ref()
             .map(|(m, _)| m.clone())
             .unwrap_or_else(|| {
-                " [Enter]/[m] Mount  [u] Unmount  [c] Create  [r] Refresh  [Esc] Back ".to_string()
+                " [Enter]/[m] Mount  [u] Unmount  [c] Create  [d] Delete  [r] Refresh  [Esc] Back "
+                    .to_string()
             });
         let help_widget = Paragraph::new(help)
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
@@ -1312,5 +1442,92 @@ mod create_form_tests {
             .await
             .unwrap();
         assert!(module.prompt.is_none());
+    }
+
+    fn fake_row(id: &str, mounted: bool) -> VolumeRow {
+        VolumeRow {
+            cfg: VolumeConfig {
+                id: id.to_string(),
+                display_name: id.to_string(),
+                size_limit_bytes: 1024,
+                password_mode: PasswordMode::Custom,
+                created_at: 0,
+            },
+            used_bytes: 0,
+            mounted,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_char_d_opens_confirm_delete_for_selected_row() {
+        let mut module = VaultManagerModule::new();
+        module.rows = vec![fake_row("vol-a", false)];
+        module.state.select(Some(0));
+        let mut ctx = create_test_context().await;
+
+        module
+            .handle_event(&key(KeyCode::Char('d')), &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(module.confirm_delete.as_deref(), Some("vol-a"));
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_esc_cancels_without_deleting() {
+        let mut module = VaultManagerModule::new();
+        module.rows = vec![fake_row("vol-a", false)];
+        module.confirm_delete = Some("vol-a".to_string());
+        let mut ctx = create_test_context().await;
+
+        module
+            .handle_event(&key(KeyCode::Esc), &mut ctx)
+            .await
+            .unwrap();
+        assert!(module.confirm_delete.is_none());
+        assert_eq!(module.rows.len(), 1, "cancelling must not remove the row");
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_n_cancels_without_deleting() {
+        let mut module = VaultManagerModule::new();
+        module.rows = vec![fake_row("vol-a", false)];
+        module.confirm_delete = Some("vol-a".to_string());
+        let mut ctx = create_test_context().await;
+
+        module
+            .handle_event(&key(KeyCode::Char('n')), &mut ctx)
+            .await
+            .unwrap();
+        assert!(module.confirm_delete.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_delete_enter_closes_prompt_and_starts_delete() {
+        let mut module = VaultManagerModule::new();
+        module.rows = vec![fake_row("vol-a", false)];
+        module.confirm_delete = Some("vol-a".to_string());
+        let mut ctx = create_test_context().await;
+
+        module
+            .handle_event(&key(KeyCode::Enter), &mut ctx)
+            .await
+            .unwrap();
+        assert!(module.confirm_delete.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_shift_d_bypasses_confirmation() {
+        let mut module = VaultManagerModule::new();
+        module.rows = vec![fake_row("vol-a", false)];
+        module.state.select(Some(0));
+        let mut ctx = create_test_context().await;
+
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        module.handle_event(&event, &mut ctx).await.unwrap();
+
+        assert!(
+            module.confirm_delete.is_none(),
+            "Shift+D must skip the confirmation prompt entirely"
+        );
     }
 }

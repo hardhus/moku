@@ -138,6 +138,14 @@ pub enum VaultCommands {
     },
     /// Unmount a volume.
     Unmount { name: String },
+    /// Permanently delete a volume and all its data. Unmounts it first
+    /// automatically if it's currently mounted. Prompts for confirmation
+    /// unless --yes is given.
+    Delete {
+        name: String,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Register an existing volume directory (containing its own
     /// volume.json — e.g. moved by hand, or created before moku tracked
     /// volume locations) so it can be managed by name/id like any other.
@@ -360,5 +368,36 @@ mod tests {
             panic!("expected Vault::Create");
         };
         assert!(custom_password);
+    }
+
+    #[test]
+    fn test_vault_delete_parses_with_and_without_yes() {
+        let cli = Cli::try_parse_from(["moku", "vault", "delete", "myvol"]).unwrap();
+        let Some(Commands::Vault {
+            sub: VaultCommands::Delete { name, yes },
+        }) = cli.command
+        else {
+            panic!("expected Vault::Delete");
+        };
+        assert_eq!(name, "myvol");
+        assert!(!yes);
+
+        let cli = Cli::try_parse_from(["moku", "vault", "delete", "myvol", "--yes"]).unwrap();
+        let Some(Commands::Vault {
+            sub: VaultCommands::Delete { yes, .. },
+        }) = cli.command
+        else {
+            panic!("expected Vault::Delete");
+        };
+        assert!(yes);
+
+        let cli = Cli::try_parse_from(["moku", "vault", "delete", "myvol", "-y"]).unwrap();
+        let Some(Commands::Vault {
+            sub: VaultCommands::Delete { yes, .. },
+        }) = cli.command
+        else {
+            panic!("expected Vault::Delete");
+        };
+        assert!(yes);
     }
 }

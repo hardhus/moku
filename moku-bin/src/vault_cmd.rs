@@ -172,6 +172,7 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
         }
         VaultCommands::Mount { name, mountpoint } => mount(name, mountpoint).await,
         VaultCommands::Unmount { name } => unmount(name).await,
+        VaultCommands::Delete { name, yes } => delete(name, *yes).await,
         VaultCommands::Import { path } => {
             let cfg = registry::import_volume(std::path::Path::new(path)).await?;
             println!("✅ Imported '{}' (id: {}).", cfg.display_name, cfg.id);
@@ -218,5 +219,27 @@ async fn unmount(name: &str) -> Result<()> {
         StopOutcome::Graceful => println!("✅ Unmounted '{}'.", cfg.display_name),
         StopOutcome::Forced => println!("✅ Unmounted '{}' (forced).", cfg.display_name),
     }
+    Ok(())
+}
+
+async fn delete(name: &str, yes: bool) -> Result<()> {
+    let cfg = registry::find_volume(name).await?;
+
+    if !yes {
+        let answer = prompt_line(&format!(
+            "Delete '{}' and ALL its data? This cannot be undone. [y/N]: ",
+            cfg.display_name
+        ))?;
+        if !matches!(answer.as_str(), "y" | "Y" | "yes" | "Yes" | "YES") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    if status::is_mounted(&cfg.id) {
+        worker::stop_mount_process(&cfg.id).await?;
+    }
+    registry::delete_volume(&cfg.id).await?;
+    println!("🧹 Deleted '{}'.", cfg.display_name);
     Ok(())
 }
