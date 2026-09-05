@@ -21,6 +21,12 @@ pub struct DaemonStatusModule {
     pid: Option<u32>,
     autostart_enabled: bool,
     last_checked: Instant,
+    /// Cached alongside the pid/autostart status above, refreshed on the
+    /// same `last_checked` throttle — previously re-read and re-parsed
+    /// from disk on *every* `draw()` call (i.e. every keystroke while this
+    /// screen is open) with no throttle of its own, even though the data
+    /// only ever changes once per daemon tick (minutes apart).
+    task_statuses: Vec<crate::task_status::TaskStatus>,
     message: Option<String>,
     message_time: Option<Instant>,
 }
@@ -32,6 +38,7 @@ impl DaemonStatusModule {
             pid: None,
             autostart_enabled: false,
             last_checked: Instant::now(),
+            task_statuses: Vec::new(),
             message: None,
             message_time: None,
         }
@@ -43,6 +50,10 @@ impl DaemonStatusModule {
         self.autostart_enabled = std::env::current_exe()
             .map(|exe| crate::autostart::is_autostart_enabled(&exe, AUTOSTART_ARGS))
             .unwrap_or(false);
+        self.task_statuses = moku_core::dirs::get_data_dir()
+            .ok()
+            .map(|d| crate::task_status::read_statuses(&d))
+            .unwrap_or_default();
         self.last_checked = Instant::now();
     }
 
@@ -247,19 +258,14 @@ impl TuiModule for DaemonStatusModule {
             );
         frame.render_widget(info, chunks[1]);
 
-        // 3. Tasks Panel
-        let data_dir = moku_core::dirs::get_data_dir().ok();
-        let task_statuses = data_dir
-            .as_deref()
-            .map(|d| crate::task_status::read_statuses(d))
-            .unwrap_or_default();
-
-        let task_items: Vec<ListItem> = if task_statuses.is_empty() {
+        // 3. Tasks Panel — cached in `self.task_statuses`, refreshed by
+        // `refresh_status()` above alongside the pid/autostart check.
+        let task_items: Vec<ListItem> = if self.task_statuses.is_empty() {
             vec![ListItem::new(
                 "  No task data available. Is the daemon running?",
             )]
         } else {
-            task_statuses
+            self.task_statuses
                 .iter()
                 .map(|t| {
                     let last = t

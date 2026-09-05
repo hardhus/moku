@@ -15,6 +15,7 @@ clap.workspace = true
 serde.workspace = true
 reqwest.workspace = true
 feed-rs.workspace = true
+futures.workspace = true
 moku-notify = { path = "../../moku-notify" }
 tracing.workspace = true
 tokio = { workspace = true }

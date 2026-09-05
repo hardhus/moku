@@ -279,20 +279,16 @@ impl TuiModule for BookmarkModule {
 
         // --- CONFIRM DELETE MODE ---
         if self.mode == AppMode::ConfirmDelete {
-            if let Event::Key(key) = event {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Enter | KeyCode::Char('y') => {
-                            changed = self.delete_selected(ctx).await?;
-                            self.mode = AppMode::Normal;
-                        }
-                        KeyCode::Esc | KeyCode::Char('n') => {
-                            self.mode = AppMode::Normal;
-                            changed = true;
-                        }
-                        _ => {}
-                    }
+            match moku_core::resolve_confirm_delete_key(event) {
+                moku_core::ConfirmDeleteKey::Confirm => {
+                    changed = self.delete_selected(ctx).await?;
+                    self.mode = AppMode::Normal;
                 }
+                moku_core::ConfirmDeleteKey::Cancel => {
+                    self.mode = AppMode::Normal;
+                    changed = true;
+                }
+                moku_core::ConfirmDeleteKey::Other => {}
             }
             return Ok(changed);
         }
@@ -383,13 +379,22 @@ impl TuiModule for BookmarkModule {
                                     Ok(mut imported_items) => {
                                         self.items.append(&mut imported_items);
                                         BookmarkEngine::remove_duplicates(&mut self.items);
-                                        let _ = BookmarkEngine::save_all(ctx, &self.items).await;
-                                        self.refresh_filter();
-                                        ctx.show_info(format!(
-                                            "Imported and encrypted {} 📥",
-                                            file_to_import
-                                        ));
-                                        changed = true;
+                                        match BookmarkEngine::save_all(ctx, &self.items).await {
+                                            Ok(_) => {
+                                                self.refresh_filter();
+                                                ctx.show_info(format!(
+                                                    "Imported and encrypted {} 📥",
+                                                    file_to_import
+                                                ));
+                                                changed = true;
+                                            }
+                                            Err(e) => {
+                                                ctx.show_error(format!(
+                                                    "Import succeeded but saving failed: {}",
+                                                    e
+                                                ));
+                                            }
+                                        }
                                     }
                                     Err(e) => {
                                         ctx.show_error(format!("Import failed: {}", e));
@@ -400,13 +405,22 @@ impl TuiModule for BookmarkModule {
                                 let removed_count =
                                     BookmarkEngine::remove_duplicates(&mut self.items);
                                 if removed_count > 0 {
-                                    let _ = BookmarkEngine::save_all(ctx, &self.items).await;
-                                    self.refresh_filter();
-                                    ctx.show_info(format!(
-                                        "Removed {} duplicate(s) 🧹",
-                                        removed_count
-                                    ));
-                                    changed = true;
+                                    match BookmarkEngine::save_all(ctx, &self.items).await {
+                                        Ok(_) => {
+                                            self.refresh_filter();
+                                            ctx.show_info(format!(
+                                                "Removed {} duplicate(s) 🧹",
+                                                removed_count
+                                            ));
+                                            changed = true;
+                                        }
+                                        Err(e) => {
+                                            ctx.show_error(format!(
+                                                "Duplicates removed but saving failed: {}",
+                                                e
+                                            ));
+                                        }
+                                    }
                                 } else {
                                     ctx.show_warning("No duplicates found");
                                 }

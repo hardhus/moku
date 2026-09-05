@@ -2528,6 +2528,8 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+ "url",
+ "windows 0.58.0",
  "zeroize",
 ]
 
@@ -2647,6 +2649,7 @@ dependencies = [
  "clap",
  "crossterm",
  "feed-rs",
+ "futures",
  "moku-core",
  "moku-notify",
  "ratatui",

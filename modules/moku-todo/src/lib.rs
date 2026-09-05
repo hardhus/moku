@@ -438,24 +438,19 @@ impl TuiModule for TodoModule {
         }
 
         if self.confirm_delete.is_some() {
-            let mut changed = false;
-            if let Event::Key(key) = event
-                && key.kind == KeyEventKind::Press
-            {
-                match key.code {
-                    KeyCode::Enter | KeyCode::Char('y') => {
-                        if let Some(id) = self.confirm_delete.take() {
-                            self.delete_task_by_id(&id, ctx).await;
-                        }
-                        changed = true;
+            let changed = match moku_core::resolve_confirm_delete_key(event) {
+                moku_core::ConfirmDeleteKey::Confirm => {
+                    if let Some(id) = self.confirm_delete.take() {
+                        self.delete_task_by_id(&id, ctx).await;
                     }
-                    KeyCode::Esc | KeyCode::Char('n') => {
-                        self.confirm_delete = None;
-                        changed = true;
-                    }
-                    _ => {}
+                    true
                 }
-            }
+                moku_core::ConfirmDeleteKey::Cancel => {
+                    self.confirm_delete = None;
+                    true
+                }
+                moku_core::ConfirmDeleteKey::Other => false,
+            };
             return Ok(changed);
         }
 

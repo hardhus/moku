@@ -128,6 +128,16 @@ pub struct VaultManagerModule {
     /// only gets `&MokuTheme`, not `&mut AppContext`, so a background task
     /// can't raise a toast directly.
     action_result: Arc<Mutex<Option<String>>>,
+    /// True while a `start_*` background task is in flight, cleared when
+    /// its result is picked up by `poll_action_result`. Every `start_*`
+    /// method checks this first and refuses to spawn a second task while
+    /// one is already running — without it, mashing e.g. `u` (unmount)
+    /// repeatedly before the row's `mounted` flag refreshes could spawn
+    /// several concurrent `stop_mount_process` calls for the same volume
+    /// (matches the guard `modules/moku-rss` (`is_refreshing`) and
+    /// `modules/moku-http` (`is_running`) already use for their own
+    /// single-in-flight-action invariant).
+    busy: bool,
 }
 
 impl VaultManagerModule {
@@ -142,6 +152,7 @@ impl VaultManagerModule {
             create_form: None,
             confirm_delete: None,
             action_result: Arc::new(Mutex::new(None)),
+            busy: false,
         }
     }
 
@@ -233,6 +244,7 @@ impl VaultManagerModule {
     fn poll_action_result(&mut self) -> bool {
         let result = self.action_result.lock().unwrap().take();
         if let Some(msg) = result {
+            self.busy = false;
             self.show_message(msg);
             true
         } else {
@@ -247,6 +259,10 @@ impl VaultManagerModule {
         mountpoint: String,
         password: String,
     ) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
             let msg = match worker::spawn_mount_process(&volume_id, &mountpoint, &password).await {
@@ -272,6 +288,10 @@ impl VaultManagerModule {
         mountpoint: String,
         key: Arc<SecretBox<SafeKey>>,
     ) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
             let msg =
@@ -292,6 +312,10 @@ impl VaultManagerModule {
     }
 
     fn start_create(&mut self, name: String, size_bytes: u64, secret: VolumeSecret) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
             let msg = match registry::create_volume(&name, size_bytes, secret, None).await {
@@ -304,6 +328,10 @@ impl VaultManagerModule {
     }
 
     fn start_unmount(&mut self, volume_id: String, display_name: String) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
             let msg = match worker::stop_mount_process(&volume_id).await {
@@ -332,6 +360,10 @@ impl VaultManagerModule {
     }
 
     fn start_delete(&mut self, volume_id: String, display_name: String) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
             // Always attempt an unmount first — a harmless no-op
@@ -768,14 +800,8 @@ impl TuiModule for VaultManagerModule {
         }
 
         if let Some(id) = self.confirm_delete.clone() {
-            let Event::Key(key) = event else {
-                return Ok(false);
-            };
-            if key.kind != KeyEventKind::Press {
-                return Ok(false);
-            }
-            match key.code {
-                KeyCode::Enter | KeyCode::Char('y') => {
+            match moku_core::resolve_confirm_delete_key(event) {
+                moku_core::ConfirmDeleteKey::Confirm => {
                     self.confirm_delete = None;
                     let display_name = self
                         .rows
@@ -785,8 +811,8 @@ impl TuiModule for VaultManagerModule {
                         .unwrap_or_else(|| id.clone());
                     self.start_delete(id, display_name);
                 }
-                KeyCode::Esc | KeyCode::Char('n') => self.confirm_delete = None,
-                _ => return Ok(false),
+                moku_core::ConfirmDeleteKey::Cancel => self.confirm_delete = None,
+                moku_core::ConfirmDeleteKey::Other => return Ok(false),
             }
             return Ok(true);
         }
@@ -1456,6 +1482,32 @@ mod create_form_tests {
             used_bytes: 0,
             mounted,
         }
+    }
+
+    #[tokio::test]
+    async fn test_busy_guard_blocks_a_second_start_while_one_is_in_flight() {
+        let mut module = VaultManagerModule::new();
+        assert!(!module.busy);
+        module.start_unmount("vol-a".to_string(), "vol-a".to_string());
+        assert!(module.busy, "starting an action must set the busy flag");
+        // Mashing the same key again before the first task's result lands
+        // must not spawn a second one — this is exactly what let a user
+        // spam `u` into multiple concurrent stop_mount_process calls for
+        // the same volume before this guard existed.
+        module.start_unmount("vol-a".to_string(), "vol-a".to_string());
+        assert!(module.busy);
+    }
+
+    #[test]
+    fn test_poll_action_result_clears_busy_flag() {
+        let mut module = VaultManagerModule::new();
+        module.busy = true;
+        *module.action_result.lock().unwrap() = Some("done".to_string());
+        module.poll_action_result();
+        assert!(
+            !module.busy,
+            "picking up a finished action's result must clear busy so the next one can start"
+        );
     }
 
     #[tokio::test]

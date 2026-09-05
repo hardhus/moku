@@ -539,8 +539,12 @@ impl TuiModule for RssTuiModule {
                                     let filtered = get_filtered_items(feeds, items, feed_idx);
                                     if let Some(i) = item_state.selected() {
                                         if i < filtered.len() {
-                                            let _ = moku_core::util::open_url(&filtered[i].link);
-                                            ctx.show_info("Opening in browser...");
+                                            match moku_core::util::open_url(&filtered[i].link) {
+                                                Ok(_) => ctx.show_info("Opening in browser..."),
+                                                Err(e) => {
+                                                    ctx.show_error(format!("Failed to open: {}", e))
+                                                }
+                                            }
                                             changed = true;
                                         }
                                     }
@@ -591,8 +595,10 @@ impl TuiModule for RssTuiModule {
                                 changed = true;
                             }
                             KeyCode::Char('o') => {
-                                let _ = moku_core::util::open_url(&item.link);
-                                ctx.show_info("Opening in browser...");
+                                match moku_core::util::open_url(&item.link) {
+                                    Ok(_) => ctx.show_info("Opening in browser..."),
+                                    Err(e) => ctx.show_error(format!("Failed to open: {}", e)),
+                                }
                                 changed = true;
                             }
                             _ => {}
@@ -756,36 +762,32 @@ impl TuiModule for RssTuiModule {
                 }
             }
             RssView::ConfirmDeleteFeed { index } => {
-                if let Event::Key(key) = event {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Enter | KeyCode::Char('y') => {
-                                let mut feed_state = ListState::default();
-                                delete_feed_at(feeds, &mut feed_state, *index, ctx).await;
-                                let mut item_state = ListState::default();
-                                item_state.select(Some(0));
-                                *view = RssView::Split {
-                                    active_panel: Panel::Feeds,
-                                    feed_state,
-                                    item_state,
-                                };
-                                changed = true;
-                            }
-                            KeyCode::Esc | KeyCode::Char('n') => {
-                                let mut feed_state = ListState::default();
-                                feed_state.select(Some(*index + 1));
-                                let mut item_state = ListState::default();
-                                item_state.select(Some(0));
-                                *view = RssView::Split {
-                                    active_panel: Panel::Feeds,
-                                    feed_state,
-                                    item_state,
-                                };
-                                changed = true;
-                            }
-                            _ => {}
-                        }
+                match moku_core::resolve_confirm_delete_key(event) {
+                    moku_core::ConfirmDeleteKey::Confirm => {
+                        let mut feed_state = ListState::default();
+                        delete_feed_at(feeds, &mut feed_state, *index, ctx).await;
+                        let mut item_state = ListState::default();
+                        item_state.select(Some(0));
+                        *view = RssView::Split {
+                            active_panel: Panel::Feeds,
+                            feed_state,
+                            item_state,
+                        };
+                        changed = true;
                     }
+                    moku_core::ConfirmDeleteKey::Cancel => {
+                        let mut feed_state = ListState::default();
+                        feed_state.select(Some(*index + 1));
+                        let mut item_state = ListState::default();
+                        item_state.select(Some(0));
+                        *view = RssView::Split {
+                            active_panel: Panel::Feeds,
+                            feed_state,
+                            item_state,
+                        };
+                        changed = true;
+                    }
+                    moku_core::ConfirmDeleteKey::Other => {}
                 }
             }
         }

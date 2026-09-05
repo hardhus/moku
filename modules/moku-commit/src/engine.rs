@@ -108,16 +108,20 @@ impl CommitEngine {
         };
 
         let prompt = build_prompt(&self.settings, &truncated_diff);
-        let url = build_api_url(&self.settings, api_key);
+        let url = build_api_url(&self.settings);
 
         let client = reqwest::Client::new();
         let response = client
             .post(&url)
+            .header("x-goog-api-key", api_key)
             .json(&GeminiRequest {
                 contents: vec![Content {
                     parts: vec![Part { text: prompt }],
                 }],
-                generation_config: self.settings.temperature.map(|temperature| GenerationConfig { temperature }),
+                generation_config: self
+                    .settings
+                    .temperature
+                    .map(|temperature| GenerationConfig { temperature }),
             })
             .send()
             .await
@@ -144,12 +148,20 @@ impl CommitEngine {
     }
 }
 
-fn build_api_url(settings: &CommitSettings, api_key: &str) -> String {
+/// Builds the request URL — deliberately without the API key. The key
+/// goes in the `x-goog-api-key` header instead (set by the caller), not
+/// the query string: a URL is exactly what `reqwest::Error`'s `Display`
+/// includes on any transport failure (timeout, DNS, TLS, no network),
+/// which `generate_commit_message` wraps with `.context(...)` and
+/// propagates to the terminal — a key embedded in the URL would leak into
+/// that error output on every connection problem, not just on a bad
+/// request.
+fn build_api_url(settings: &CommitSettings) -> String {
     match &settings.api_url {
-        Some(custom_url) => format!("{custom_url}?key={api_key}"),
+        Some(custom_url) => custom_url.clone(),
         None => {
             let model = settings.model.as_deref().unwrap_or(DEFAULT_MODEL);
-            format!("{DEFAULT_API_BASE}/{model}:generateContent?key={api_key}")
+            format!("{DEFAULT_API_BASE}/{model}:generateContent")
         }
     }
 }
@@ -227,10 +239,14 @@ mod tests {
     #[test]
     fn test_build_api_url_default() {
         let settings = CommitSettings::default();
-        let url = build_api_url(&settings, "KEY123");
+        let url = build_api_url(&settings);
         assert_eq!(
             url,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=KEY123"
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent"
+        );
+        assert!(
+            !url.contains("key="),
+            "the API key must never appear in the URL — it goes in the x-goog-api-key header instead, so it can't leak into error messages that echo the request URL"
         );
     }
 
@@ -240,10 +256,10 @@ mod tests {
             model: Some("gemini-2.0-flash".to_string()),
             ..CommitSettings::default()
         };
-        let url = build_api_url(&settings, "KEY123");
+        let url = build_api_url(&settings);
         assert_eq!(
             url,
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=KEY123"
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
         );
     }
 
@@ -254,8 +270,8 @@ mod tests {
             model: Some("ignored-model".to_string()),
             ..CommitSettings::default()
         };
-        let url = build_api_url(&settings, "KEY123");
-        assert_eq!(url, "https://my-proxy.internal/v1/generate?key=KEY123");
+        let url = build_api_url(&settings);
+        assert_eq!(url, "https://my-proxy.internal/v1/generate");
     }
 
     #[test]
@@ -273,6 +289,9 @@ mod tests {
             ..CommitSettings::default()
         };
         let prompt = build_prompt(&settings, "diff --git a/x b/x");
-        assert_eq!(prompt, "Summarize this diff:\ndiff --git a/x b/x\nBe brief.");
+        assert_eq!(
+            prompt,
+            "Summarize this diff:\ndiff --git a/x b/x\nBe brief."
+        );
     }
 }

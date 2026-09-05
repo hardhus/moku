@@ -62,7 +62,8 @@ impl RssEngine {
     /// the feed simply not declaring a title); callers should already have
     /// a synchronous fallback (e.g. the domain) shown regardless.
     pub async fn peek_title(url: &str) -> Option<String> {
-        fetch_one(url).await.ok().and_then(|f| f.title)
+        let client = build_client().ok()?;
+        fetch_one(&client, url).await.ok().and_then(|f| f.title)
     }
 
     async fn save_items(
@@ -91,8 +92,24 @@ impl RssEngine {
         let mut newly_found_favorite = Vec::new();
         let mut titles_changed = false;
 
-        for feed in feeds.iter_mut() {
-            let fetched = match fetch_one(&feed.url).await {
+        // Fetch every feed concurrently rather than one at a time — with a
+        // sequential loop, a single slow/unresponsive feed delayed every
+        // feed after it (and, before `build_client`'s timeout existed,
+        // could stall this indefinitely, since a bare `reqwest::get` never
+        // gives up on its own). Bounded now by the slowest single feed
+        // instead of the sum of all of them. The merge step right below
+        // stays sequential — it's fast, in-memory, and mutates `items`
+        // (shared across feeds), so there's nothing to gain by
+        // parallelizing it too.
+        let client = build_client()?;
+        let fetches = feeds
+            .iter()
+            .map(|feed| fetch_one(&client, &feed.url))
+            .collect::<Vec<_>>();
+        let results = futures::future::join_all(fetches).await;
+
+        for (feed, fetched) in feeds.iter_mut().zip(results) {
+            let fetched = match fetched {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::warn!("RSS fetch error ({}): {e}", feed.url);
@@ -234,8 +251,23 @@ fn clean_summary(raw: &str, max_len: usize) -> String {
     }
 }
 
-async fn fetch_one(url: &str) -> Result<FetchedFeed> {
-    let bytes = reqwest::get(url)
+/// One shared timeout for every feed request — a bare `reqwest::get` (the
+/// previous approach) never gives up on its own, so a single
+/// slow/unresponsive feed could hang the whole refresh (TUI's manual `[r]`
+/// and the daemon's periodic tick alike) indefinitely.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn build_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .build()
+        .context("failed to build HTTP client")
+}
+
+async fn fetch_one(client: &reqwest::Client, url: &str) -> Result<FetchedFeed> {
+    let bytes = client
+        .get(url)
+        .send()
         .await
         .context("HTTP request failed")?
         .bytes()

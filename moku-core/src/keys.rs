@@ -149,6 +149,34 @@ pub fn is_delete_bypass(event: &Event) -> bool {
         && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
+/// What a keypress means while a "confirm before deleting" prompt is
+/// open. Factored out alongside `is_delete_bypass` for the same reason:
+/// this exact three-way keypress meaning (Enter/`y` confirms, Esc/`n`
+/// cancels, everything else is ignored) was independently reimplemented,
+/// identically, in five modules (moku-vault-daemon, moku-rss,
+/// moku-secrets, moku-bookmark, moku-todo) — each keeps its own delete
+/// action/cancel logic, matching on this instead of raw `KeyCode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmDeleteKey {
+    Confirm,
+    Cancel,
+    Other,
+}
+
+pub fn resolve_confirm_delete_key(event: &Event) -> ConfirmDeleteKey {
+    let Event::Key(key) = event else {
+        return ConfirmDeleteKey::Other;
+    };
+    if key.kind != KeyEventKind::Press {
+        return ConfirmDeleteKey::Other;
+    }
+    match key.code {
+        KeyCode::Enter | KeyCode::Char('y') => ConfirmDeleteKey::Confirm,
+        KeyCode::Esc | KeyCode::Char('n') => ConfirmDeleteKey::Cancel,
+        _ => ConfirmDeleteKey::Other,
+    }
+}
+
 pub fn keys_match(key_event: KeyEvent, config_str: &str) -> bool {
     let config_lower = config_str.to_lowercase();
     let mut parts: Vec<&str> = config_lower.split('-').collect();
@@ -217,6 +245,38 @@ mod tests {
     fn test_is_delete_bypass_false_for_ctrl_d() {
         let event = make_key(KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert!(!is_delete_bypass(&event));
+    }
+
+    #[test]
+    fn test_resolve_confirm_delete_key_enter_and_y_confirm() {
+        assert_eq!(
+            resolve_confirm_delete_key(&make_key(KeyCode::Enter, KeyModifiers::empty())),
+            ConfirmDeleteKey::Confirm
+        );
+        assert_eq!(
+            resolve_confirm_delete_key(&make_key(KeyCode::Char('y'), KeyModifiers::empty())),
+            ConfirmDeleteKey::Confirm
+        );
+    }
+
+    #[test]
+    fn test_resolve_confirm_delete_key_esc_and_n_cancel() {
+        assert_eq!(
+            resolve_confirm_delete_key(&make_key(KeyCode::Esc, KeyModifiers::empty())),
+            ConfirmDeleteKey::Cancel
+        );
+        assert_eq!(
+            resolve_confirm_delete_key(&make_key(KeyCode::Char('n'), KeyModifiers::empty())),
+            ConfirmDeleteKey::Cancel
+        );
+    }
+
+    #[test]
+    fn test_resolve_confirm_delete_key_other_keys_ignored() {
+        assert_eq!(
+            resolve_confirm_delete_key(&make_key(KeyCode::Char('x'), KeyModifiers::empty())),
+            ConfirmDeleteKey::Other
+        );
     }
 
     #[test]

@@ -71,8 +71,13 @@ enum SecretsCmd {
         username: Option<String>,
         #[arg(long)]
         url: Option<String>,
+        /// Prompt for a TOTP shared secret to attach to this entry. Never
+        /// a CLI flag value — a TOTP seed is a real second-factor secret,
+        /// as sensitive as the entry's own value, and a flag would be
+        /// visible in `ps`/Task Manager and shell history for as long as
+        /// this process runs.
         #[arg(long)]
-        totp_seed: Option<String>,
+        totp: bool,
         #[arg(long)]
         notes: Option<String>,
     },
@@ -100,17 +105,12 @@ enum SecretsCmd {
         format: ExportFormatArg,
         #[arg(long)]
         out: String,
-        /// Password for the encrypted format. Prompted for if omitted.
-        #[arg(long)]
-        password: Option<String>,
     },
     /// Import entries from a previously exported file (merges by name).
     Import {
         file: String,
         #[arg(long, value_enum, default_value = "encrypted")]
         format: ImportFormatArg,
-        #[arg(long)]
-        password: Option<String>,
     },
 }
 
@@ -140,7 +140,9 @@ impl CliModule for SecretsCliModule {
         };
 
         let Some(storage) = &ctx.storage else {
-            bail!("secrets commands require storage access (internal error: CliContext.storage is empty).");
+            bail!(
+                "secrets commands require storage access (internal error: CliContext.storage is empty)."
+            );
         };
 
         // `generate` never touches storage — everything else does, and
@@ -152,7 +154,16 @@ impl CliModule for SecretsCliModule {
 
         match parsed.cmd {
             None => bail!("no subcommand given — try `moku secrets --help`"),
-            Some(SecretsCmd::Generate { length, diceware, words, no_lowercase, no_uppercase, no_digits, no_symbols, no_number }) => {
+            Some(SecretsCmd::Generate {
+                length,
+                diceware,
+                words,
+                no_lowercase,
+                no_uppercase,
+                no_digits,
+                no_symbols,
+                no_number,
+            }) => {
                 if diceware {
                     let opts = DicewareOptions {
                         word_count: words,
@@ -162,9 +173,14 @@ impl CliModule for SecretsCliModule {
                         wordlist: Wordlist::EffLarge,
                     };
                     let phrase = generator::generate_diceware(&opts)?;
-                    let bits = generator::diceware_entropy_bits(words, Wordlist::EffLarge, !no_number);
+                    let bits =
+                        generator::diceware_entropy_bits(words, Wordlist::EffLarge, !no_number);
                     println!("{phrase}");
-                    println!("entropy: {:.1} bits ({})", bits, generator::strength_label(bits));
+                    println!(
+                        "entropy: {:.1} bits ({})",
+                        bits,
+                        generator::strength_label(bits)
+                    );
                 } else {
                     let opts = CharsetOptions {
                         length,
@@ -176,10 +192,22 @@ impl CliModule for SecretsCliModule {
                     let password = generator::generate_charset_password(&opts)?;
                     let bits = generator::charset_entropy_bits(&opts);
                     println!("{password}");
-                    println!("entropy: {:.1} bits ({})", bits, generator::strength_label(bits));
+                    println!(
+                        "entropy: {:.1} bits ({})",
+                        bits,
+                        generator::strength_label(bits)
+                    );
                 }
             }
-            Some(SecretsCmd::Add { name, generate, category, username, url, totp_seed, notes }) => {
+            Some(SecretsCmd::Add {
+                name,
+                generate,
+                category,
+                username,
+                url,
+                totp,
+                notes,
+            }) => {
                 let mut entries = engine::load_entries(storage).await;
                 if engine::find_by_name(&entries, &name).is_some() {
                     bail!("an entry named '{name}' already exists");
@@ -190,7 +218,16 @@ impl CliModule for SecretsCliModule {
                     println!("Generated value: {pw}");
                     pw
                 } else {
-                    rpassword::prompt_password("Value: ").map_err(|e| anyhow!("Failed to read value: {e}"))?
+                    rpassword::prompt_password("Value: ")
+                        .map_err(|e| anyhow!("Failed to read value: {e}"))?
+                };
+                let totp_seed = if totp {
+                    Some(
+                        rpassword::prompt_password("TOTP seed (base32): ")
+                            .map_err(|e| anyhow!("Failed to read TOTP seed: {e}"))?,
+                    )
+                } else {
+                    None
                 };
                 let mut entry = SecretEntry::new(name.clone(), value);
                 entry.category = category;
@@ -204,32 +241,54 @@ impl CliModule for SecretsCliModule {
             }
             Some(SecretsCmd::List { category }) => {
                 let entries = engine::load_entries(storage).await;
-                let filtered: Vec<&SecretEntry> =
-                    entries.iter().filter(|e| category.as_deref().is_none_or(|c| e.category.as_deref() == Some(c))).collect();
+                let filtered: Vec<&SecretEntry> = entries
+                    .iter()
+                    .filter(|e| {
+                        category
+                            .as_deref()
+                            .is_none_or(|c| e.category.as_deref() == Some(c))
+                    })
+                    .collect();
                 if filtered.is_empty() {
                     println!("No secrets yet. To add one: moku secrets add <name>");
                 } else {
                     for e in filtered {
-                        println!("- {} [{}]", e.name, e.category.as_deref().unwrap_or("uncategorized"));
+                        println!(
+                            "- {} [{}]",
+                            e.name,
+                            e.category.as_deref().unwrap_or("uncategorized")
+                        );
                     }
                 }
             }
             Some(SecretsCmd::Show { name, reveal }) => {
                 let entries = engine::load_entries(storage).await;
-                let entry = engine::find_by_name(&entries, &name).ok_or_else(|| anyhow!("no entry named '{name}'"))?;
+                let entry = engine::find_by_name(&entries, &name)
+                    .ok_or_else(|| anyhow!("no entry named '{name}'"))?;
                 println!("Name:     {}", entry.name);
                 println!("Category: {}", entry.category.as_deref().unwrap_or("-"));
                 println!("Username: {}", entry.username.as_deref().unwrap_or("-"));
                 println!("URL:      {}", entry.url.as_deref().unwrap_or("-"));
-                println!("Value:    {}", if reveal { entry.value.clone() } else { "•".repeat(entry.value.chars().count()) });
+                println!(
+                    "Value:    {}",
+                    if reveal {
+                        entry.value.clone()
+                    } else {
+                        "•".repeat(entry.value.chars().count())
+                    }
+                );
                 if let Some(notes) = &entry.notes {
                     println!("Notes:    {notes}");
                 }
             }
             Some(SecretsCmd::Totp { name }) => {
                 let entries = engine::load_entries(storage).await;
-                let entry = engine::find_by_name(&entries, &name).ok_or_else(|| anyhow!("no entry named '{name}'"))?;
-                let seed = entry.totp_seed.as_ref().ok_or_else(|| anyhow!("'{name}' has no TOTP seed configured"))?;
+                let entry = engine::find_by_name(&entries, &name)
+                    .ok_or_else(|| anyhow!("no entry named '{name}'"))?;
+                let seed = entry
+                    .totp_seed
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("'{name}' has no TOTP seed configured"))?;
                 println!("{}", engine::totp_code_now(seed)?);
             }
             Some(SecretsCmd::Remove { name }) => {
@@ -242,31 +301,26 @@ impl CliModule for SecretsCliModule {
                 engine::save_entries(storage, &ctx.config, &entries).await?;
                 println!("🧹 Removed '{name}'");
             }
-            Some(SecretsCmd::Export { format, out, password }) => {
+            Some(SecretsCmd::Export { format, out }) => {
                 let entries = engine::load_entries(storage).await;
                 let bytes = match format {
                     ExportFormatArg::Json => engine::export_plain(&entries, PlainFormat::Json)?,
                     ExportFormatArg::Csv => engine::export_plain(&entries, PlainFormat::Csv)?,
                     ExportFormatArg::Encrypted => {
-                        let password = match password {
-                            Some(p) => p,
-                            None => prompt_new_export_password()?,
-                        };
+                        let password = prompt_new_export_password()?;
                         engine::export_encrypted(&entries, &password).await?
                     }
                 };
                 std::fs::write(&out, bytes)?;
                 println!("✅ Exported {} entries to {out}", entries.len());
             }
-            Some(SecretsCmd::Import { file, format, password }) => {
+            Some(SecretsCmd::Import { file, format }) => {
                 let data = std::fs::read(&file)?;
                 let imported = match format {
                     ImportFormatArg::Json => engine::import_plain_json(&data)?,
                     ImportFormatArg::Encrypted => {
-                        let password = match password {
-                            Some(p) => p,
-                            None => rpassword::prompt_password("Export password: ").map_err(|e| anyhow!("Failed to read password: {e}"))?,
-                        };
+                        let password = rpassword::prompt_password("Export password: ")
+                            .map_err(|e| anyhow!("Failed to read password: {e}"))?;
                         engine::import_encrypted(&data, &password).await?
                     }
                 };
@@ -299,8 +353,13 @@ async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
         return Ok(());
     }
 
-    let password = rpassword::prompt_password("Moku vault password: ").map_err(|e| anyhow!("Failed to read password: {e}"))?;
-    let result = if security.is_vault_initialized() { security.unlock_vault(password).await } else { security.initialize_vault(password).await };
+    let password = rpassword::prompt_password("Moku vault password: ")
+        .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+    let result = if security.is_vault_initialized() {
+        security.unlock_vault(password).await
+    } else {
+        security.initialize_vault(password).await
+    };
     match result {
         Ok(key) => {
             session.unlock(key);
@@ -311,8 +370,10 @@ async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
 }
 
 fn prompt_new_export_password() -> Result<String> {
-    let p1 = rpassword::prompt_password("New export password: ").map_err(|e| anyhow!("Failed to read password: {e}"))?;
-    let p2 = rpassword::prompt_password("Confirm export password: ").map_err(|e| anyhow!("Failed to read password: {e}"))?;
+    let p1 = rpassword::prompt_password("New export password: ")
+        .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+    let p2 = rpassword::prompt_password("Confirm export password: ")
+        .map_err(|e| anyhow!("Failed to read password: {e}"))?;
     if p1 != p2 {
         bail!("passwords did not match");
     }

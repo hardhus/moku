@@ -136,13 +136,9 @@ impl SecretsModule {
 
     /// `y`/Enter confirms the pending delete (`confirm_delete`), `n`/Esc
     /// cancels — either way returns to the normal list view.
-    async fn handle_confirm_delete_key(
-        &mut self,
-        key: crossterm::event::KeyEvent,
-        ctx: &mut AppContext,
-    ) -> bool {
-        match key.code {
-            KeyCode::Enter | KeyCode::Char('y') => {
+    async fn handle_confirm_delete_key(&mut self, event: &Event, ctx: &mut AppContext) -> bool {
+        match moku_core::resolve_confirm_delete_key(event) {
+            moku_core::ConfirmDeleteKey::Confirm => {
                 if self.confirm_delete.take().is_some() {
                     // `delete_selected` reads `self.state.selected()`,
                     // which still points at the entry pending deletion —
@@ -151,10 +147,10 @@ impl SecretsModule {
                     self.delete_selected(ctx).await;
                 }
             }
-            KeyCode::Esc | KeyCode::Char('n') => {
+            moku_core::ConfirmDeleteKey::Cancel => {
                 self.confirm_delete = None;
             }
-            _ => return false,
+            moku_core::ConfirmDeleteKey::Other => return false,
         }
         true
     }
@@ -471,7 +467,7 @@ impl TuiModule for SecretsModule {
             return Ok(self.handle_export_key(*key).await);
         }
         if self.confirm_delete.is_some() {
-            return Ok(self.handle_confirm_delete_key(*key, ctx).await);
+            return Ok(self.handle_confirm_delete_key(event, ctx).await);
         }
 
         // Shift+D bypasses the confirmation prompt entirely and deletes

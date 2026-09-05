@@ -23,5 +23,12 @@ aes-gcm.workspace = true
 rand.workspace = true
 secrecy.workspace = true
 
+# URL-scheme validation in util::open_url — a defensive check before
+# handing a remote (RSS feed) URL to the OS's default-handler mechanism.
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
