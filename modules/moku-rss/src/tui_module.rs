@@ -1,36 +1,30 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use arboard::Clipboard;
 use async_trait::async_trait;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::Event;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::ListState,
 };
 
 use moku_core::{
-    AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
+    AppContext, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
 };
 
 use crate::engine::{FeedItem, FeedSubscription, RssEngine};
+
+mod view_detail;
+mod view_edit_feed;
+mod view_split;
+
+use view_edit_feed::EditField;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Panel {
     Feeds,
     Items,
-}
-
-/// Which field of the URL+name add/edit form currently has keyboard focus.
-/// Both fields are shown at once (`Tab` switches focus, `Enter` submits
-/// from either) — unlike `modules/moku-secrets/src/tui_module.rs`'s
-/// `AddStage`, this isn't a sequential wizard.
-#[derive(PartialEq, Clone, Copy)]
-pub enum EditField {
-    Url,
-    Name,
 }
 
 pub enum RssView {
@@ -71,14 +65,22 @@ pub struct RssTuiModule {
     feeds: Vec<FeedSubscription>,
     items: Vec<FeedItem>,
     view: RssView,
-    refresh_result: Arc<Mutex<Option<Result<Vec<FeedItem>, String>>>>,
+    refresh_result: RefreshResultSlot,
     is_refreshing: bool,
     /// Set by a background `RssEngine::peek_title` fetch spawned when the
     /// edit modal's focus leaves the URL field — `(url_it_was_fetched_for,
     /// title_or_none)`. Kept on the module (not the transient `RssView`)
     /// since the spawned task outlives any single view value.
-    title_suggestion: Arc<Mutex<Option<(String, Option<String>)>>>,
+    title_suggestion: TitleSuggestionSlot,
 }
+
+/// Slot a background `[r]`-refresh task reports into — shared between
+/// `RssTuiModule` and `view_split`.
+pub(super) type RefreshResultSlot = Arc<Mutex<Option<Result<Vec<FeedItem>, String>>>>;
+
+/// Slot a background title-suggestion fetch reports `(url_it_was_fetched_for,
+/// title_or_none)` into — shared between `RssTuiModule` and `view_edit_feed`.
+pub(super) type TitleSuggestionSlot = Arc<Mutex<Option<(String, Option<String>)>>>;
 
 impl RssTuiModule {
     pub fn new() -> Self {
@@ -102,49 +104,10 @@ impl RssTuiModule {
     }
 }
 
-fn get_filtered_items(
-    feeds: &[FeedSubscription],
-    items: &[FeedItem],
-    feed_idx: usize,
-) -> Vec<FeedItem> {
-    if feed_idx == 0 {
-        items.to_vec()
-    } else if feed_idx - 1 < feeds.len() {
-        let feed = &feeds[feed_idx - 1];
-        items
-            .iter()
-            .filter(|item| matches_feed(item, feed))
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
-    }
-}
-
-fn matches_feed(item: &FeedItem, feed: &FeedSubscription) -> bool {
-    if let Some(ref title) = feed.title {
-        if item.feed_title == *title {
-            return true;
-        }
-    }
-    if let Ok(feed_url) = reqwest::Url::parse(&feed.url) {
-        if let Some(feed_host) = feed_url.host_str() {
-            let clean_host = feed_host.strip_prefix("www.").unwrap_or(feed_host);
-            if let Ok(item_url) = reqwest::Url::parse(&item.link) {
-                if let Some(item_host) = item_url.host_str() {
-                    return item_host.contains(clean_host) || clean_host.contains(item_host);
-                }
-            }
-            return item.link.contains(clean_host);
-        }
-    }
-    false
-}
-
 /// A URL's host with any leading `www.` stripped (same `reqwest::Url`
-/// approach already used by `matches_feed`, not moku-bookmark's separate
-/// string-based `extract_domain`). `None` if the URL doesn't parse or has
-/// no host.
+/// approach already used by `view_split::matches_feed`, not
+/// moku-bookmark's separate string-based `extract_domain`). `None` if the
+/// URL doesn't parse or has no host.
 fn domain_of(url: &str) -> Option<String> {
     let parsed = reqwest::Url::parse(url).ok()?;
     let host = parsed.host_str()?;
@@ -163,45 +126,6 @@ fn feed_label(feed: &FeedSubscription) -> String {
         return title.to_string();
     }
     domain_of(&feed.url).unwrap_or_else(|| feed.url.clone())
-}
-
-pub enum EditOutcome {
-    Added,
-    Updated,
-    DuplicateUrl,
-}
-
-/// The save-decision core of the add/edit-feed flow, kept free of I/O and
-/// `ctx` so it's directly unit-testable — same "pure core + thin
-/// side-effecting caller" split already used by `engine::merge_feed_entries`.
-pub fn apply_edit(
-    feeds: &mut Vec<FeedSubscription>,
-    editing_index: Option<usize>,
-    url: String,
-    title: Option<String>,
-) -> EditOutcome {
-    let duplicate = feeds
-        .iter()
-        .enumerate()
-        .any(|(i, f)| f.url == url && Some(i) != editing_index);
-    if duplicate {
-        return EditOutcome::DuplicateUrl;
-    }
-    match editing_index {
-        Some(i) => {
-            feeds[i].url = url;
-            feeds[i].title = title;
-            EditOutcome::Updated
-        }
-        None => {
-            feeds.push(FeedSubscription {
-                url,
-                title,
-                favorite: false,
-            });
-            EditOutcome::Added
-        }
-    }
 }
 
 /// Removes `feeds[index]`, saves, and reports the outcome — shared by the
@@ -297,7 +221,8 @@ impl TuiModule for RssTuiModule {
             changed = true;
         }
 
-        // Destructure self to allow disjoint mutable borrows of fields
+        // Destructure self to allow disjoint mutable borrows of fields —
+        // each view module below only takes exactly the fields it needs.
         let RssTuiModule {
             feeds,
             items,
@@ -307,492 +232,30 @@ impl TuiModule for RssTuiModule {
             title_suggestion,
         } = self;
 
-        match view {
-            RssView::Split {
-                active_panel,
-                feed_state,
-                item_state,
-            } => {
-                // Shift+D bypasses the confirmation prompt entirely and
-                // deletes immediately — checked as a raw key before the
-                // normal dispatch, same shape as other raw Shift-key
-                // checks in this app.
-                if *active_panel == Panel::Feeds
-                    && moku_core::is_delete_bypass(event)
-                    && let Some(i) = feed_state.selected()
-                    && i > 0
-                    && i - 1 < feeds.len()
-                {
-                    delete_feed_at(feeds, feed_state, i - 1, ctx).await;
-                    return Ok(true);
-                }
-
-                match command {
-                    Command::Quit | Command::Back => {
-                        ctx.navigate_to(ModuleId::LAUNCHER);
-                        return Ok(true);
-                    }
-                    Command::Up => {
-                        if *active_panel == Panel::Feeds {
-                            if !feeds.is_empty() || feed_state.selected().is_some() {
-                                let i = match feed_state.selected() {
-                                    Some(i) => {
-                                        if i == 0 {
-                                            feeds.len()
-                                        } else {
-                                            i - 1
-                                        }
-                                    }
-                                    None => 0,
-                                };
-                                feed_state.select(Some(i));
-                                let filtered_len = get_filtered_items(feeds, items, i).len();
-                                if filtered_len > 0 {
-                                    let item_sel = item_state.selected().unwrap_or(0);
-                                    item_state.select(Some(item_sel.min(filtered_len - 1)));
-                                } else {
-                                    item_state.select(None);
-                                }
-                                changed = true;
-                            }
-                        } else {
-                            let feed_idx = feed_state.selected().unwrap_or(0);
-                            let filtered = get_filtered_items(feeds, items, feed_idx);
-                            if !filtered.is_empty() {
-                                let i = match item_state.selected() {
-                                    Some(i) => {
-                                        if i == 0 {
-                                            filtered.len() - 1
-                                        } else {
-                                            i - 1
-                                        }
-                                    }
-                                    None => 0,
-                                };
-                                item_state.select(Some(i));
-                                changed = true;
-                            }
-                        }
-                    }
-                    Command::Down => {
-                        if *active_panel == Panel::Feeds {
-                            let i = match feed_state.selected() {
-                                Some(i) => {
-                                    if i >= feeds.len() {
-                                        0
-                                    } else {
-                                        i + 1
-                                    }
-                                }
-                                None => 0,
-                            };
-                            feed_state.select(Some(i));
-                            let filtered_len = get_filtered_items(feeds, items, i).len();
-                            if filtered_len > 0 {
-                                let item_sel = item_state.selected().unwrap_or(0);
-                                item_state.select(Some(item_sel.min(filtered_len - 1)));
-                            } else {
-                                item_state.select(None);
-                            }
-                            changed = true;
-                        } else {
-                            let feed_idx = feed_state.selected().unwrap_or(0);
-                            let filtered = get_filtered_items(feeds, items, feed_idx);
-                            if !filtered.is_empty() {
-                                let i = match item_state.selected() {
-                                    Some(i) => {
-                                        if i >= filtered.len() - 1 {
-                                            0
-                                        } else {
-                                            i + 1
-                                        }
-                                    }
-                                    None => 0,
-                                };
-                                item_state.select(Some(i));
-                                changed = true;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-
-                if let Event::Key(key) = event {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Tab => {
-                                *active_panel = match active_panel {
-                                    Panel::Feeds => Panel::Items,
-                                    Panel::Items => Panel::Feeds,
-                                };
-                                changed = true;
-                            }
-                            KeyCode::Char('r') => {
-                                if !*is_refreshing {
-                                    *is_refreshing = true;
-                                    ctx.show_info("Refreshing feeds...");
-                                    let storage = Arc::clone(&ctx.storage);
-                                    let config = Arc::clone(&ctx.config);
-                                    let result_slot = Arc::clone(refresh_result);
-
-                                    tokio::spawn(async move {
-                                        let res =
-                                            RssEngine::fetch_all(&storage, &config.load()).await;
-                                        if let Err(e) = res {
-                                            let mut slot = result_slot.lock().unwrap();
-                                            *slot = Some(Err(e.to_string()));
-                                        } else {
-                                            let all_items = RssEngine::load_items(&storage).await;
-                                            let mut slot = result_slot.lock().unwrap();
-                                            *slot = Some(Ok(all_items));
-                                        }
-                                    });
-                                    changed = true;
-                                }
-                            }
-                            KeyCode::Char('a') => {
-                                *view = RssView::EditFeed {
-                                    url_input: String::new(),
-                                    name_input: String::new(),
-                                    focus: EditField::Url,
-                                    name_is_suggested: true,
-                                    title_fetch_pending: false,
-                                    editing_index: None,
-                                };
-                                changed = true;
-                            }
-                            KeyCode::Char('e') => {
-                                if *active_panel == Panel::Feeds {
-                                    if let Some(i) = feed_state.selected() {
-                                        if i > 0 && i - 1 < feeds.len() {
-                                            let f = &feeds[i - 1];
-                                            let name_input = f.title.clone().unwrap_or_default();
-                                            let name_is_suggested = name_input.is_empty();
-                                            *view = RssView::EditFeed {
-                                                url_input: f.url.clone(),
-                                                name_input,
-                                                focus: EditField::Url,
-                                                name_is_suggested,
-                                                title_fetch_pending: false,
-                                                editing_index: Some(i - 1),
-                                            };
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Char('f') => {
-                                if *active_panel == Panel::Feeds {
-                                    if let Some(i) = feed_state.selected() {
-                                        if i > 0 && i - 1 < feeds.len() {
-                                            feeds[i - 1].favorite = !feeds[i - 1].favorite;
-                                            if let Err(e) = RssEngine::save_feeds(
-                                                &ctx.storage,
-                                                &ctx.config.load(),
-                                                feeds,
-                                            )
-                                            .await
-                                            {
-                                                ctx.show_error(format!("Save error: {}", e));
-                                            } else if feeds[i - 1].favorite {
-                                                ctx.show_info("Added to favorites.");
-                                            } else {
-                                                ctx.show_info("Removed from favorites.");
-                                            }
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Char('d') => {
-                                if *active_panel == Panel::Feeds {
-                                    if let Some(i) = feed_state.selected() {
-                                        if i > 0 && i - 1 < feeds.len() {
-                                            *view = RssView::ConfirmDeleteFeed { index: i - 1 };
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Char('c') => {
-                                if *active_panel == Panel::Items {
-                                    let feed_idx = feed_state.selected().unwrap_or(0);
-                                    let filtered = get_filtered_items(feeds, items, feed_idx);
-                                    if let Some(i) = item_state.selected() {
-                                        if i < filtered.len() {
-                                            let link = &filtered[i].link;
-                                            match Clipboard::new()
-                                                .and_then(|mut c| c.set_text(link.to_string()))
-                                            {
-                                                Ok(_) => ctx.show_info(format!("Copied: {}", link)),
-                                                Err(e) => ctx
-                                                    .show_error(format!("Clipboard error: {}", e)),
-                                            }
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Char('o') => {
-                                if *active_panel == Panel::Items {
-                                    let feed_idx = feed_state.selected().unwrap_or(0);
-                                    let filtered = get_filtered_items(feeds, items, feed_idx);
-                                    if let Some(i) = item_state.selected() {
-                                        if i < filtered.len() {
-                                            match moku_core::util::open_url(&filtered[i].link) {
-                                                Ok(_) => ctx.show_info("Opening in browser..."),
-                                                Err(e) => {
-                                                    ctx.show_error(format!("Failed to open: {}", e))
-                                                }
-                                            }
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                            }
-                            KeyCode::Enter => {
-                                if *active_panel == Panel::Items {
-                                    let feed_idx = feed_state.selected().unwrap_or(0);
-                                    let filtered = get_filtered_items(feeds, items, feed_idx);
-                                    if let Some(i) = item_state.selected() {
-                                        if i < filtered.len() {
-                                            *view = RssView::Detail {
-                                                item: filtered[i].clone(),
-                                            };
-                                            changed = true;
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+        let view_changed = match view {
+            RssView::Split { .. } => {
+                view_split::handle_event(
+                    view,
+                    feeds,
+                    items,
+                    refresh_result,
+                    is_refreshing,
+                    event,
+                    ctx,
+                    command,
+                )
+                .await?
             }
-            RssView::Detail { item } => {
-                if let Event::Key(key) = event {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') => {
-                                let mut feed_state = ListState::default();
-                                feed_state.select(Some(0));
-                                let mut item_state = ListState::default();
-                                item_state.select(Some(0));
-                                *view = RssView::Split {
-                                    active_panel: Panel::Items,
-                                    feed_state,
-                                    item_state,
-                                };
-                                changed = true;
-                            }
-                            KeyCode::Char('c') => {
-                                match Clipboard::new()
-                                    .and_then(|mut c| c.set_text(item.link.clone()))
-                                {
-                                    Ok(_) => ctx.show_info(format!("Copied: {}", item.link)),
-                                    Err(e) => ctx.show_error(format!("Clipboard error: {}", e)),
-                                }
-                                changed = true;
-                            }
-                            KeyCode::Char('o') => {
-                                match moku_core::util::open_url(&item.link) {
-                                    Ok(_) => ctx.show_info("Opening in browser..."),
-                                    Err(e) => ctx.show_error(format!("Failed to open: {}", e)),
-                                }
-                                changed = true;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+            RssView::Detail { .. } => view_detail::handle_detail_event(view, event, ctx).await?,
+            RssView::EditFeed { .. } => {
+                view_edit_feed::handle_event(view, feeds, title_suggestion, event, ctx).await?
             }
-            RssView::EditFeed {
-                url_input,
-                name_input,
-                focus,
-                name_is_suggested,
-                title_fetch_pending,
-                editing_index,
-            } => {
-                // Apply a background title-suggestion fetch's result, if
-                // one just finished for the URL currently in the field and
-                // the user hasn't typed a name of their own since it was
-                // kicked off (see the Tab handler below).
-                let got_suggestion = {
-                    let mut slot = title_suggestion.lock().unwrap();
-                    slot.take()
-                };
-                if let Some((for_url, title)) = got_suggestion {
-                    if for_url == url_input.trim() {
-                        *title_fetch_pending = false;
-                        if *name_is_suggested && let Some(t) = title {
-                            *name_input = t;
-                        }
-                        changed = true;
-                    }
-                }
+            RssView::ConfirmDeleteFeed { .. } => {
+                view_detail::handle_confirm_delete_event(view, feeds, event, ctx).await?
+            }
+        };
 
-                if let Event::Key(key) = event {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Esc => {
-                                let mut feed_state = ListState::default();
-                                feed_state.select(Some(0));
-                                let mut item_state = ListState::default();
-                                item_state.select(Some(0));
-                                *view = RssView::Split {
-                                    active_panel: Panel::Feeds,
-                                    feed_state,
-                                    item_state,
-                                };
-                                changed = true;
-                            }
-                            KeyCode::Tab => {
-                                let switching_to_name = *focus == EditField::Url;
-                                *focus = match focus {
-                                    EditField::Url => EditField::Name,
-                                    EditField::Name => EditField::Url,
-                                };
-                                // Moving from the URL field to the Name
-                                // field: give an instant domain-based
-                                // suggestion (no network needed), then try
-                                // to upgrade it to the feed's real title in
-                                // the background — same fetch machinery the
-                                // [r] refresh already uses.
-                                if switching_to_name && *name_is_suggested {
-                                    let trimmed = url_input.trim().to_string();
-                                    if !trimmed.is_empty() {
-                                        *name_input = domain_of(&trimmed).unwrap_or_default();
-                                        if !*title_fetch_pending {
-                                            *title_fetch_pending = true;
-                                            let slot = Arc::clone(title_suggestion);
-                                            let fetch_url = trimmed;
-                                            tokio::spawn(async move {
-                                                let title = RssEngine::peek_title(&fetch_url).await;
-                                                let mut slot = slot.lock().unwrap();
-                                                *slot = Some((fetch_url, title));
-                                            });
-                                        }
-                                    }
-                                }
-                                changed = true;
-                            }
-                            KeyCode::Backspace => {
-                                match focus {
-                                    EditField::Url => {
-                                        url_input.pop();
-                                    }
-                                    EditField::Name => {
-                                        name_input.pop();
-                                        *name_is_suggested = false;
-                                    }
-                                }
-                                changed = true;
-                            }
-                            KeyCode::Enter => {
-                                if url_input.trim().is_empty() {
-                                    ctx.show_warning("URL cannot be empty.");
-                                } else {
-                                    let url = url_input.trim().to_string();
-                                    let name = name_input.trim();
-                                    let title = if name.is_empty() {
-                                        None
-                                    } else {
-                                        Some(name.to_string())
-                                    };
-                                    let outcome = apply_edit(feeds, *editing_index, url, title);
-                                    match outcome {
-                                        EditOutcome::DuplicateUrl => {
-                                            ctx.show_warning(
-                                                "A feed with this URL already exists.",
-                                            );
-                                        }
-                                        EditOutcome::Added => {
-                                            if let Err(e) = RssEngine::save_feeds(
-                                                &ctx.storage,
-                                                &ctx.config.load(),
-                                                feeds,
-                                            )
-                                            .await
-                                            {
-                                                ctx.show_error(format!("Save failed: {}", e));
-                                            } else {
-                                                ctx.show_info("Feed added.");
-                                            }
-                                        }
-                                        EditOutcome::Updated => {
-                                            if let Err(e) = RssEngine::save_feeds(
-                                                &ctx.storage,
-                                                &ctx.config.load(),
-                                                feeds,
-                                            )
-                                            .await
-                                            {
-                                                ctx.show_error(format!("Save failed: {}", e));
-                                            } else {
-                                                ctx.show_info("Feed updated.");
-                                            }
-                                        }
-                                    }
-                                    let mut feed_state = ListState::default();
-                                    feed_state.select(Some(0));
-                                    let mut item_state = ListState::default();
-                                    item_state.select(Some(0));
-                                    *view = RssView::Split {
-                                        active_panel: Panel::Feeds,
-                                        feed_state,
-                                        item_state,
-                                    };
-                                }
-                                changed = true;
-                            }
-                            KeyCode::Char(c) => {
-                                match focus {
-                                    EditField::Url => url_input.push(c),
-                                    EditField::Name => {
-                                        name_input.push(c);
-                                        *name_is_suggested = false;
-                                    }
-                                }
-                                changed = true;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            RssView::ConfirmDeleteFeed { index } => {
-                match moku_core::resolve_confirm_delete_key(event) {
-                    moku_core::ConfirmDeleteKey::Confirm => {
-                        let mut feed_state = ListState::default();
-                        delete_feed_at(feeds, &mut feed_state, *index, ctx).await;
-                        let mut item_state = ListState::default();
-                        item_state.select(Some(0));
-                        *view = RssView::Split {
-                            active_panel: Panel::Feeds,
-                            feed_state,
-                            item_state,
-                        };
-                        changed = true;
-                    }
-                    moku_core::ConfirmDeleteKey::Cancel => {
-                        let mut feed_state = ListState::default();
-                        feed_state.select(Some(*index + 1));
-                        let mut item_state = ListState::default();
-                        item_state.select(Some(0));
-                        *view = RssView::Split {
-                            active_panel: Panel::Feeds,
-                            feed_state,
-                            item_state,
-                        };
-                        changed = true;
-                    }
-                    moku_core::ConfirmDeleteKey::Other => {}
-                }
-            }
-        }
-
-        Ok(changed)
+        Ok(changed || view_changed)
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
@@ -826,275 +289,13 @@ impl TuiModule for RssTuiModule {
         } = self;
 
         match view {
-            RssView::Split {
-                active_panel,
-                feed_state,
-                item_state,
-            } => {
-                let chunks =
-                    Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
-
-                let panels =
-                    Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
-                        .split(chunks[0]);
-
-                // Feeds panel — favorite marker goes at the FRONT of the
-                // line, not appended at the end: a long label (or a narrow
-                // panel) means trailing content gets clipped, so a
-                // trailing star was effectively never visible.
-                let mut feed_items = vec![ListItem::new(" * All Feeds")];
-                for f in feeds.iter() {
-                    let marker = if f.favorite { "★" } else { " " };
-                    feed_items.push(ListItem::new(format!(" {} {}", marker, feed_label(f))));
-                }
-
-                let feed_border_style = if *active_panel == Panel::Feeds {
-                    Style::default()
-                        .fg(theme.selection_bg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.border)
-                };
-
-                let feed_list = List::new(feed_items)
-                    .block(
-                        Block::default()
-                            .title(" 📡 Feeds ")
-                            .borders(Borders::ALL)
-                            .border_style(feed_border_style)
-                            .style(Style::default().bg(theme.base_bg)),
-                    )
-                    .style(Style::default().fg(theme.base_fg))
-                    .highlight_style(
-                        Style::default()
-                            .fg(theme.selection_fg)
-                            .bg(theme.selection_bg)
-                            .add_modifier(Modifier::BOLD),
-                    );
-
-                frame.render_stateful_widget(feed_list, panels[0], feed_state);
-
-                // Articles column: list on top, preview of the selected
-                // article below.
-                let article_area =
-                    Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
-                        .split(panels[1]);
-
-                let selected_feed_idx = feed_state.selected().unwrap_or(0);
-                let filtered = get_filtered_items(feeds, items, selected_feed_idx);
-
-                let item_items: Vec<ListItem> = filtered
-                    .iter()
-                    .map(|i| ListItem::new(format!("[{}] {}", i.feed_title, i.title)))
-                    .collect();
-
-                let item_border_style = if *active_panel == Panel::Items {
-                    Style::default()
-                        .fg(theme.selection_bg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.border)
-                };
-
-                let mut title = " 📰 Articles ".to_string();
-                if *is_refreshing {
-                    title.push_str("(Refreshing...) ");
-                }
-
-                let item_list = List::new(item_items)
-                    .block(
-                        Block::default()
-                            .title(title)
-                            .borders(Borders::ALL)
-                            .border_style(item_border_style)
-                            .style(Style::default().bg(theme.base_bg)),
-                    )
-                    .style(Style::default().fg(theme.base_fg))
-                    .highlight_style(
-                        Style::default()
-                            .fg(theme.selection_fg)
-                            .bg(theme.selection_bg)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                    .highlight_symbol(">> ");
-
-                frame.render_stateful_widget(item_list, article_area[0], item_state);
-
-                let preview_text = match item_state.selected().and_then(|i| filtered.get(i)) {
-                    Some(item) => format!(
-                        "{}\n{}\n\n{}",
-                        item.feed_title,
-                        item.title,
-                        item.summary.as_deref().unwrap_or("No preview available.")
-                    ),
-                    None => "No article selected.".to_string(),
-                };
-                let preview = Paragraph::new(preview_text)
-                    .wrap(Wrap { trim: true })
-                    .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-                    .block(
-                        Block::default()
-                            .title(" Preview ")
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(theme.border)),
-                    );
-                frame.render_widget(preview, article_area[1]);
-
-                // Help bar
-                let help_text = if *active_panel == Panel::Feeds {
-                    " [Tab] Switch | [a] Add Feed | [e] Edit Feed | [d] Delete Feed | [f] Favorite | [r] Refresh | [Esc] Back "
-                } else {
-                    " [Tab] Switch | [Enter] Read | [c] Copy Link | [o] Open Browser | [r] Refresh | [Esc] Back "
-                };
-                let help = Paragraph::new(help_text)
-                    .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(theme.border)),
-                    );
-                frame.render_widget(help, chunks[1]);
+            RssView::Split { .. } => {
+                view_split::draw(view, feeds, items, *is_refreshing, frame, area, theme)
             }
-            RssView::Detail { item } => {
-                let chunks =
-                    Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
-
-                let block = Block::default()
-                    .title(format!(" 📰 {} ", item.feed_title))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.border));
-
-                let inner_area = block.inner(chunks[0]);
-                frame.render_widget(block, chunks[0]);
-
-                let detail_text = match item.summary.as_deref() {
-                    Some(summary) => format!(
-                        "Title:\n{}\n\nLink:\n{}\n\nSummary:\n{}\n",
-                        item.title, item.link, summary
-                    ),
-                    None => format!("Title:\n{}\n\nLink:\n{}\n", item.title, item.link),
-                };
-
-                let p = Paragraph::new(detail_text)
-                    .wrap(Wrap { trim: true })
-                    .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
-                frame.render_widget(p, inner_area);
-
-                let help = Paragraph::new(" [c] Copy Link | [o] Open Browser | [Esc/q] Back ")
-                    .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(theme.border)),
-                    );
-                frame.render_widget(help, chunks[1]);
-            }
-            RssView::EditFeed {
-                url_input,
-                name_input,
-                focus,
-                name_is_suggested: _,
-                title_fetch_pending,
-                editing_index,
-            } => {
-                let popup_area = centered_rect(60, 20, area);
-                frame.render_widget(Clear, popup_area);
-
-                let title = if editing_index.is_some() {
-                    " Edit Feed "
-                } else {
-                    " Add Feed "
-                };
-                let block = Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.selection_bg));
-
-                let inner_area = block.inner(popup_area);
-                frame.render_widget(block, popup_area);
-
-                let layout = Layout::vertical([
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                    Constraint::Min(0),
-                    Constraint::Length(1),
-                ])
-                .split(inner_area);
-
-                let field_style = |focused: bool| {
-                    if focused {
-                        Style::default().fg(theme.selection_fg)
-                    } else {
-                        Style::default().fg(theme.base_fg)
-                    }
-                };
-
-                let url_focused = *focus == EditField::Url;
-                let url_p = Paragraph::new(format!(
-                    "{} URL:  {}",
-                    if url_focused { ">" } else { " " },
-                    url_input
-                ))
-                .style(field_style(url_focused));
-                frame.render_widget(url_p, layout[0]);
-
-                let name_focused = *focus == EditField::Name;
-                let fetching = if *title_fetch_pending {
-                    " (fetching...)"
-                } else {
-                    ""
-                };
-                let name_p = Paragraph::new(format!(
-                    "{} Name: {}{}",
-                    if name_focused { ">" } else { " " },
-                    name_input,
-                    fetching
-                ))
-                .style(field_style(name_focused));
-                frame.render_widget(name_p, layout[1]);
-
-                let help_p = Paragraph::new(" [Tab] Switch field  [Enter] Save  [Esc] Cancel ")
-                    .style(
-                        Style::default()
-                            .fg(theme.base_fg)
-                            .add_modifier(Modifier::DIM),
-                    );
-                frame.render_widget(help_p, layout[3]);
-            }
-            RssView::ConfirmDeleteFeed { index } => {
-                let popup_area = centered_rect(60, 20, area);
-                frame.render_widget(Clear, popup_area);
-
-                let label = feeds
-                    .get(*index)
-                    .map(feed_label)
-                    .unwrap_or_else(|| "this feed".to_string());
-
-                let block = Block::default()
-                    .title(" Confirm Delete ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.error));
-
-                let inner_area = block.inner(popup_area);
-                frame.render_widget(block, popup_area);
-
-                let layout = Layout::vertical([
-                    Constraint::Length(1),
-                    Constraint::Min(0),
-                    Constraint::Length(1),
-                ])
-                .split(inner_area);
-
-                let message = Paragraph::new(format!("Delete '{label}'?"))
-                    .style(Style::default().fg(theme.base_fg));
-                frame.render_widget(message, layout[0]);
-
-                let help_p = Paragraph::new(" [y] Yes  [n] No ").style(
-                    Style::default()
-                        .fg(theme.base_fg)
-                        .add_modifier(Modifier::DIM),
-                );
-                frame.render_widget(help_p, layout[2]);
+            RssView::Detail { .. } => view_detail::draw_detail(view, frame, area, theme),
+            RssView::EditFeed { .. } => view_edit_feed::draw(view, frame, area, theme),
+            RssView::ConfirmDeleteFeed { .. } => {
+                view_detail::draw_confirm_delete(view, feeds, frame, area, theme)
             }
         }
     }
@@ -1145,66 +346,6 @@ mod tests {
     fn test_feed_label_falls_back_to_raw_url_when_unparseable() {
         let f = sub("not a url", None, false);
         assert_eq!(feed_label(&f), "not a url");
-    }
-
-    #[test]
-    fn test_apply_edit_adds_new_feed() {
-        let mut feeds = vec![sub("https://a.example/feed", None, false)];
-        let outcome = apply_edit(
-            &mut feeds,
-            None,
-            "https://b.example/feed".to_string(),
-            Some("B".to_string()),
-        );
-        assert!(matches!(outcome, EditOutcome::Added));
-        assert_eq!(feeds.len(), 2);
-        assert_eq!(feeds[1].title.as_deref(), Some("B"));
-    }
-
-    #[test]
-    fn test_apply_edit_updates_existing_feed_at_its_index() {
-        let mut feeds = vec![
-            sub("https://a.example/feed", None, false),
-            sub("https://b.example/feed", Some("B"), false),
-        ];
-        let outcome = apply_edit(
-            &mut feeds,
-            Some(1),
-            "https://b-new.example/feed".to_string(),
-            Some("B Renamed".to_string()),
-        );
-        assert!(matches!(outcome, EditOutcome::Updated));
-        assert_eq!(feeds.len(), 2, "editing must not add a new entry");
-        assert_eq!(feeds[1].url, "https://b-new.example/feed");
-        assert_eq!(feeds[1].title.as_deref(), Some("B Renamed"));
-        assert_eq!(
-            feeds[0].url, "https://a.example/feed",
-            "other feed untouched"
-        );
-    }
-
-    #[test]
-    fn test_apply_edit_rejects_duplicate_url_against_other_feeds() {
-        let mut feeds = vec![
-            sub("https://a.example/feed", None, false),
-            sub("https://b.example/feed", None, false),
-        ];
-        let outcome = apply_edit(&mut feeds, None, "https://a.example/feed".to_string(), None);
-        assert!(matches!(outcome, EditOutcome::DuplicateUrl));
-        assert_eq!(feeds.len(), 2, "nothing should be added on a duplicate");
-    }
-
-    #[test]
-    fn test_apply_edit_editing_a_feed_with_its_own_unchanged_url_is_not_a_duplicate() {
-        let mut feeds = vec![sub("https://a.example/feed", Some("A"), false)];
-        let outcome = apply_edit(
-            &mut feeds,
-            Some(0),
-            "https://a.example/feed".to_string(),
-            Some("A Renamed".to_string()),
-        );
-        assert!(matches!(outcome, EditOutcome::Updated));
-        assert_eq!(feeds[0].title.as_deref(), Some("A Renamed"));
     }
 
     fn rendered_rows(module: &mut RssTuiModule) -> Vec<String> {
@@ -1363,7 +504,7 @@ mod confirm_delete_tests {
     use std::sync::Arc;
 
     use arc_swap::ArcSwap;
-    use crossterm::event::{KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use moku_core::security::{SecurityManager, VaultSession};
     use moku_core::{MokuConfig, StorageManager};
     use tempfile::tempdir;
