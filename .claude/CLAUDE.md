@@ -5,6 +5,22 @@ modules (`modules/moku-*`, plus top-level crates like `moku-vault-daemon`,
 `moku-daemon`, `moku-lua`) around a shared `moku-core` (theme, config,
 storage, security, module traits, keybinding resolution).
 
+## Versioning convention
+
+- **`moku-bin`'s `Cargo.toml` version is the one git tags track.** Bump
+  its patch number (`0.2.0` → `0.2.1` → `0.2.2` → ...) whenever a
+  distinct, complete-enough change or feature lands — not on every
+  commit, and not silently: flag that a bump looks due and ask before
+  doing it.
+- **A patch bump gets a plain commit, no git tag.** Only two things get
+  a git tag (`vX.Y.0`): moving to a new minor/major version (e.g.
+  `0.2.x` → `0.3.0`), or a hotfix release. `v0.2.0` (this file's
+  "Health-check passes" section) is the precedent for the tagged case;
+  patch bumps in between accumulate untagged on `dev`/`main`.
+- Storage/crypto schema versioning (`KeyScheme`, below) is a completely
+  separate axis from this — the app version and the on-disk schema
+  version are allowed to move independently, on their own schedules.
+
 ## Security / crypto conventions
 
 - **Argon2id is the only password KDF.** Params are `Params::new(65536, 3, 4,
@@ -23,26 +39,61 @@ storage, security, module traits, keybinding resolution).
   `Hkdf::new(None, master)` + one `hk.expand(info, &mut out)` call per
   subkey. Bump the `/v1` suffix (not the string itself) if a derivation
   ever needs to change incompatibly.
-- **`moku-core`'s general storage layer (`StorageManager::save`/`load`) now
+- **`moku-core`'s general storage layer (`StorageManager::save`/`load`)
   uses per-module HKDF subkeys, not the raw vault master key directly.**
   Every module's encrypted data (todo/bookmark/secrets/rss/...) is
   encrypted under `derive_module_storage_key(master, module_id)`, never
   the raw master key — closing the same "raw key as cipher key" gap the
   bullet above already covered for `moku-vault-fs`/`moku-vault-daemon`.
-  `StorageEnvelope.key_scheme` (`KeyScheme::Legacy` vs. `PerModuleV1`,
-  `#[serde(default)]` so it's `Legacy` on every pre-existing on-disk
-  record) tracks which scheme a given record was written under — `load()`
-  picks the matching key automatically, so old records keep reading
-  correctly forever with zero action required. A user re-triggers the
-  existing "migrate to encrypted" action (Settings → Storage tab's
-  `m`/`Shift+M`, or `moku config migrate`) to explicitly upgrade a
-  module's Legacy-scheme records to `PerModuleV1` — `migrate_one_key`
-  already treats a stale key scheme as "needs migration" even when
-  `EncryptionStatus` already matches the target, so no new command/UI was
-  needed for this. **Any new module added to `ENCRYPTABLE_MODULES`
+- **`StorageEnvelope.key_scheme` is a numbered migration chain, not a
+  one-off flag.** `KeyScheme` (`moku-core/src/storage/envelope.rs`) is
+  `V0` (raw master key, `#[default]`/`#[serde(rename = "Legacy")]`) or
+  `V1` (per-module HKDF subkey, `#[serde(rename = "PerModuleV1")]`,
+  current) — the `serde(rename)`s pin the on-disk JSON tags to their
+  original strings forever, so every already-written record (including
+  already-migrated production data) keeps deserializing correctly no
+  matter what the Rust-side variant names become. `KeyScheme::version()`
+  and `CURRENT_KEY_SCHEME` give a plain `u16` ordinal instead of matching
+  every past variant everywhere that cares. Adding a future `V2` means:
+  (1) a new variant + its `version()` arm, (2) a `resolve_key_for_scheme`
+  match arm in `storage::manager`, (3) bumping `CURRENT_KEY_SCHEME`, and
+  (4) — only if `V2` changes the decrypted JSON shape, not just the key
+  derivation — a `match` arm in `envelope::data_transform_for_hop`.
+  `StorageManager::migrate_key_scheme_to_latest` (per module) /
+  `migrate_all_key_schemes` (every `ENCRYPTABLE_MODULES` module id, only
+  advances the marker below on full success) walk a record straight from
+  whatever version it's on to `CURRENT_KEY_SCHEME` — a caller never
+  needs to know or replay intermediate hops. This is a completely
+  separate concern from `migrate_module_encryption`'s encrypted/
+  plaintext config toggle — that method no longer touches `key_scheme`
+  as a side effect; re-keying only ever happens through the two methods
+  above.
+- **The data directory self-describes its own key-scheme version,
+  independent of any in-app config.** `StorageManager` writes a small
+  `.key_scheme_version` marker file at the vault root (sibling to every
+  module's own subdirectory) the moment a brand-new `vault_root` is
+  created — a fresh install starts life already on `CURRENT_KEY_SCHEME`,
+  nothing to ever migrate. `data_dir_key_scheme_version()` reads it (a
+  missing file reads as `0`, exactly `KeyScheme::default()`'s meaning)
+  and needs no unlock — it's a plain version number, not decrypted data
+  — so a bare copy/backup of the data directory alone is always enough
+  to know its version, with zero dependency on `config.toml` or which
+  machine it's opened on. `moku-bin/src/main.rs` reads it at startup;
+  `app_loop.rs`, the first time the vault is actually unlocked in that
+  run, either applies `migrate_all_key_schemes` silently and reports the
+  result via `ctx.show_info` (small gap, below
+  `SCHEMA_UPGRADE_PROMPT_THRESHOLD`) or shows a small full-pane confirm
+  overlay first (Enter/`y` upgrade now, Esc/`n` skip — asked again next
+  launch, nothing persisted) for a larger gap. The manual "migrate to
+  encrypted" action (Settings → Storage tab's `m`/`Shift+M`, or `moku
+  config migrate`) is unrelated and still only toggles encrypted vs.
+  plaintext — it never touches the key-scheme marker or version.
+  **Any new module added to `ENCRYPTABLE_MODULES`
   (`modules/moku-settings/src/tabs/storage.rs`) must also be added to the
-  identical list in `moku-bin/src/config_cmd.rs`** — the two are meant to
-  stay in sync (TUI vs. CLI equivalents of the same migration action).
+  identical list in `moku-bin/src/config_cmd.rs`** (now `pub(crate)`
+  there so `app_loop.rs` can reuse the same list directly instead of a
+  third hand-kept copy) — the two are meant to stay in sync (TUI vs. CLI
+  equivalents of the same migration action).
 - **Every secret value in memory is `secrecy::SecretBox<T>` where `T:
   Zeroize`, or `zeroize::Zeroizing<T>` for a plain owned value like a
   password `String` that isn't going through `SecretBox`'s access-control
@@ -281,3 +332,25 @@ already-accepted):
 
 Don't redo this same full-repo sweep without a specific new reason —
 check `git log` for what's changed since.
+
+### 2026-09-06 — v0.2.0 tagged, key-scheme migration chain built
+
+The second pass's state (per-module HKDF storage keys, the `moku-secrets`
+Zeroizing refactor, everything above) was locked in as `moku-bin` `0.2.0`
+and tagged `v0.2.0` on `main` — the first git tag under the versioning
+convention at the top of this file, and the precedent for what "tag-
+worthy" means (a real release point, not every patch bump).
+
+Immediately after, `KeyScheme::Legacy`/`PerModuleV1` (the ad hoc,
+one-off migration built for the second pass) was generalized into the
+permanent `V0`/`V1`/`CURRENT_KEY_SCHEME` chain and `.key_scheme_version`
+data-directory marker described in the crypto section above — the
+explicit goal being that any future key-scheme or storage-format change
+only ever needs one new variant plus one migration hop, never a bespoke
+one-time mechanism again. `migrate_module_encryption`'s old
+`stale_key_scheme` side effect (upgrading key scheme as a side effect of
+the unrelated encrypted/plaintext toggle) was removed in favor of the
+dedicated `migrate_key_scheme_to_latest`/`migrate_all_key_schemes`. This
+work stayed on `dev`, untagged, per the versioning convention above —
+`moku-bin` will get a `0.2.1` patch bump for it once flagged and
+confirmed.
