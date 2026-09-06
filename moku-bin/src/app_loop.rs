@@ -4,18 +4,96 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
-use crossterm::event::EventStream;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
 use futures::StreamExt;
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::Text;
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use moku_core::{
     AppContext, ModuleId, MokuConfig, Router, SecurityManager, StorageManager, ToastManager,
     TuiRegistry, VaultSession, keys_match,
 };
 
+/// Below this many versions behind, a key-scheme upgrade is applied
+/// silently in the background right after unlock (small, cheap, no need
+/// to bother the user) — at or above it, `SchemaUpgradePrompt` asks
+/// first. Matches the user's own example threshold.
+const SCHEMA_UPGRADE_PROMPT_THRESHOLD: u16 = 2;
+
 #[derive(Clone, Copy)]
 enum AppState {
     Unlocked,
     Locked { after_unlock: ModuleId },
+}
+
+/// Shown full-pane (replacing the router's normal draw, same convention
+/// as e.g. `moku-todo`'s delete-confirmation view) once the vault is
+/// unlocked and the data directory turns out to be `versions_behind`
+/// versions behind `CURRENT_KEY_SCHEME`. Enter/`y` runs the upgrade now;
+/// Esc/`n` dismisses it for this run only — nothing is persisted, so a
+/// declined upgrade is offered again on the next launch.
+struct SchemaUpgradePrompt {
+    versions_behind: u16,
+}
+
+/// `Some(true)` = confirm, `Some(false)` = cancel, `None` = keep waiting
+/// (any other key while the prompt is open).
+fn schema_prompt_response(ev: &Event) -> Option<bool> {
+    let Event::Key(key) = ev else { return None };
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    match key.code {
+        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => Some(false),
+        _ => None,
+    }
+}
+
+fn draw_schema_upgrade_prompt(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    theme: &moku_core::MokuTheme,
+    versions_behind: u16,
+) {
+    let text = Text::from(format!(
+        "Storage encryption scheme is {versions_behind} version(s) behind the latest.\n\n\
+         Upgrade the data directory to the current scheme now?\n\n\
+         [Enter/y] Upgrade now   [Esc/n] Not now (asked again next launch)"
+    ));
+    let block = Block::default()
+        .title(" Storage scheme upgrade available ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.warning));
+    let para = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, area);
+}
+
+/// Runs `StorageManager::migrate_all_key_schemes` for every module in
+/// `module_ids` and turns the result into one human-readable summary
+/// line for a toast — shared by both the silent-auto-upgrade path and
+/// the confirm-prompt path below.
+async fn run_key_scheme_migration(ctx: &AppContext, module_ids: &[&str]) -> anyhow::Result<String> {
+    let reports = ctx.storage.migrate_all_key_schemes(module_ids).await?;
+    let total_migrated: usize = reports.iter().map(|(_, r)| r.migrated).sum();
+    let total_errors: usize = reports.iter().map(|(_, r)| r.errors.len()).sum();
+    let detail = reports
+        .iter()
+        .map(|(module, r)| format!("{module}: {} migrated", r.migrated))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if total_errors > 0 {
+        anyhow::bail!("{total_errors} record(s) failed to migrate ({detail})");
+    }
+    Ok(format!(
+        "Storage encryption scheme updated to the latest version ({total_migrated} record(s)) — {detail}"
+    ))
 }
 
 pub async fn run(
@@ -25,11 +103,26 @@ pub async fn run(
     storage: Arc<StorageManager>,
     mut registry: TuiRegistry,
     initial_target: ModuleId,
+    schema_versions_behind: u16,
 ) -> Result<()> {
     let mut terminal = crate::tui::init()?;
     let mut toasts = ToastManager::new();
     let mut router = Router::new(ModuleId::LAUNCHER);
     let mut ctx = AppContext::new(config, session, security, storage);
+
+    let module_ids: Vec<&str> = crate::config_cmd::ENCRYPTABLE_MODULES
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+
+    // Set once at startup from the data directory's own marker (no
+    // unlock needed to read it — see `main.rs`); consumed the first time
+    // the vault actually gets unlocked, below. `None` once handled
+    // (either auto-applied or handed off to `schema_prompt`) so it's
+    // never re-evaluated on a later unlock within the same run.
+    let mut pending_key_scheme_gap: Option<u16> =
+        (schema_versions_behind > 0).then_some(schema_versions_behind);
+    let mut schema_prompt: Option<SchemaUpgradePrompt> = None;
 
     let mut state = enter_module(&mut registry, &mut router, &mut ctx, initial_target)
         .await
@@ -56,7 +149,11 @@ pub async fn run(
                         }
                     }
                     AppState::Unlocked => {
-                        router.draw(&mut registry, f, area, &theme);
+                        if let Some(prompt) = &schema_prompt {
+                            draw_schema_upgrade_prompt(f, area, &theme, prompt.versions_behind);
+                        } else {
+                            router.draw(&mut registry, f, area, &theme);
+                        }
                     }
                 }
 
@@ -97,26 +194,66 @@ pub async fn run(
                                 .await
                                 .map_err(|e| eyre!(e))?;
                             dirty = true;
+
+                            // First real unlock this run — decide what to
+                            // do with the version gap detected at startup
+                            // (see main.rs). A small gap is applied right
+                            // away and just announced; a larger one asks
+                            // first via `schema_prompt`.
+                            if let Some(gap) = pending_key_scheme_gap.take() {
+                                if gap >= SCHEMA_UPGRADE_PROMPT_THRESHOLD {
+                                    schema_prompt = Some(SchemaUpgradePrompt { versions_behind: gap });
+                                } else {
+                                    match run_key_scheme_migration(&ctx, &module_ids).await {
+                                        Ok(summary) => ctx.show_info(summary),
+                                        Err(e) => ctx.show_error(format!(
+                                            "Storage scheme upgrade failed: {e}"
+                                        )),
+                                    }
+                                }
+                            }
                         }
                     }
                     AppState::Unlocked => {
-                        // Global lock hotkey, intercepted before normal
-                        // dispatch so it works from any screen.
-                        let lock_key = ctx.config.load().keys.lock_vault.clone();
-                        if let crossterm::event::Event::Key(key) = &ev
-                            && ctx.session.is_unlocked()
-                            && keys_match(*key, &lock_key)
-                        {
-                            ctx.session.lock();
-                            state = enter_module(&mut registry, &mut router, &mut ctx, ModuleId::LAUNCHER)
-                                .await
-                                .map_err(|e| eyre!(e))?;
-                            dirty = true;
+                        if let Some(prompt) = schema_prompt.take() {
+                            match schema_prompt_response(&ev) {
+                                Some(true) => {
+                                    match run_key_scheme_migration(&ctx, &module_ids).await {
+                                        Ok(summary) => ctx.show_info(summary),
+                                        Err(e) => ctx.show_error(format!(
+                                            "Storage scheme upgrade failed: {e}"
+                                        )),
+                                    }
+                                    dirty = true;
+                                }
+                                Some(false) => {
+                                    dirty = true;
+                                }
+                                None => {
+                                    // Not a confirm/cancel key — keep the
+                                    // prompt open and ignore the keypress.
+                                    schema_prompt = Some(prompt);
+                                }
+                            }
                         } else {
-                            dirty |= router
-                                .dispatch_event(&mut registry, &ev, &mut ctx)
-                                .await
-                                .map_err(|e| eyre!(e))?;
+                            // Global lock hotkey, intercepted before normal
+                            // dispatch so it works from any screen.
+                            let lock_key = ctx.config.load().keys.lock_vault.clone();
+                            if let crossterm::event::Event::Key(key) = &ev
+                                && ctx.session.is_unlocked()
+                                && keys_match(*key, &lock_key)
+                            {
+                                ctx.session.lock();
+                                state = enter_module(&mut registry, &mut router, &mut ctx, ModuleId::LAUNCHER)
+                                    .await
+                                    .map_err(|e| eyre!(e))?;
+                                dirty = true;
+                            } else {
+                                dirty |= router
+                                    .dispatch_event(&mut registry, &ev, &mut ctx)
+                                    .await
+                                    .map_err(|e| eyre!(e))?;
+                            }
                         }
                     }
                 }
@@ -274,6 +411,118 @@ mod tests {
         );
 
         AppContext::new(config, session, security, storage)
+    }
+
+    async fn create_unlocked_test_context() -> AppContext {
+        let temp = tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        std::mem::forget(temp);
+
+        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let session = Arc::new(VaultSession::new());
+        let key = SecurityManager::derive_key("test_pass", &[1u8; 16])
+            .await
+            .unwrap();
+        session.unlock(key);
+        let security = Arc::new(SecurityManager::new_with_root(root.clone()));
+        let storage = Arc::new(
+            StorageManager::new_with_root(Arc::clone(&session), root)
+                .await
+                .unwrap(),
+        );
+
+        AppContext::new(config, session, security, storage)
+    }
+
+    fn make_key(code: crossterm::event::KeyCode, modifiers: crossterm::event::KeyModifiers) -> Event {
+        Event::Key(crossterm::event::KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        })
+    }
+
+    #[test]
+    fn test_schema_prompt_response_confirm_keys() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        assert_eq!(
+            schema_prompt_response(&make_key(KeyCode::Enter, KeyModifiers::empty())),
+            Some(true)
+        );
+        assert_eq!(
+            schema_prompt_response(&make_key(KeyCode::Char('y'), KeyModifiers::empty())),
+            Some(true)
+        );
+        assert_eq!(
+            schema_prompt_response(&make_key(KeyCode::Char('Y'), KeyModifiers::empty())),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_schema_prompt_response_cancel_keys() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        assert_eq!(
+            schema_prompt_response(&make_key(KeyCode::Esc, KeyModifiers::empty())),
+            Some(false)
+        );
+        assert_eq!(
+            schema_prompt_response(&make_key(KeyCode::Char('n'), KeyModifiers::empty())),
+            Some(false)
+        );
+        assert_eq!(
+            schema_prompt_response(&make_key(KeyCode::Char('N'), KeyModifiers::empty())),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_schema_prompt_response_other_keys_ignored() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        assert_eq!(
+            schema_prompt_response(&make_key(KeyCode::Char('x'), KeyModifiers::empty())),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_key_scheme_migration_errors_when_vault_locked() {
+        let ctx = create_test_context().await;
+        let result = run_key_scheme_migration(&ctx, &["mod1"]).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_draw_schema_upgrade_prompt_renders_versions_behind() {
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let theme = moku_core::MokuTheme::default();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                draw_schema_upgrade_prompt(f, area, &theme, 3);
+            })
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("3 version"));
+        assert!(content.contains("Upgrade"));
+    }
+
+    #[tokio::test]
+    async fn test_run_key_scheme_migration_summarizes_zero_records() {
+        let ctx = create_unlocked_test_context().await;
+        let summary = run_key_scheme_migration(&ctx, &["mod1", "mod2"])
+            .await
+            .unwrap();
+        assert!(summary.contains("mod1: 0 migrated"));
+        assert!(summary.contains("mod2: 0 migrated"));
     }
 
     // Regression test for a real bug: the downcast used to type-erase

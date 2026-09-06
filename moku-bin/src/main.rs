@@ -202,5 +202,22 @@ async fn main() -> Result<()> {
 
     let registry = build_tui_registry(&*config.load());
 
-    run(config, session, security, storage, registry, target).await
+    // No unlock needed — this just reads the data directory's own
+    // version marker (see StorageManager::data_dir_key_scheme_version)
+    // to decide whether app_loop should offer/perform a key-scheme
+    // upgrade once the vault actually gets unlocked.
+    let stored_key_scheme_version = storage.data_dir_key_scheme_version().await;
+    let schema_versions_behind =
+        moku_core::CURRENT_KEY_SCHEME.version().saturating_sub(stored_key_scheme_version);
+
+    run(
+        config,
+        session,
+        security,
+        storage,
+        registry,
+        target,
+        schema_versions_behind,
+    )
+    .await
 }

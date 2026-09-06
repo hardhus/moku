@@ -14,7 +14,11 @@ use crate::cli::ConfigCommands;
 /// with modules/moku-settings/src/tabs/storage.rs's identical list for the
 /// TUI equivalent. `secrets` is included so `config migrate` can also
 /// re-key it to the current per-module HKDF storage key scheme.
-const ENCRYPTABLE_MODULES: &[(&str, bool)] =
+///
+/// `pub(crate)` so `app_loop.rs`'s startup key-scheme-version check can
+/// reuse this same module id list instead of introducing a third
+/// hand-kept copy alongside this one and moku-settings's.
+pub(crate) const ENCRYPTABLE_MODULES: &[(&str, bool)] =
     &[("todo", true), ("bookmark", true), ("rss", false), ("secrets", true)];
 
 pub async fn handle(

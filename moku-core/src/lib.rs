@@ -22,6 +22,6 @@ pub use module::{
 };
 pub use router::Router;
 pub use security::{SafeKey, SecurityManager, VaultSession};
-pub use storage::{MigrationReport, StorageManager, resolve_encryption};
+pub use storage::{CURRENT_KEY_SCHEME, MigrationReport, StorageManager, resolve_encryption};
 pub use theme::MokuTheme;
 pub use toast::{ToastManager, ToastType};
