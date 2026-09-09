@@ -506,37 +506,16 @@ mod tests {
             .find(|letter| !std::path::Path::new(&format!("{letter}\\")).exists())
     }
 
-    /// End-to-end proof that a real encrypted volume actually mounts as a
-    /// Windows drive and behaves like a normal filesystem: create, read,
-    /// list, nested dirs, rename, delete, and a clean unmount that leaves
-    /// no stuck drive behind. Requires WinFsp installed and a free drive
-    /// letter, so it's `#[ignore]`d by default — run explicitly with
-    /// `cargo test -p moku-volume-mount -- --ignored` to verify.
-    #[test]
-    #[ignore = "requires WinFsp installed and a free drive letter"]
-    fn test_real_mount_full_crud_roundtrip() {
+    /// Mounts `engine` at a fresh free drive letter, runs `body` against the
+    /// mounted root path, then always stops/unmounts and asserts the drive
+    /// is gone -- even if `body` panics (its panic is caught, cleanup still
+    /// runs, then re-raised as a failed `.expect(...)`). Shared by every
+    /// phase of the real-mount tests below so each phase gets its own
+    /// clean mount/unmount cycle without duplicating the thread/channel
+    /// plumbing.
+    fn with_real_mount(engine: VolumeEngine, body: impl FnOnce(&std::path::Path) + std::panic::UnwindSafe) {
         let mountpoint =
             find_free_drive_letter().expect("no free drive letter available for the test");
-        let volume_tmp = tempfile::tempdir().expect("tempdir");
-
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let engine = rt.block_on(async {
-            let security =
-                moku_core::SecurityManager::new_with_root(volume_tmp.path().to_path_buf());
-            let master_key = security
-                .initialize_vault(zeroize::Zeroizing::new("smoke-test-password".to_string()))
-                .await
-                .expect("init vault");
-            let keys = moku_volume_fs::derive_volume_keys(&master_key);
-            VolumeEngine::open_volume(
-                volume_tmp.path().join("data"),
-                keys,
-                volume_tmp.path().join("usage.json"),
-                50_000_000,
-            )
-            .expect("open_volume")
-        });
-
         let (stop_tx, stop_rx) = std::sync::mpsc::channel();
         let (mounted_tx, mounted_rx) = std::sync::mpsc::channel();
         let mount_mountpoint = mountpoint.clone();
@@ -551,9 +530,65 @@ mod tests {
             .expect("on_mounted should fire once the WinFsp mount actually succeeds");
 
         let root = std::path::Path::new(&mountpoint).to_path_buf();
-        let result = std::panic::catch_unwind(|| {
+        let result = std::panic::catch_unwind(|| body(&root));
+
+        let _ = stop_tx.send(());
+        mount_thread
+            .join()
+            .expect("mount thread panicked")
+            .expect("mount_and_wait failed");
+
+        assert!(
+            !std::path::Path::new(&format!("{mountpoint}\\")).exists(),
+            "drive must be gone after a clean unmount"
+        );
+        result.expect("filesystem operations against the mounted drive failed");
+    }
+
+    /// End-to-end proof that a real encrypted volume actually mounts as a
+    /// Windows drive and behaves like a normal filesystem, covering more
+    /// than the happy path: CRUD + nested dirs (phase 1), an editor-style
+    /// atomic save that writes a temp file, `fsync`s it, then renames it
+    /// over an *already-existing* destination (the exact sequence that
+    /// broke Helix's `:w` -- first with STATUS_OBJECT_NAME_COLLISION before
+    /// `replace_if_exists`, then with ERROR_INVALID_FUNCTION before `flush`
+    /// was implemented), a rename that must fail when the destination is an
+    /// existing directory, persistence of on-disk data across a real
+    /// unmount + fresh remount, and a real write past the volume's quota
+    /// failing with a proper OS error rather than hanging or corrupting
+    /// state. Requires WinFsp installed and a free drive letter -- not
+    /// `#[ignore]`d, since this repo has no CI and the one developer
+    /// working on it always has WinFsp installed; `cargo test` will fail
+    /// hard on a machine without WinFsp.
+    #[test]
+    fn test_real_mount_full_crud_roundtrip() {
+        let volume_tmp = tempfile::tempdir().expect("tempdir");
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let master_key = rt.block_on(async {
+            let security =
+                moku_core::SecurityManager::new_with_root(volume_tmp.path().to_path_buf());
+            security
+                .initialize_vault(zeroize::Zeroizing::new("smoke-test-password".to_string()))
+                .await
+                .expect("init vault")
+        });
+        let open_engine = || {
+            let keys = moku_volume_fs::derive_volume_keys(&master_key);
+            VolumeEngine::open_volume(
+                volume_tmp.path().join("data"),
+                keys,
+                volume_tmp.path().join("usage.json"),
+                50_000_000,
+            )
+            .expect("open_volume")
+        };
+
+        // Phase 1: CRUD roundtrip, atomic-save-over-existing, rename-over-
+        // directory-fails. Leaves `persisted.md` behind (not deleted) so
+        // phase 2 can confirm it survives an unmount + fresh remount.
+        with_real_mount(open_engine(), |root| {
             assert!(
-                std::fs::read_dir(&root).unwrap().next().is_none(),
+                std::fs::read_dir(root).unwrap().next().is_none(),
                 "freshly mounted volume should be empty"
             );
 
@@ -571,7 +606,7 @@ mod tests {
                 "note content"
             );
 
-            let entries: Vec<_> = std::fs::read_dir(&root)
+            let entries: Vec<_> = std::fs::read_dir(root)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
                 .collect();
@@ -582,21 +617,84 @@ mod tests {
             assert!(root.join("renamed.txt").exists());
             assert!(!root.join("hello.txt").exists());
 
+            // Editor-style atomic save: destination already exists, write a
+            // sibling temp file, fsync it, then rename it over the
+            // destination. Regression test for both the replace-on-rename
+            // fix and the `flush` fix.
+            std::fs::write(root.join("dest.md"), b"old content").expect("write dest");
+            {
+                use std::io::Write;
+                let mut tmp = std::fs::File::create(root.join(".dest.md.tmp")).expect("create tmp");
+                tmp.write_all(b"new content").expect("write tmp");
+                tmp.sync_all()
+                    .expect("fsync (WinFsp flush) on the mounted volume must succeed");
+            }
+            std::fs::rename(root.join(".dest.md.tmp"), root.join("dest.md"))
+                .expect("atomic rename over an existing destination must succeed");
+            assert_eq!(
+                std::fs::read_to_string(root.join("dest.md")).unwrap(),
+                "new content"
+            );
+            assert!(!root.join(".dest.md.tmp").exists());
+            std::fs::remove_file(root.join("dest.md")).expect("cleanup dest.md");
+
+            // Renaming a file over an existing directory must fail, not
+            // silently clobber the directory.
+            std::fs::write(root.join("movable.md"), b"x").expect("write movable");
+            std::fs::create_dir(root.join("adir")).expect("mkdir adir");
+            std::fs::rename(root.join("movable.md"), root.join("adir"))
+                .expect_err("renaming a file over an existing directory must fail");
+            std::fs::remove_file(root.join("movable.md")).expect("cleanup movable.md");
+            std::fs::remove_dir(root.join("adir")).expect("cleanup adir");
+
+            std::fs::write(root.join("persisted.md"), b"still here after remount")
+                .expect("write persisted.md");
+
             std::fs::remove_file(root.join("renamed.txt")).expect("delete file");
             std::fs::remove_file(root.join("notes").join("a.md")).expect("delete nested file");
             std::fs::remove_dir(root.join("notes")).expect("rmdir");
         });
 
-        let _ = stop_tx.send(());
-        mount_thread
-            .join()
-            .expect("mount thread panicked")
-            .expect("mount_and_wait failed");
+        // Phase 2: reopen the SAME on-disk data root (same derived keys) in
+        // a fresh VolumeEngine and a fresh mount, and confirm persisted.md
+        // -- written in phase 1, never deleted -- is still there with the
+        // right content. Proves data survives a real unmount/remount
+        // cycle, not just staying alive in one process's memory.
+        with_real_mount(open_engine(), |root| {
+            assert_eq!(
+                std::fs::read_to_string(root.join("persisted.md")).unwrap(),
+                "still here after remount",
+                "data written before an unmount must still be there after a fresh remount"
+            );
+            std::fs::remove_file(root.join("persisted.md")).expect("cleanup persisted.md");
+        });
 
-        assert!(
-            !std::path::Path::new(&format!("{mountpoint}\\")).exists(),
-            "drive must be gone after a clean unmount"
-        );
-        result.expect("filesystem operations against the mounted drive failed");
+        // Phase 3: a separate, deliberately tiny-quota volume. A real write
+        // past the quota must fail with a proper OS error (not hang, not
+        // silently truncate, not panic the filesystem process).
+        let quota_tmp = tempfile::tempdir().expect("tempdir");
+        let quota_master_key = rt.block_on(async {
+            let security =
+                moku_core::SecurityManager::new_with_root(quota_tmp.path().to_path_buf());
+            security
+                .initialize_vault(zeroize::Zeroizing::new("quota-test-password".to_string()))
+                .await
+                .expect("init vault")
+        });
+        let quota_keys = moku_volume_fs::derive_volume_keys(&quota_master_key);
+        let quota_engine = VolumeEngine::open_volume(
+            quota_tmp.path().join("data"),
+            quota_keys,
+            quota_tmp.path().join("usage.json"),
+            200,
+        )
+        .expect("open_volume with a tiny quota");
+        with_real_mount(quota_engine, |root| {
+            let result = std::fs::write(root.join("too_big.bin"), vec![0u8; 10_000]);
+            assert!(
+                result.is_err(),
+                "a write past the volume's quota must fail, not silently succeed"
+            );
+        });
     }
 }
