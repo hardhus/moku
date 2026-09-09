@@ -399,18 +399,8 @@ impl FileSystemContext for VaultFsContext {
             .ok_or_else(|| winfsp::FspError::from(STATUS_OBJECT_NAME_INVALID))?
             .to_string();
 
-        if replace_if_exists
-            && self
-                .engine
-                .getattr(&new_path)
-                .map(|a| a.kind == FileKind::File)
-                .unwrap_or(false)
-        {
-            let _ = self.engine.unlink(&new_parent, &new_name);
-        }
-
         self.engine
-            .rename(&old_parent, &old_name, &new_parent, &new_name)
+            .rename(&old_parent, &old_name, &new_parent, &new_name, replace_if_exists)
             .map_err(map_err)
     }
 

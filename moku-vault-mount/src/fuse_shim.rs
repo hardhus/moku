@@ -258,19 +258,20 @@ impl Filesystem for VaultFsFilesystem {
         name: &OsStr,
         newparent: INodeNo,
         newname: &OsStr,
-        _flags: RenameFlags,
+        flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
         let (Some(name), Some(newname)) = (name.to_str(), newname.to_str()) else {
             reply.error(Errno::EINVAL);
             return;
         };
+        let replace_if_exists = !flags.contains(RenameFlags::RENAME_NOREPLACE);
         let mut table = self.inodes.lock().unwrap();
         let (Some(old_parent), Some(new_parent)) = (table.path_of(parent.0), table.path_of(newparent.0)) else {
             reply.error(Errno::ENOENT);
             return;
         };
-        match self.engine.rename(&old_parent, name, &new_parent, newname) {
+        match self.engine.rename(&old_parent, name, &new_parent, newname, replace_if_exists) {
             Ok(()) => {
                 table.rename_path(&old_parent.join(name), new_parent.join(newname));
                 reply.ok();

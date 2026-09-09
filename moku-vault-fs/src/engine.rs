@@ -286,6 +286,7 @@ impl VolumeEngine {
         old_name: &str,
         new_parent: &VirtualPath,
         new_name: &str,
+        replace_if_exists: bool,
     ) -> VResult<()> {
         if new_name.len() > MAX_VIRTUAL_NAME_LEN {
             return Err(VaultFsError::NameTooLong);
@@ -297,11 +298,32 @@ impl VolumeEngine {
         if !old_backing.exists() {
             return Err(VaultFsError::NotFound);
         }
-        if new_backing.exists() {
-            return Err(VaultFsError::AlreadyExists);
-        }
+        // Size of the file being clobbered, so its quota reservation can be
+        // released once the replace actually happens -- computed up front
+        // so a failed rename below never mutates quota state.
+        let replaced_size = if new_backing.exists() {
+            if !replace_if_exists {
+                return Err(VaultFsError::AlreadyExists);
+            }
+            let meta = fs::metadata(&new_backing)?;
+            if meta.is_dir() {
+                return Err(VaultFsError::IsADirectory);
+            }
+            Some(meta.len())
+        } else {
+            None
+        };
+        // `fs::rename` already performs an atomic replace of an existing
+        // destination file natively (Windows: MOVEFILE_REPLACE_EXISTING,
+        // POSIX: default rename(2) semantics) -- no separate
+        // unlink-then-rename dance needed. An editor's atomic save (write a
+        // temp file, then rename it over the original -- Helix, vim, VS
+        // Code) relies on exactly this replace-on-rename behavior.
         fs::rename(&old_backing, &new_backing)?;
         self.pathmap.forget_dir(&old_backing);
+        if let Some(size) = replaced_size {
+            self.quota.shrink(size);
+        }
         Ok(())
     }
 }
@@ -420,11 +442,66 @@ mod tests {
         eng.release(fh).unwrap();
 
         eng.mkdir(&VirtualPath::root(), "dest").unwrap();
-        eng.rename(&VirtualPath::root(), "old.md", &VirtualPath::parse("/dest"), "new.md").unwrap();
+        eng.rename(&VirtualPath::root(), "old.md", &VirtualPath::parse("/dest"), "new.md", false).unwrap();
 
         assert!(eng.getattr(&VirtualPath::parse("/old.md")).is_err());
         let attr = eng.getattr(&VirtualPath::parse("/dest/new.md")).unwrap();
         assert_eq!(attr.size, 4);
+    }
+
+    #[test]
+    fn test_rename_over_existing_without_replace_fails() {
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        let (fh, _) = eng.create(&VirtualPath::root(), "old.md").unwrap();
+        eng.write(fh, 0, b"data").unwrap();
+        eng.release(fh).unwrap();
+        eng.create(&VirtualPath::root(), "new.md").unwrap();
+
+        assert!(matches!(
+            eng.rename(&VirtualPath::root(), "old.md", &VirtualPath::root(), "new.md", false),
+            Err(VaultFsError::AlreadyExists)
+        ));
+    }
+
+    #[test]
+    fn test_rename_over_existing_with_replace_succeeds() {
+        // Mirrors an editor's atomic save: write a temp file, then rename
+        // it over an already-existing destination file.
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        let (fh, _) = eng.create(&VirtualPath::root(), "new.md").unwrap();
+        eng.write(fh, 0, b"old content").unwrap();
+        eng.release(fh).unwrap();
+        let used_before_temp = eng.usage_bytes();
+
+        let (fh2, _) = eng.create(&VirtualPath::root(), ".new.md.tmp").unwrap();
+        eng.write(fh2, 0, b"new content").unwrap();
+        eng.release(fh2).unwrap();
+
+        eng.rename(&VirtualPath::root(), ".new.md.tmp", &VirtualPath::root(), "new.md", true).unwrap();
+
+        let mut buf = [0u8; 11];
+        let fh3 = eng.open(&VirtualPath::parse("/new.md")).unwrap();
+        let n = eng.read(fh3, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"new content");
+        assert!(eng.getattr(&VirtualPath::parse("/.new.md.tmp")).is_err());
+        // Quota should reflect only the surviving file's bytes, not both
+        // the replaced destination and the renamed-in file.
+        assert_eq!(eng.usage_bytes(), used_before_temp);
+    }
+
+    #[test]
+    fn test_rename_over_existing_directory_fails() {
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        eng.create(&VirtualPath::root(), "old.md").unwrap();
+        eng.mkdir(&VirtualPath::root(), "adir").unwrap();
+
+        assert!(matches!(
+            eng.rename(&VirtualPath::root(), "old.md", &VirtualPath::root(), "adir", true),
+            Err(VaultFsError::IsADirectory)
+        ));
     }
 
     #[test]
