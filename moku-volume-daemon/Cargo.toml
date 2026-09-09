@@ -1,12 +1,12 @@
 [package]
-name = "moku-vault-daemon"
+name = "moku-volume-daemon"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 moku-core.workspace = true
-moku-vault-fs = { path = "../moku-vault-fs" }
-moku-vault-mount = { path = "../moku-vault-mount" }
+moku-volume-fs = { path = "../moku-volume-fs" }
+moku-volume-mount = { path = "../moku-volume-mount" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,7 +20,7 @@ zeroize.workspace = true
 
 # Derives a per-volume master key from moku's app-vault master key
 # (Default password mode) — same crates, same scoped-not-workspace
-# rationale as moku-vault-fs's own HKDF usage.
+# rationale as moku-volume-fs's own HKDF usage.
 hkdf = "0.12"
 sha2 = "0.10"
 

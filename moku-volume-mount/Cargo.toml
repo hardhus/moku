@@ -1,10 +1,10 @@
 [package]
-name = "moku-vault-mount"
+name = "moku-volume-mount"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moku-vault-fs = { path = "../moku-vault-fs" }
+moku-volume-fs = { path = "../moku-volume-fs" }
 anyhow.workspace = true
 
 # WinFsp shim — only compiled (and only depended on) when targeting
@@ -26,7 +26,7 @@ winfsp = { version = "0.13", features = ["delayload"] }
 # FUSE shim — developed and cross-compile-checked from this (Windows) dev
 # environment but not runtime-tested here; there is no FUSE/Linux machine
 # available this session (plan Faz 6). Verify with:
-#   cargo check --target x86_64-unknown-linux-gnu -p moku-vault-mount
+#   cargo check --target x86_64-unknown-linux-gnu -p moku-volume-mount
 [target.'cfg(unix)'.dependencies]
 fuser = "0.18"
 libc = "0.2"

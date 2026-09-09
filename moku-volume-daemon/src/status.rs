@@ -17,7 +17,7 @@ pub fn pid_is_alive(pid: u32) -> bool {
 
 /// Whether this volume currently has a live mount worker process. Mount
 /// itself lands in a later phase, so today this only ever reports `false`
-/// (no pid file is ever written yet) — kept here now so `vault list`/
+/// (no pid file is ever written yet) — kept here now so `volume list`/
 /// `status` display code doesn't need to change shape once mounting
 /// exists.
 pub fn is_mounted(volume_id: &str) -> bool {

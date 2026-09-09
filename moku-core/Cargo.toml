@@ -29,7 +29,7 @@ secrecy.workspace = true
 url = "2"
 
 # Per-module storage subkey derivation (storage/keys.rs) — same
-# scoped-not-workspace pinning as moku-vault-fs/moku-vault-daemon's own
+# scoped-not-workspace pinning as moku-volume-fs/moku-volume-daemon's own
 # HKDF usage.
 hkdf = "0.12"
 sha2 = "0.10"

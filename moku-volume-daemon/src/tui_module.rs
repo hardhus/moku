@@ -33,7 +33,7 @@ struct VolumeRow {
     mounted: bool,
 }
 
-pub struct VaultManagerModule {
+pub struct VolumeManagerModule {
     rows: Vec<VolumeRow>,
     state: ListState,
     message: Option<(String, Instant)>,
@@ -63,7 +63,7 @@ pub struct VaultManagerModule {
     busy: bool,
 }
 
-impl VaultManagerModule {
+impl VolumeManagerModule {
     pub fn new() -> Self {
         let mut state = ListState::default();
         state.select(Some(0));
@@ -318,18 +318,18 @@ impl VaultManagerModule {
     }
 }
 
-impl Default for VaultManagerModule {
+impl Default for VolumeManagerModule {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ModuleMeta for VaultManagerModule {
+impl ModuleMeta for VolumeManagerModule {
     fn id(&self) -> ModuleId {
-        ModuleId::VAULT
+        ModuleId::VOLUME
     }
     fn title(&self) -> &'static str {
-        ModuleId::VAULT.title()
+        ModuleId::VOLUME.title()
     }
     fn encrypt_by_default(&self) -> bool {
         false // reads volume.json/usage.json directly, not vault-encrypted storage
@@ -337,7 +337,7 @@ impl ModuleMeta for VaultManagerModule {
 }
 
 #[async_trait]
-impl TuiModule for VaultManagerModule {
+impl TuiModule for VolumeManagerModule {
     async fn init(&mut self, _ctx: &mut AppContext) -> Result<()> {
         self.refresh().await;
         Ok(())
@@ -527,7 +527,7 @@ impl TuiModule for VaultManagerModule {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Encrypted Vaults ")
+                    .title(" Encrypted Volumes ")
                     .border_style(Style::default().fg(theme.border))
                     .style(Style::default().bg(theme.base_bg)),
             )
@@ -609,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_busy_guard_blocks_a_second_start_while_one_is_in_flight() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         assert!(!module.busy);
         module.start_unmount("vol-a".to_string(), "vol-a".to_string());
         assert!(module.busy, "starting an action must set the busy flag");
@@ -623,7 +623,7 @@ mod tests {
 
     #[test]
     fn test_poll_action_result_clears_busy_flag() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.busy = true;
         *module.action_result.lock().unwrap() = Some("done".to_string());
         module.poll_action_result();
@@ -635,7 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_char_d_opens_confirm_delete_for_selected_row() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.rows = vec![fake_row("vol-a", false)];
         module.state.select(Some(0));
         let mut ctx = create_test_context().await;
@@ -649,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_confirm_delete_esc_cancels_without_deleting() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.rows = vec![fake_row("vol-a", false)];
         module.confirm_delete = Some("vol-a".to_string());
         let mut ctx = create_test_context().await;
@@ -664,7 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_confirm_delete_n_cancels_without_deleting() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.rows = vec![fake_row("vol-a", false)];
         module.confirm_delete = Some("vol-a".to_string());
         let mut ctx = create_test_context().await;
@@ -678,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_confirm_delete_enter_closes_prompt_and_starts_delete() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.rows = vec![fake_row("vol-a", false)];
         module.confirm_delete = Some("vol-a".to_string());
         let mut ctx = create_test_context().await;
@@ -692,7 +692,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shift_d_bypasses_confirmation() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.rows = vec![fake_row("vol-a", false)];
         module.state.select(Some(0));
         let mut ctx = create_test_context().await;

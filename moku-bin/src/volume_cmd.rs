@@ -1,11 +1,11 @@
 use anyhow::{Result, anyhow, bail};
 
 use moku_core::SecurityManager;
-use moku_vault_daemon::registry::VolumeSecret;
-use moku_vault_daemon::worker::{MountOutcome, StopOutcome};
-use moku_vault_daemon::{PasswordMode, registry, size, status, worker};
+use moku_volume_daemon::registry::VolumeSecret;
+use moku_volume_daemon::worker::{MountOutcome, StopOutcome};
+use moku_volume_daemon::{PasswordMode, registry, size, status, worker};
 
-use crate::cli::VaultCommands;
+use crate::cli::VolumeCommands;
 
 /// Reads one line of plain (unmasked) input, prompting first — for
 /// non-secret fields like a volume name or size where `rpassword` would be
@@ -23,9 +23,9 @@ fn prompt_line(label: &str) -> Result<String> {
     Ok(line.trim().to_string())
 }
 
-pub async fn handle(sub: &VaultCommands) -> Result<()> {
+pub async fn handle(sub: &VolumeCommands) -> Result<()> {
     match sub {
-        VaultCommands::Create {
+        VolumeCommands::Create {
             name,
             size: size_str,
             custom_password,
@@ -101,11 +101,11 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
             );
             Ok(())
         }
-        VaultCommands::List => {
+        VolumeCommands::List => {
             let volumes = registry::list_volumes().await?;
             if volumes.is_empty() {
                 println!(
-                    "No encrypted volumes yet. To create one: moku vault create <name> --size 10GB"
+                    "No encrypted volumes yet. To create one: moku volume create <name> --size 10GB"
                 );
                 return Ok(());
             }
@@ -127,7 +127,7 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
             }
             Ok(())
         }
-        VaultCommands::Status { name } => {
+        VolumeCommands::Status { name } => {
             let cfg = registry::find_volume(name).await?;
             let used = registry::usage_bytes(&cfg.id).unwrap_or(0);
             let mounted = status::is_mounted(&cfg.id);
@@ -159,7 +159,7 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
             );
             Ok(())
         }
-        VaultCommands::Resize {
+        VolumeCommands::Resize {
             name,
             size: size_str,
         } => {
@@ -172,15 +172,15 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
             );
             Ok(())
         }
-        VaultCommands::Mount { name, mountpoint } => mount(name, mountpoint.as_deref()).await,
-        VaultCommands::Unmount { name } => unmount(name).await,
-        VaultCommands::Delete { name, yes } => delete(name, *yes).await,
-        VaultCommands::Import { path } => {
+        VolumeCommands::Mount { name, mountpoint } => mount(name, mountpoint.as_deref()).await,
+        VolumeCommands::Unmount { name } => unmount(name).await,
+        VolumeCommands::Delete { name, yes } => delete(name, *yes).await,
+        VolumeCommands::Import { path } => {
             let cfg = registry::import_volume(std::path::Path::new(path)).await?;
             println!("✅ Imported '{}' (id: {}).", cfg.display_name, cfg.id);
             Ok(())
         }
-        VaultCommands::MountWorker { name, mountpoint } => worker::run(name, mountpoint).await,
+        VolumeCommands::MountWorker { name, mountpoint } => worker::run(name, mountpoint).await,
     }
 }
 

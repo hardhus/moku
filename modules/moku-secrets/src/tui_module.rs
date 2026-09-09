@@ -22,11 +22,11 @@ use crate::model::SecretEntry;
 
 /// Which field of the (name, value) quick-add form currently has keyboard
 /// focus. Both fields are shown at once — `Tab` switches focus, `Enter`
-/// submits from either — matching `moku-vault-daemon`'s `CreateForm`/
+/// submits from either — matching `moku-volume-daemon`'s `CreateForm`/
 /// `CreateField` shape, not a sequential per-field wizard. v1's TUI add
 /// flow is deliberately scoped to just these two fields —
 /// category/username/url/notes stay CLI-only, same kind of scope cut as
-/// `VaultManagerModule` not exposing `create`/`resize`.
+/// `VolumeManagerModule` not exposing `create`/`resize`.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum AddField {
     Name,

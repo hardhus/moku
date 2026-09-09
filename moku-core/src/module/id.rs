@@ -17,7 +17,12 @@ impl ModuleId {
     pub const DAEMON: Self = Self("daemon");
     pub const CONTEXT: Self = Self("context");
     pub const COMMIT: Self = Self("commit");
-    pub const VAULT: Self = Self("vault");
+    // NOTE: the Rust constant is VOLUME (matches the renamed
+    // moku-volume-fs/-daemon/-mount crates), but the wrapped string stays
+    // literally "vault" forever — it's used as an HKDF `module_id` and an
+    // on-disk storage path segment, so changing it would break decryption
+    // of existing users' data.
+    pub const VOLUME: Self = Self("vault");
     pub const NOTES: Self = Self("notes");
     pub const SECRETS: Self = Self("secrets");
     pub const HTTP: Self = Self("http");
@@ -40,7 +45,7 @@ impl ModuleId {
             Self::LOCK_SCREEN => "Vault Security",
             Self::RSS => "RSS Feed Reader",
             Self::DAEMON => "Daemon Status",
-            Self::VAULT => "Encrypted Vaults",
+            Self::VOLUME => "Encrypted Volumes",
             Self::NOTES => "Notes",
             Self::SECRETS => "Secrets",
             Self::HTTP => "API Client",
@@ -62,7 +67,7 @@ impl ModuleId {
             Self::LOCK_SCREEN,
             Self::RSS,
             Self::DAEMON,
-            Self::VAULT,
+            Self::VOLUME,
             Self::NOTES,
             Self::SECRETS,
             Self::HTTP,

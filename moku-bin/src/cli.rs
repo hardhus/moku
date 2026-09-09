@@ -59,9 +59,9 @@ pub enum Commands {
     },
     /// Manage encrypted, mountable volumes (create/list/status/resize).
     /// Mount/unmount are added in a later phase.
-    Vault {
+    Volume {
         #[command(subcommand)]
-        sub: VaultCommands,
+        sub: VolumeCommands,
     },
     /// Manage a satz-powered Markdown notes vault (index/stats/list/
     /// resolve/daily/fmt/graph).
@@ -95,10 +95,10 @@ pub enum Commands {
 }
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
-pub enum VaultCommands {
+pub enum VolumeCommands {
     /// Create a new encrypted volume. Any of name/size/password-mode left
-    /// unset is asked for interactively, so `moku vault create` alone
-    /// works as a full wizard, while `moku vault create NAME --size ...
+    /// unset is asked for interactively, so `moku volume create` alone
+    /// works as a full wizard, while `moku volume create NAME --size ...
     /// --default-password` skips straight to just the password prompt.
     Create {
         name: Option<String>,
@@ -226,7 +226,7 @@ impl Cli {
             // semantic match since it's a config-editing command.
             Some(Commands::Config { .. }) => ModuleId::SETTINGS,
             // Same as Config: always intercepted early in main.rs.
-            Some(Commands::Vault { .. }) => ModuleId::SETTINGS,
+            Some(Commands::Volume { .. }) => ModuleId::SETTINGS,
             Some(Commands::Notes { .. }) => ModuleId::NOTES,
             Some(Commands::Secrets { .. }) => ModuleId::SECRETS,
             Some(Commands::Http { .. }) => ModuleId::HTTP,
@@ -312,25 +312,25 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_create_parses_with_no_name_or_size() {
+    fn test_volume_create_parses_with_no_name_or_size() {
         // Both are optional now — missing ones fall back to an interactive
         // prompt at runtime rather than a clap parse error.
-        let cli = Cli::try_parse_from(["moku", "vault", "create"]).unwrap();
-        let Some(Commands::Vault {
-            sub: VaultCommands::Create { name, size, .. },
+        let cli = Cli::try_parse_from(["moku", "volume", "create"]).unwrap();
+        let Some(Commands::Volume {
+            sub: VolumeCommands::Create { name, size, .. },
         }) = cli.command
         else {
-            panic!("expected Vault::Create");
+            panic!("expected Volume::Create");
         };
         assert_eq!(name, None);
         assert_eq!(size, None);
     }
 
     #[test]
-    fn test_vault_create_parses_fully_flag_driven() {
+    fn test_volume_create_parses_fully_flag_driven() {
         let cli = Cli::try_parse_from([
             "moku",
-            "vault",
+            "volume",
             "create",
             "myvol",
             "--size",
@@ -338,9 +338,9 @@ mod tests {
             "--default-password",
         ])
         .unwrap();
-        let Some(Commands::Vault {
+        let Some(Commands::Volume {
             sub:
-                VaultCommands::Create {
+                VolumeCommands::Create {
                     name,
                     size,
                     custom_password,
@@ -349,7 +349,7 @@ mod tests {
                 },
         }) = cli.command
         else {
-            panic!("expected Vault::Create");
+            panic!("expected Volume::Create");
         };
         assert_eq!(name.as_deref(), Some("myvol"));
         assert_eq!(size.as_deref(), Some("10GB"));
@@ -358,47 +358,47 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_create_custom_password_flag_parses() {
+    fn test_volume_create_custom_password_flag_parses() {
         let cli =
-            Cli::try_parse_from(["moku", "vault", "create", "myvol", "--custom-password"]).unwrap();
-        let Some(Commands::Vault {
-            sub: VaultCommands::Create {
+            Cli::try_parse_from(["moku", "volume", "create", "myvol", "--custom-password"]).unwrap();
+        let Some(Commands::Volume {
+            sub: VolumeCommands::Create {
                 custom_password, ..
             },
         }) = cli.command
         else {
-            panic!("expected Vault::Create");
+            panic!("expected Volume::Create");
         };
         assert!(custom_password);
     }
 
     #[test]
-    fn test_vault_delete_parses_with_and_without_yes() {
-        let cli = Cli::try_parse_from(["moku", "vault", "delete", "myvol"]).unwrap();
-        let Some(Commands::Vault {
-            sub: VaultCommands::Delete { name, yes },
+    fn test_volume_delete_parses_with_and_without_yes() {
+        let cli = Cli::try_parse_from(["moku", "volume", "delete", "myvol"]).unwrap();
+        let Some(Commands::Volume {
+            sub: VolumeCommands::Delete { name, yes },
         }) = cli.command
         else {
-            panic!("expected Vault::Delete");
+            panic!("expected Volume::Delete");
         };
         assert_eq!(name, "myvol");
         assert!(!yes);
 
-        let cli = Cli::try_parse_from(["moku", "vault", "delete", "myvol", "--yes"]).unwrap();
-        let Some(Commands::Vault {
-            sub: VaultCommands::Delete { yes, .. },
+        let cli = Cli::try_parse_from(["moku", "volume", "delete", "myvol", "--yes"]).unwrap();
+        let Some(Commands::Volume {
+            sub: VolumeCommands::Delete { yes, .. },
         }) = cli.command
         else {
-            panic!("expected Vault::Delete");
+            panic!("expected Volume::Delete");
         };
         assert!(yes);
 
-        let cli = Cli::try_parse_from(["moku", "vault", "delete", "myvol", "-y"]).unwrap();
-        let Some(Commands::Vault {
-            sub: VaultCommands::Delete { yes, .. },
+        let cli = Cli::try_parse_from(["moku", "volume", "delete", "myvol", "-y"]).unwrap();
+        let Some(Commands::Volume {
+            sub: VolumeCommands::Delete { yes, .. },
         }) = cli.command
         else {
-            panic!("expected Vault::Delete");
+            panic!("expected Volume::Delete");
         };
         assert!(yes);
     }

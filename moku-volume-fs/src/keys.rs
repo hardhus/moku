@@ -18,6 +18,11 @@ pub struct VolumeKeys {
     pub name: SecretBox<NameKey>,
 }
 
+// NOTE: these HKDF domain-separation strings intentionally still say
+// "moku-vault-fs" even though this crate is now named moku-volume-fs — the
+// string is a permanent key-derivation identifier baked into every
+// already-encrypted volume; changing it would break decryption of existing
+// users' data. Only the /v1 suffix bumps if this derivation ever changes.
 const HKDF_INFO_CONTENT: &[u8] = b"moku-vault-fs/content-key/v1";
 const HKDF_INFO_NAME: &[u8] = b"moku-vault-fs/name-key/v1";
 

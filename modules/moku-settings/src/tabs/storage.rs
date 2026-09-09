@@ -62,7 +62,7 @@ pub struct StorageTab {
     /// result has landed — without it, two concurrent
     /// `migrate_module_encryption` calls for the same module race on the
     /// same sled keys (same pattern/reasoning as
-    /// `moku-vault-daemon`'s `busy` flag).
+    /// `moku-volume-daemon`'s `busy` flag).
     busy: bool,
 }
 

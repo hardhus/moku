@@ -85,10 +85,10 @@ pub struct DirEntry {
 }
 
 /// Engine-level error, kept as a small closed set so OS mount shims
-/// (`moku-vault-mount`) can map each variant to the right errno /
+/// (`moku-volume-mount`) can map each variant to the right errno /
 /// NTSTATUS without string-sniffing (plan §2).
 #[derive(Debug)]
-pub enum VaultFsError {
+pub enum VolumeFsError {
     NotFound,
     AlreadyExists,
     NotADirectory,
@@ -100,7 +100,7 @@ pub enum VaultFsError {
     Other(anyhow::Error),
 }
 
-impl std::fmt::Display for VaultFsError {
+impl std::fmt::Display for VolumeFsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound => write!(f, "no such file or directory"),
@@ -116,15 +116,15 @@ impl std::fmt::Display for VaultFsError {
     }
 }
 
-impl std::error::Error for VaultFsError {}
+impl std::error::Error for VolumeFsError {}
 
-impl From<anyhow::Error> for VaultFsError {
+impl From<anyhow::Error> for VolumeFsError {
     fn from(e: anyhow::Error) -> Self {
         Self::Other(e)
     }
 }
 
-impl From<std::io::Error> for VaultFsError {
+impl From<std::io::Error> for VolumeFsError {
     fn from(e: std::io::Error) -> Self {
         match e.kind() {
             std::io::ErrorKind::NotFound => Self::NotFound,
@@ -134,7 +134,7 @@ impl From<std::io::Error> for VaultFsError {
     }
 }
 
-pub type VResult<T> = std::result::Result<T, VaultFsError>;
+pub type VResult<T> = std::result::Result<T, VolumeFsError>;
 
 #[cfg(test)]
 mod tests {

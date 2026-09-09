@@ -1,5 +1,5 @@
 //! Graceful-unmount control channel (plan Faz 5). The worker process opens
-//! this right after it starts, so `moku vault unmount` can ask it to stop
+//! this right after it starts, so `moku volume unmount` can ask it to stop
 //! cleanly (which lets `mount_and_wait` reach its `engine.flush_usage()`
 //! and unmount steps) instead of always hard-killing the process, which
 //! skips both.
@@ -46,7 +46,7 @@ pub async fn send_stop(volume_id: &str) -> Result<()> {
 
 #[cfg(windows)]
 fn pipe_name(volume_id: &str) -> String {
-    format!(r"\\.\pipe\moku-vault-{volume_id}")
+    format!(r"\\.\pipe\moku-volume-{volume_id}")
 }
 
 #[cfg(unix)]

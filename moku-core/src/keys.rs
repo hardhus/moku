@@ -153,7 +153,7 @@ pub fn is_delete_bypass(event: &Event) -> bool {
 /// open. Factored out alongside `is_delete_bypass` for the same reason:
 /// this exact three-way keypress meaning (Enter/`y` confirms, Esc/`n`
 /// cancels, everything else is ignored) was independently reimplemented,
-/// identically, in five modules (moku-vault-daemon, moku-rss,
+/// identically, in five modules (moku-volume-daemon, moku-rss,
 /// moku-secrets, moku-bookmark, moku-todo) — each keeps its own delete
 /// action/cancel logic, matching on this instead of raw `KeyCode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

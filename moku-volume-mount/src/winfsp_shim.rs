@@ -1,8 +1,8 @@
-//! WinFsp `FileSystemContext` implementation over `moku-vault-fs`'s
+//! WinFsp `FileSystemContext` implementation over `moku-volume-fs`'s
 //! `VolumeEngine`. Only the operations a real read/write filesystem needs
 //! are implemented; everything else keeps the trait's default
 //! `STATUS_INVALID_DEVICE_REQUEST` (ACL get/set, reparse points, named
-//! streams, extended attributes — none of which the vault format
+//! streams, extended attributes — none of which the volume format
 //! supports, matching moku's existing no-ACL, no-EA storage model).
 
 use std::ffi::c_void;
@@ -23,7 +23,7 @@ use winfsp::filesystem::{
 };
 use winfsp::host::{FileSystemHost, FileSystemParams, VolumeParams};
 
-use moku_vault_fs::{Attr, DirEntry, FileKind, VaultFsError, VirtualPath, VolumeEngine};
+use moku_volume_fs::{Attr, DirEntry, FileKind, VolumeFsError, VirtualPath, VolumeEngine};
 
 const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
 /// FILETIME epoch (1601-01-01) offset from the Unix epoch, in seconds.
@@ -40,17 +40,17 @@ fn to_virtual_path(file_name: &U16CStr) -> VirtualPath {
     VirtualPath::parse(&s)
 }
 
-fn map_err(e: VaultFsError) -> winfsp::FspError {
+fn map_err(e: VolumeFsError) -> winfsp::FspError {
     match e {
-        VaultFsError::NotFound => STATUS_OBJECT_NAME_NOT_FOUND.into(),
-        VaultFsError::AlreadyExists => STATUS_OBJECT_NAME_COLLISION.into(),
-        VaultFsError::NotADirectory => STATUS_NOT_A_DIRECTORY.into(),
-        VaultFsError::IsADirectory => STATUS_NOT_A_DIRECTORY.into(),
-        VaultFsError::NotEmpty => STATUS_DIRECTORY_NOT_EMPTY.into(),
-        VaultFsError::NameTooLong => STATUS_OBJECT_NAME_INVALID.into(),
-        VaultFsError::QuotaExceeded => STATUS_DISK_FULL.into(),
-        VaultFsError::BadFileHandle => STATUS_INVALID_HANDLE.into(),
-        VaultFsError::Other(_) => STATUS_UNSUCCESSFUL.into(),
+        VolumeFsError::NotFound => STATUS_OBJECT_NAME_NOT_FOUND.into(),
+        VolumeFsError::AlreadyExists => STATUS_OBJECT_NAME_COLLISION.into(),
+        VolumeFsError::NotADirectory => STATUS_NOT_A_DIRECTORY.into(),
+        VolumeFsError::IsADirectory => STATUS_NOT_A_DIRECTORY.into(),
+        VolumeFsError::NotEmpty => STATUS_DIRECTORY_NOT_EMPTY.into(),
+        VolumeFsError::NameTooLong => STATUS_OBJECT_NAME_INVALID.into(),
+        VolumeFsError::QuotaExceeded => STATUS_DISK_FULL.into(),
+        VolumeFsError::BadFileHandle => STATUS_INVALID_HANDLE.into(),
+        VolumeFsError::Other(_) => STATUS_UNSUCCESSFUL.into(),
     }
 }
 
@@ -75,17 +75,17 @@ fn write_file_info(dst: &mut FileInfo, attr: &Attr) {
 /// One open file or directory handle. Directories carry no engine file
 /// handle (`fh: None`) — `VolumeEngine`'s directory operations are
 /// stateless and always take a path, so there's nothing to keep open.
-pub struct VaultFileHandle {
+pub struct VolumeFileHandle {
     path: VirtualPath,
     fh: Option<u64>,
 }
 
-pub struct VaultFsContext {
+pub struct VolumeFsContext {
     engine: Arc<VolumeEngine>,
 }
 
-impl FileSystemContext for VaultFsContext {
-    type FileContext = VaultFileHandle;
+impl FileSystemContext for VolumeFsContext {
+    type FileContext = VolumeFileHandle;
 
     fn get_security_by_name(
         &self,
@@ -99,7 +99,7 @@ impl FileSystemContext for VaultFsContext {
             FileKind::Directory => FILE_ATTRIBUTE_DIRECTORY.0,
             FileKind::File => FILE_ATTRIBUTE_NORMAL.0,
         };
-        // No ACL support (matches the vault format's no-metadata-beyond-
+        // No ACL support (matches the volume format's no-metadata-beyond-
         // size/mtime design) — always report a zero-length descriptor.
         Ok(FileSecurity {
             reparse: false,
@@ -122,7 +122,7 @@ impl FileSystemContext for VaultFsContext {
             FileKind::File => Some(self.engine.open(&path).map_err(map_err)?),
         };
         write_file_info(file_info.as_mut(), &attr);
-        Ok(VaultFileHandle { path, fh })
+        Ok(VolumeFileHandle { path, fh })
     }
 
     fn create(
@@ -150,11 +150,11 @@ impl FileSystemContext for VaultFsContext {
         if is_directory {
             let attr = self.engine.mkdir(&parent, &name).map_err(map_err)?;
             write_file_info(file_info.as_mut(), &attr);
-            Ok(VaultFileHandle { path, fh: None })
+            Ok(VolumeFileHandle { path, fh: None })
         } else {
             let (fh, attr) = self.engine.create(&parent, &name).map_err(map_err)?;
             write_file_info(file_info.as_mut(), &attr);
-            Ok(VaultFileHandle { path, fh: Some(fh) })
+            Ok(VolumeFileHandle { path, fh: Some(fh) })
         }
     }
 
@@ -202,9 +202,9 @@ impl FileSystemContext for VaultFsContext {
         _change_time: u64,
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
-        // The vault format tracks only size and on-disk mtime — custom
+        // The volume format tracks only size and on-disk mtime — custom
         // attribute/timestamp writes are accepted but not persisted
-        // (v1 scope cut, matches moku-vault-fs's Attr shape).
+        // (v1 scope cut, matches moku-volume-fs's Attr shape).
         let attr = self.engine.getattr(&context.path).map_err(map_err)?;
         write_file_info(file_info, &attr);
         Ok(())
@@ -409,7 +409,7 @@ impl FileSystemContext for VaultFsContext {
         let used = self.engine.usage_bytes();
         out_volume_info.total_size = total;
         out_volume_info.free_size = total.saturating_sub(used);
-        out_volume_info.set_volume_label("Moku Vault");
+        out_volume_info.set_volume_label("Moku Volume");
         Ok(())
     }
 }
@@ -436,7 +436,7 @@ pub fn mount_and_wait(
 
     let mut volume_params = VolumeParams::new();
     volume_params
-        .filesystem_name("MokuVault")
+        .filesystem_name("MokuVolume")
         .case_sensitive_search(true)
         .case_preserved_names(true)
         .unicode_on_disk(true)
@@ -445,11 +445,11 @@ pub fn mount_and_wait(
         .flush_and_purge_on_cleanup(true);
 
     let engine = Arc::new(engine);
-    let context = VaultFsContext {
+    let context = VolumeFsContext {
         engine: Arc::clone(&engine),
     };
     let params = FileSystemParams::default_params(volume_params);
-    let mut host: FileSystemHost<VaultFsContext> =
+    let mut host: FileSystemHost<VolumeFsContext> =
         FileSystemHost::new_with_options(params, context)
             .map_err(|e| anyhow!("failed to create WinFsp filesystem host: {e:?}"))?;
 
@@ -492,7 +492,7 @@ mod tests {
     /// list, nested dirs, rename, delete, and a clean unmount that leaves
     /// no stuck drive behind. Requires WinFsp installed and a free drive
     /// letter, so it's `#[ignore]`d by default — run explicitly with
-    /// `cargo test -p moku-vault-mount -- --ignored` to verify.
+    /// `cargo test -p moku-volume-mount -- --ignored` to verify.
     #[test]
     #[ignore = "requires WinFsp installed and a free drive letter"]
     fn test_real_mount_full_crud_roundtrip() {
@@ -508,7 +508,7 @@ mod tests {
                 .initialize_vault(zeroize::Zeroizing::new("smoke-test-password".to_string()))
                 .await
                 .expect("init vault");
-            let keys = moku_vault_fs::derive_volume_keys(&master_key);
+            let keys = moku_volume_fs::derive_volume_keys(&master_key);
             VolumeEngine::open_volume(
                 volume_tmp.path().join("data"),
                 keys,

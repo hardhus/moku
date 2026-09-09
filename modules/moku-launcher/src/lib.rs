@@ -936,15 +936,15 @@ mod tests {
     fn test_unselected_rows_of_different_lengths_share_the_same_starting_column() {
         // Fresh launcher: Dashboard (index 0) selected, ring already
         // rotated by the constructor so its cursor row is fixed at
-        // RING_MARGIN. Notes and Vault both land far enough from that row
+        // RING_MARGIN. Notes and Volume both land far enough from that row
         // (distance >= 3) to have zero extra indent regardless of their
-        // very different title lengths ("Notes" vs "Encrypted Vaults").
+        // very different title lengths ("Notes" vs "Encrypted Volumes").
         let mut launcher = launcher();
 
         let short_title = ModuleId::NOTES.title(); // "Notes"
-        let long_title = ModuleId::VAULT.title(); // "Encrypted Vaults"
+        let long_title = ModuleId::VOLUME.title(); // "Encrypted Volumes"
         assert!(launcher.registered_modules.contains(&ModuleId::NOTES));
-        assert!(launcher.registered_modules.contains(&ModuleId::VAULT));
+        assert!(launcher.registered_modules.contains(&ModuleId::VOLUME));
 
         let x_short = title_start_x(&mut launcher, short_title).expect("short title visible");
         let x_long = title_start_x(&mut launcher, long_title).expect("long title visible");

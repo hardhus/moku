@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "moku-bin"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2444,7 +2444,7 @@ dependencies = [
  "moku-secrets",
  "moku-settings",
  "moku-todo",
- "moku-vault-daemon",
+ "moku-volume-daemon",
  "ratatui",
  "rpassword",
  "sysinfo",
@@ -2746,7 +2746,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "moku-vault-daemon"
+name = "moku-volume-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2755,8 +2755,8 @@ dependencies = [
  "crossterm",
  "hkdf",
  "moku-core",
- "moku-vault-fs",
- "moku-vault-mount",
+ "moku-volume-fs",
+ "moku-volume-mount",
  "ratatui",
  "secrecy",
  "serde",
@@ -2769,7 +2769,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "moku-vault-fs"
+name = "moku-volume-fs"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
@@ -2789,14 +2789,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "moku-vault-mount"
+name = "moku-volume-mount"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "fuser",
  "libc",
  "moku-core",
- "moku-vault-fs",
+ "moku-volume-fs",
  "tempfile",
  "tokio",
  "windows 0.62.2",

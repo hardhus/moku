@@ -11,7 +11,7 @@ use crate::keys::ContentKey;
 pub const MAGIC: &[u8; 4] = b"MKV1";
 pub const HEADER_SIZE: u64 = 4 + 1 + 16;
 
-/// Creates a new, empty vault-format file: just the header, zero blocks.
+/// Creates a new, empty volume-format file: just the header, zero blocks.
 pub fn create_empty_file(path: &Path, file_id: &[u8; 16]) -> Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     let mut buf = Vec::with_capacity(HEADER_SIZE as usize);
@@ -25,9 +25,9 @@ pub fn create_empty_file(path: &Path, file_id: &[u8; 16]) -> Result<()> {
 pub fn read_file_id(file: &mut File) -> Result<[u8; 16]> {
     file.seek(SeekFrom::Start(0))?;
     let mut buf = [0u8; HEADER_SIZE as usize];
-    file.read_exact(&mut buf).map_err(|_| anyhow!("corrupt vault file: header unreadable"))?;
+    file.read_exact(&mut buf).map_err(|_| anyhow!("corrupt volume file: header unreadable"))?;
     if &buf[0..4] != MAGIC {
-        return Err(anyhow!("corrupt vault file: bad magic"));
+        return Err(anyhow!("corrupt volume file: bad magic"));
     }
     let mut id = [0u8; 16];
     id.copy_from_slice(&buf[5..21]);

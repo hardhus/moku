@@ -9,7 +9,7 @@ const MODULE_KEY_INFO_SUFFIX: &[u8] = b"/v1";
 
 /// Derives a module-scoped storage subkey from the vault's raw master key —
 /// never uses the master key directly as a cipher key (see
-/// moku-vault-fs/src/keys.rs and moku-vault-daemon/src/registry.rs's
+/// moku-volume-fs/src/keys.rs and moku-volume-daemon/src/registry.rs's
 /// derive_default_volume_master_key for the established convention this
 /// follows). Info string: `moku-core/storage/<module_id>/v1`.
 pub fn derive_module_storage_key(

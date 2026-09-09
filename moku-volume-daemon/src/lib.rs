@@ -7,4 +7,4 @@ pub mod tui_module;
 pub mod worker;
 
 pub use registry::{PasswordMode, VolumeConfig};
-pub use tui_module::VaultManagerModule;
+pub use tui_module::VolumeManagerModule;

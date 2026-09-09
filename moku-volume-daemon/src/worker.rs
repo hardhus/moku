@@ -3,7 +3,7 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow, bail};
 use moku_core::SafeKey;
-use moku_vault_fs::{VolumeEngine, derive_volume_keys};
+use moku_volume_fs::{VolumeEngine, derive_volume_keys};
 use secrecy::SecretBox;
 use zeroize::Zeroizing;
 
@@ -127,7 +127,7 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     // spawn_blocking just keeps the (otherwise idle) tokio worker threads
     // free rather than changing behavior.
     let result: Result<()> = tokio::task::spawn_blocking(move || {
-        moku_vault_mount::mount_and_wait(engine, &mountpoint, stop_rx, on_mounted)
+        moku_volume_mount::mount_and_wait(engine, &mountpoint, stop_rx, on_mounted)
     })
     .await
     .context("mount worker task panicked")?;
@@ -163,7 +163,7 @@ enum WorkerEvent {
     Exited(std::io::Result<std::process::ExitStatus>),
 }
 
-/// Spawns the `vault mount-worker` child process for `volume_id`, writes
+/// Spawns the `volume mount-worker` child process for `volume_id`, writes
 /// `stdin_payload` to its stdin, and returns its pid plus a channel that
 /// yields its stdout/stderr lines and eventual exit status.
 ///
@@ -175,7 +175,7 @@ enum WorkerEvent {
 /// blocking-pool thread to finish before the process can exit. Since the
 /// worker is deliberately left running after a timeout and never closes
 /// its end of the pipe, a blocking-pool thread stuck reading it would
-/// never return — which is exactly what made `vault mount` hang the
+/// never return — which is exactly what made `volume mount` hang the
 /// terminal after printing "starting in the background" until Ctrl+C. A
 /// bare `std::thread` has no such owner: nothing here ever joins it, so
 /// the OS just discards it at process exit, hang-free.
@@ -187,7 +187,7 @@ fn spawn_mount_process_inner(
     let exe = std::env::current_exe()
         .map_err(|e| anyhow!("failed to resolve current executable: {e}"))?;
     let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("vault")
+    cmd.arg("volume")
         .arg("mount-worker")
         .arg(volume_id)
         .arg("--mountpoint")
@@ -300,7 +300,7 @@ async fn run_and_wait_for_outcome(
     }
 }
 
-/// Spawns the `vault mount-worker` child process for `volume_id`, pipes
+/// Spawns the `volume mount-worker` child process for `volume_id`, pipes
 /// `password` over its stdin, and waits for it to either report
 /// `MOUNT_READY_SENTINEL` on stdout or fail — rather than declaring
 /// success the instant the process merely spawns, which previously let a
@@ -322,7 +322,7 @@ pub async fn spawn_mount_process(
 /// Same as `spawn_mount_process`, but for a Default-mode volume whose real
 /// key can be derived from an already-unlocked app-vault master key
 /// without asking the user to type anything — the TUI's no-reprompt mount
-/// path (`VaultManagerModule::start_mount_with_key`), used only when
+/// path (`VolumeManagerModule::start_mount_with_key`), used only when
 /// `ctx.session.is_unlocked()` and the volume has no vault of its own
 /// (`registry::has_own_vault` is false).
 pub async fn spawn_mount_process_with_key(

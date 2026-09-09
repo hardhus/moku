@@ -14,7 +14,7 @@ use crate::keys::{ContentKey, NameKey, VolumeKeys};
 use crate::names::MAX_VIRTUAL_NAME_LEN;
 use crate::pathmap::PathMapper;
 use crate::quota::Quota;
-use crate::types::{Attr, DirEntry, FileKind, VaultFsError, VResult, VirtualPath};
+use crate::types::{Attr, DirEntry, FileKind, VolumeFsError, VResult, VirtualPath};
 
 struct OpenFile {
     backing: PathBuf,
@@ -23,7 +23,7 @@ struct OpenFile {
 
 /// The platform-agnostic encrypted-volume engine (plan §2). Every method
 /// is synchronous and self-contained — FUSE's and WinFsp's callback traits
-/// are both synchronous, so the OS mount shims in `moku-vault-mount` can
+/// are both synchronous, so the OS mount shims in `moku-volume-mount` can
 /// call straight into this with no runtime bridging.
 pub struct VolumeEngine {
     pathmap: PathMapper,
@@ -106,9 +106,9 @@ impl VolumeEngine {
             self.pathmap.resolve(&self.name_key, path)?
         };
         if !backing.is_dir() {
-            return Err(VaultFsError::NotADirectory);
+            return Err(VolumeFsError::NotADirectory);
         }
-        let entries = self.pathmap.read_dir_plain(&self.name_key, &backing).map_err(VaultFsError::from)?;
+        let entries = self.pathmap.read_dir_plain(&self.name_key, &backing).map_err(VolumeFsError::from)?;
         let mut entries: Vec<DirEntry> = entries
             .into_iter()
             .map(|(name, _p, is_dir)| DirEntry {
@@ -126,15 +126,15 @@ impl VolumeEngine {
 
     pub fn mkdir(&self, parent: &VirtualPath, name: &str) -> VResult<Attr> {
         if name.len() > MAX_VIRTUAL_NAME_LEN {
-            return Err(VaultFsError::NameTooLong);
+            return Err(VolumeFsError::NameTooLong);
         }
         let child = parent.join(name);
         let backing = self.pathmap.resolve(&self.name_key, &child)?;
         if backing.exists() {
-            return Err(VaultFsError::AlreadyExists);
+            return Err(VolumeFsError::AlreadyExists);
         }
         fs::create_dir(&backing)?;
-        self.pathmap.init_dir_iv(&backing).map_err(VaultFsError::from)?;
+        self.pathmap.init_dir_iv(&backing).map_err(VolumeFsError::from)?;
         self.stat_backing(&backing)
     }
 
@@ -142,14 +142,14 @@ impl VolumeEngine {
         let child = parent.join(name);
         let backing = self.pathmap.resolve(&self.name_key, &child)?;
         if !backing.is_dir() {
-            return Err(VaultFsError::NotADirectory);
+            return Err(VolumeFsError::NotADirectory);
         }
         let has_children = fs::read_dir(&backing)?.any(|e| match e {
             Ok(e) => e.file_name() != std::ffi::OsStr::new(".moku_dir_iv"),
             Err(_) => true,
         });
         if has_children {
-            return Err(VaultFsError::NotEmpty);
+            return Err(VolumeFsError::NotEmpty);
         }
         fs::remove_dir_all(&backing)?;
         self.pathmap.forget_dir(&backing);
@@ -158,21 +158,21 @@ impl VolumeEngine {
 
     pub fn create(&self, parent: &VirtualPath, name: &str) -> VResult<(u64, Attr)> {
         if name.len() > MAX_VIRTUAL_NAME_LEN {
-            return Err(VaultFsError::NameTooLong);
+            return Err(VolumeFsError::NameTooLong);
         }
         let child = parent.join(name);
         let backing = self.pathmap.resolve(&self.name_key, &child)?;
         if backing.exists() {
-            return Err(VaultFsError::AlreadyExists);
+            return Err(VolumeFsError::AlreadyExists);
         }
         if !self.quota.try_grow(content::HEADER_SIZE) {
-            return Err(VaultFsError::QuotaExceeded);
+            return Err(VolumeFsError::QuotaExceeded);
         }
         let mut file_id = [0u8; 16];
         OsRng.fill_bytes(&mut file_id);
         if let Err(e) = content::create_empty_file(&backing, &file_id) {
             self.quota.shrink(content::HEADER_SIZE);
-            return Err(VaultFsError::from(e));
+            return Err(VolumeFsError::from(e));
         }
 
         let fh = self.next_fh.fetch_add(1, Ordering::SeqCst);
@@ -185,10 +185,10 @@ impl VolumeEngine {
     pub fn open(&self, path: &VirtualPath) -> VResult<u64> {
         let backing = self.pathmap.resolve(&self.name_key, path)?;
         if !backing.is_file() {
-            return Err(VaultFsError::NotFound);
+            return Err(VolumeFsError::NotFound);
         }
         let mut file = File::open(&backing)?;
-        let file_id = content::read_file_id(&mut file).map_err(VaultFsError::from)?;
+        let file_id = content::read_file_id(&mut file).map_err(VolumeFsError::from)?;
         let fh = self.next_fh.fetch_add(1, Ordering::SeqCst);
         self.open_files.lock().unwrap().insert(fh, OpenFile { backing, file_id });
         Ok(fh)
@@ -196,14 +196,14 @@ impl VolumeEngine {
 
     fn lookup_open(&self, fh: u64) -> VResult<(PathBuf, [u8; 16])> {
         let files = self.open_files.lock().unwrap();
-        let f = files.get(&fh).ok_or(VaultFsError::BadFileHandle)?;
+        let f = files.get(&fh).ok_or(VolumeFsError::BadFileHandle)?;
         Ok((f.backing.clone(), f.file_id))
     }
 
     pub fn read(&self, fh: u64, offset: u64, buf: &mut [u8]) -> VResult<usize> {
         let (backing, file_id) = self.lookup_open(fh)?;
         let mut file = OpenOptions::new().read(true).open(&backing)?;
-        content::read_range(&mut file, &self.content_key, &file_id, offset, buf).map_err(VaultFsError::from)
+        content::read_range(&mut file, &self.content_key, &file_id, offset, buf).map_err(VolumeFsError::from)
     }
 
     pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> VResult<usize> {
@@ -212,13 +212,13 @@ impl VolumeEngine {
         let physical_before = file.metadata()?.len();
         let write_end = offset
             .checked_add(data.len() as u64)
-            .ok_or_else(|| VaultFsError::Other(anyhow::anyhow!("write offset overflow")))?;
+            .ok_or_else(|| VolumeFsError::Other(anyhow::anyhow!("write offset overflow")))?;
         let projected_growth = write_end.saturating_sub(physical_before);
         if !self.quota.try_grow(projected_growth) {
-            return Err(VaultFsError::QuotaExceeded);
+            return Err(VolumeFsError::QuotaExceeded);
         }
         let (written, before, after) =
-            content::write_range(&mut file, &self.content_key, &file_id, offset, data).map_err(VaultFsError::from)?;
+            content::write_range(&mut file, &self.content_key, &file_id, offset, data).map_err(VolumeFsError::from)?;
         // try_grow reserved a conservative upper bound; true physical
         // growth from block alignment is usually smaller, so reconcile.
         self.reconcile_reservation(projected_growth, after.saturating_sub(before));
@@ -228,13 +228,13 @@ impl VolumeEngine {
     pub fn setattr_size(&self, path: &VirtualPath, size: u64) -> VResult<Attr> {
         let backing = self.pathmap.resolve(&self.name_key, path)?;
         let mut file = OpenOptions::new().read(true).write(true).open(&backing)?;
-        let file_id = content::read_file_id(&mut file).map_err(VaultFsError::from)?;
+        let file_id = content::read_file_id(&mut file).map_err(VolumeFsError::from)?;
         let physical_before = file.metadata()?.len();
         let projected_growth = size.saturating_sub(physical_before);
         if projected_growth > 0 && !self.quota.try_grow(projected_growth) {
-            return Err(VaultFsError::QuotaExceeded);
+            return Err(VolumeFsError::QuotaExceeded);
         }
-        let (before, after) = content::set_len(&mut file, &self.content_key, &file_id, size).map_err(VaultFsError::from)?;
+        let (before, after) = content::set_len(&mut file, &self.content_key, &file_id, size).map_err(VolumeFsError::from)?;
         if after < before {
             self.quota.shrink(before - after);
         } else {
@@ -272,7 +272,7 @@ impl VolumeEngine {
         let backing = self.pathmap.resolve(&self.name_key, &child)?;
         let meta = fs::metadata(&backing)?;
         if meta.is_dir() {
-            return Err(VaultFsError::IsADirectory);
+            return Err(VolumeFsError::IsADirectory);
         }
         let size = meta.len();
         fs::remove_file(&backing)?;
@@ -289,25 +289,25 @@ impl VolumeEngine {
         replace_if_exists: bool,
     ) -> VResult<()> {
         if new_name.len() > MAX_VIRTUAL_NAME_LEN {
-            return Err(VaultFsError::NameTooLong);
+            return Err(VolumeFsError::NameTooLong);
         }
         let old_child = old_parent.join(old_name);
         let new_child = new_parent.join(new_name);
         let old_backing = self.pathmap.resolve(&self.name_key, &old_child)?;
         let new_backing = self.pathmap.resolve(&self.name_key, &new_child)?;
         if !old_backing.exists() {
-            return Err(VaultFsError::NotFound);
+            return Err(VolumeFsError::NotFound);
         }
         // Size of the file being clobbered, so its quota reservation can be
         // released once the replace actually happens -- computed up front
         // so a failed rename below never mutates quota state.
         let replaced_size = if new_backing.exists() {
             if !replace_if_exists {
-                return Err(VaultFsError::AlreadyExists);
+                return Err(VolumeFsError::AlreadyExists);
             }
             let meta = fs::metadata(&new_backing)?;
             if meta.is_dir() {
-                return Err(VaultFsError::IsADirectory);
+                return Err(VolumeFsError::IsADirectory);
             }
             Some(meta.len())
         } else {
@@ -391,14 +391,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let eng = engine(dir.path(), 1_000_000);
         eng.create(&VirtualPath::root(), "x.md").unwrap();
-        assert!(matches!(eng.create(&VirtualPath::root(), "x.md"), Err(VaultFsError::AlreadyExists)));
+        assert!(matches!(eng.create(&VirtualPath::root(), "x.md"), Err(VolumeFsError::AlreadyExists)));
     }
 
     #[test]
     fn test_open_missing_file_fails() {
         let dir = tempdir().unwrap();
         let eng = engine(dir.path(), 1_000_000);
-        assert!(matches!(eng.open(&VirtualPath::parse("/missing.md")), Err(VaultFsError::NotFound)));
+        assert!(matches!(eng.open(&VirtualPath::parse("/missing.md")), Err(VolumeFsError::NotFound)));
     }
 
     #[test]
@@ -421,7 +421,7 @@ mod tests {
         let eng = engine(dir.path(), 1_000_000);
         eng.mkdir(&VirtualPath::root(), "d").unwrap();
         eng.create(&VirtualPath::parse("/d"), "f.md").unwrap();
-        assert!(matches!(eng.rmdir(&VirtualPath::root(), "d"), Err(VaultFsError::NotEmpty)));
+        assert!(matches!(eng.rmdir(&VirtualPath::root(), "d"), Err(VolumeFsError::NotEmpty)));
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
 
         assert!(matches!(
             eng.rename(&VirtualPath::root(), "old.md", &VirtualPath::root(), "new.md", false),
-            Err(VaultFsError::AlreadyExists)
+            Err(VolumeFsError::AlreadyExists)
         ));
     }
 
@@ -500,7 +500,7 @@ mod tests {
 
         assert!(matches!(
             eng.rename(&VirtualPath::root(), "old.md", &VirtualPath::root(), "adir", true),
-            Err(VaultFsError::IsADirectory)
+            Err(VolumeFsError::IsADirectory)
         ));
     }
 
@@ -509,7 +509,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let eng = engine(dir.path(), 100);
         let (fh, _) = eng.create(&VirtualPath::root(), "f").unwrap();
-        assert!(matches!(eng.write(fh, 0, &vec![0u8; 1000]), Err(VaultFsError::QuotaExceeded)));
+        assert!(matches!(eng.write(fh, 0, &vec![0u8; 1000]), Err(VolumeFsError::QuotaExceeded)));
     }
 
     #[test]

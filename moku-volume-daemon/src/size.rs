@@ -38,7 +38,7 @@ pub fn parse_size(input: &str) -> Result<u64> {
 }
 
 /// Formats a byte count back into a compact human-readable binary size,
-/// for `moku vault list`/`status` display.
+/// for `moku volume list`/`status` display.
 pub fn format_size(bytes: u64) -> String {
     const UNITS: &[(&str, f64)] =
         &[("TiB", 1024.0_f64 * 1024.0 * 1024.0 * 1024.0), ("GiB", 1024.0 * 1024.0 * 1024.0), ("MiB", 1024.0 * 1024.0), ("KiB", 1024.0)];

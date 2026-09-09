@@ -16,7 +16,7 @@ use zeroize::Zeroizing;
 
 use moku_core::{AppContext, MokuTheme, SafeKey};
 
-use super::VaultManagerModule;
+use super::VolumeManagerModule;
 use crate::registry::{PasswordMode, VolumeSecret};
 use crate::size;
 
@@ -39,7 +39,7 @@ enum CreateField {
 /// State for creating a new volume from the TUI. Supports both password
 /// modes: `Default` derives the key from moku's already-unlocked app vault
 /// with no password field at all (mirrors the mount fast path — see
-/// `VaultManagerModule::start_mount_with_key`); `Custom` shows a masked
+/// `VolumeManagerModule::start_mount_with_key`); `Custom` shows a masked
 /// password field *and* a confirmation field, since — unlike `Default`,
 /// which is verified against a real, already-unlocked key — a brand new
 /// password has nothing to check a typo against except itself. Always
@@ -72,7 +72,7 @@ impl CreateForm {
     }
 }
 
-impl VaultManagerModule {
+impl VolumeManagerModule {
     pub(super) fn handle_create_form_event(
         &mut self,
         event: &Event,
@@ -343,7 +343,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tab_cycles_focus_in_default_mode_skipping_password_fields() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.create_form = Some(CreateForm::new()); // starts in PasswordMode::Default
         let mut ctx = create_test_context().await;
 
@@ -380,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tab_cycles_focus_in_custom_mode_through_password_fields() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         let mut form = CreateForm::new();
         form.mode = PasswordMode::Custom;
         module.create_form = Some(form);
@@ -416,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_left_right_and_space_toggle_mode() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         let mut form = CreateForm::new();
         form.focus = CreateField::Mode;
         module.create_form = Some(form);
@@ -446,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_char_input_routes_to_the_focused_field() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.create_form = Some(CreateForm::new());
         let mut ctx = create_test_context().await;
 
@@ -469,7 +469,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enter_with_empty_name_sets_error_and_keeps_form_open() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.create_form = Some(CreateForm::new());
         let mut ctx = create_test_context().await;
 
@@ -483,7 +483,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enter_with_invalid_size_sets_error() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         let mut form = CreateForm::new();
         form.name = "test".to_string();
         form.size = "not-a-size".to_string();
@@ -501,7 +501,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enter_custom_mode_empty_password_sets_error() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         let mut form = CreateForm::new();
         form.name = "test".to_string();
         form.size = "10MiB".to_string();
@@ -519,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enter_custom_mode_mismatched_passwords_sets_error() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         let mut form = CreateForm::new();
         form.name = "test".to_string();
         form.size = "10MiB".to_string();
@@ -539,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enter_custom_mode_matching_passwords_submits() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         let mut form = CreateForm::new();
         form.name = "test".to_string();
         form.size = "10MiB".to_string();
@@ -561,7 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enter_default_mode_with_locked_vault_sets_error_and_keeps_form_open() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         let mut form = CreateForm::new(); // starts in PasswordMode::Default
         form.name = "test".to_string();
         form.size = "10MiB".to_string();
@@ -578,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enter_default_mode_with_unlocked_vault_submits_without_a_password() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         let mut form = CreateForm::new(); // starts in PasswordMode::Default
         form.name = "test".to_string();
         form.size = "10MiB".to_string();
@@ -597,7 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_esc_cancels_the_form() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.create_form = Some(CreateForm::new());
         let mut ctx = create_test_context().await;
 
@@ -609,7 +609,7 @@ mod tests {
     }
 
     fn render_create_form(form: CreateForm) -> String {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.create_form = Some(form);
 
         let (width, height) = (70u16, 20u16);

@@ -62,11 +62,16 @@ pub enum MountSecret {
     Key(SecretBox<SafeKey>),
 }
 
+// NOTE: intentionally still "moku-vault-daemon" even though this crate is
+// now named moku-volume-daemon — permanent key-derivation identifier baked
+// into every already-derived default-volume key; changing it would break
+// decryption of existing users' data. Only the /v1 suffix bumps if this
+// derivation ever changes.
 const DEFAULT_VOLUME_INFO_PREFIX: &[u8] = b"moku-vault-daemon/default-volume/v1/";
 
 /// Derives a per-volume master key from moku's real app-vault master key,
 /// domain-separated by volume id via HKDF-Expand (same technique as
-/// `moku_vault_fs::derive_volume_keys`) so that two Default-mode volumes
+/// `moku_volume_fs::derive_volume_keys`) so that two Default-mode volumes
 /// sharing the same app master key never end up with the same encryption
 /// key — sharing one would be a real confidentiality bug, not just a
 /// cosmetic one.
@@ -141,6 +146,12 @@ pub struct VolumeConfig {
 }
 
 pub fn volumes_root() -> Result<PathBuf> {
+    // NOTE: the on-disk directory name is intentionally still "vaults",
+    // even though this crate/feature is now called "volume" — it's where
+    // every existing user's already-created volumes actually live on
+    // disk; renaming this segment would make them all vanish from moku's
+    // point of view without a migration step. Only the Rust-facing name
+    // (`volumes_root`) and everything above it changed.
     Ok(moku_core::dirs::get_data_dir()?.join("vaults"))
 }
 
@@ -205,7 +216,7 @@ fn update_index(mutate: impl FnOnce(&mut HashMap<String, PathBuf>)) -> Result<()
 }
 
 /// Loads the index and forgets any entry whose directory is *completely
-/// gone* — e.g. deleted by hand with `rm -rf` instead of `vault delete`,
+/// gone* — e.g. deleted by hand with `rm -rf` instead of `volume delete`,
 /// which previously left a permanent ghost: `unique_id` saw the old id as
 /// still taken forever, so recreating a volume under the same name kept
 /// accumulating `-2`, `-3`, ... suffixes instead of ever reusing the
@@ -309,7 +320,7 @@ pub async fn load_config(dir: &Path) -> Result<VolumeConfig> {
 ///
 /// `base_dir` is where the volume's own directory (`<base_dir>/<id>/`)
 /// gets created — `None` defaults to the current working directory (so a
-/// plain `vault create NAME` puts it wherever the user's shell happens to
+/// plain `volume create NAME` puts it wherever the user's shell happens to
 /// be, not a fixed app-managed folder); `Some(path)` creates it there
 /// instead. Either way the volume is registered in the index so it can
 /// still be found by name/id regardless of where it physically lives.
@@ -347,7 +358,7 @@ pub async fn create_volume(
     // VolumeSecret::FromAppVault needs nothing persisted here — its key is
     // re-derived from the app vault on every mount instead.
 
-    moku_vault_fs::pathmap::PathMapper::new(dir.join(DATA_DIR)).ensure_root()?;
+    moku_volume_fs::pathmap::PathMapper::new(dir.join(DATA_DIR)).ensure_root()?;
 
     let config = VolumeConfig {
         id: id.clone(),
@@ -358,7 +369,7 @@ pub async fn create_volume(
     };
     save_config(&dir, &config).await?;
 
-    moku_vault_fs::quota::Quota::load(dir.join(USAGE_FILE), size_limit_bytes).flush()?;
+    moku_volume_fs::quota::Quota::load(dir.join(USAGE_FILE), size_limit_bytes).flush()?;
 
     update_index(|index| {
         index.insert(id.clone(), dir.clone());
@@ -471,7 +482,7 @@ pub async fn delete_volume(id: &str) -> Result<()> {
 /// needing its vault unlocked (the counter lives in a small plaintext
 /// `usage.json`, not inside the encrypted volume itself).
 pub fn usage_bytes(id: &str) -> Result<u64> {
-    let usage = moku_vault_fs::quota::Quota::load(volume_dir(id)?.join(USAGE_FILE), 0);
+    let usage = moku_volume_fs::quota::Quota::load(volume_dir(id)?.join(USAGE_FILE), 0);
     Ok(usage.used_bytes())
 }
 
@@ -607,7 +618,7 @@ mod tests {
         assert_eq!(cfg.id, name);
 
         // The user's exact scenario: delete the directory by hand (not via
-        // `vault delete`), leaving the index entry orphaned.
+        // `volume delete`), leaving the index entry orphaned.
         std::fs::remove_dir_all(base.path().join(&cfg.id)).unwrap();
 
         let cfg2 = create_volume(

@@ -1,12 +1,12 @@
-//! FUSE `Filesystem` implementation over `moku-vault-fs`'s `VolumeEngine`
+//! FUSE `Filesystem` implementation over `moku-volume-fs`'s `VolumeEngine`
 //! (plan Faz 6). Developed and cross-compile-checked (`cargo check
-//! --target x86_64-unknown-linux-gnu -p moku-vault-mount`) from a Windows
+//! --target x86_64-unknown-linux-gnu -p moku-volume-mount`) from a Windows
 //! dev machine — there is no FUSE/Linux environment available this
 //! session, so this is **not runtime-tested**. Architecturally mirrors
 //! `winfsp_shim.rs`: only the operations a real read/write filesystem
 //! needs are implemented; everything else keeps fuser's default
 //! `ENOSYS`/no-op behavior (no ACLs, xattrs, symlinks, locks — matches
-//! the vault format's own no-metadata-beyond-size/mtime design).
+//! the volume format's own no-metadata-beyond-size/mtime design).
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -21,16 +21,16 @@ use fuser::{
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, TimeOrNow, WriteFlags,
 };
 
-use moku_vault_fs::{Attr, FileKind, VaultFsError, VirtualPath, VolumeEngine};
+use moku_volume_fs::{Attr, FileKind, VolumeFsError, VirtualPath, VolumeEngine};
 
 const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
 
-/// Maps `VirtualPath`s (moku-vault-fs's own addressing scheme) to the
+/// Maps `VirtualPath`s (moku-volume-fs's own addressing scheme) to the
 /// stable `u64` inode numbers FUSE requires. `VolumeEngine` itself is
 /// entirely path-addressed and knows nothing about inodes — this table
 /// lives only in the mount shim, same division of concerns as
-/// `winfsp_shim.rs`'s `VaultFileHandle { path, fh }`.
+/// `winfsp_shim.rs`'s `VolumeFileHandle { path, fh }`.
 struct InodeTable {
     by_ino: HashMap<u64, VirtualPath>,
     by_path: HashMap<VirtualPath, u64>,
@@ -75,17 +75,17 @@ impl InodeTable {
     }
 }
 
-fn map_err(e: VaultFsError) -> Errno {
+fn map_err(e: VolumeFsError) -> Errno {
     match e {
-        VaultFsError::NotFound => Errno::ENOENT,
-        VaultFsError::AlreadyExists => Errno::EEXIST,
-        VaultFsError::NotADirectory => Errno::ENOTDIR,
-        VaultFsError::IsADirectory => Errno::EISDIR,
-        VaultFsError::NotEmpty => Errno::ENOTEMPTY,
-        VaultFsError::NameTooLong => Errno::ENAMETOOLONG,
-        VaultFsError::QuotaExceeded => Errno::ENOSPC,
-        VaultFsError::BadFileHandle => Errno::EBADF,
-        VaultFsError::Other(_) => Errno::EIO,
+        VolumeFsError::NotFound => Errno::ENOENT,
+        VolumeFsError::AlreadyExists => Errno::EEXIST,
+        VolumeFsError::NotADirectory => Errno::ENOTDIR,
+        VolumeFsError::IsADirectory => Errno::EISDIR,
+        VolumeFsError::NotEmpty => Errno::ENOTEMPTY,
+        VolumeFsError::NameTooLong => Errno::ENAMETOOLONG,
+        VolumeFsError::QuotaExceeded => Errno::ENOSPC,
+        VolumeFsError::BadFileHandle => Errno::EBADF,
+        VolumeFsError::Other(_) => Errno::EIO,
     }
 }
 
@@ -117,12 +117,12 @@ fn to_file_attr(ino: u64, attr: &Attr, uid: u32, gid: u32) -> FileAttr {
     }
 }
 
-struct VaultFsFilesystem {
+struct VolumeFsFilesystem {
     engine: VolumeEngine,
     inodes: Mutex<InodeTable>,
 }
 
-impl Filesystem for VaultFsFilesystem {
+impl Filesystem for VolumeFsFilesystem {
     fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let Some(name) = name.to_str() else {
             reply.error(Errno::EINVAL);
@@ -180,7 +180,7 @@ impl Filesystem for VaultFsFilesystem {
             reply.error(Errno::ENOENT);
             return;
         };
-        // Only size changes are persisted — the vault format tracks no
+        // Only size changes are persisted — the volume format tracks no
         // other metadata beyond size and on-disk mtime (same v1 scope cut
         // as winfsp_shim.rs's set_basic_info).
         let result = match size {
@@ -427,15 +427,15 @@ impl Filesystem for VaultFsFilesystem {
 
 /// Mounts `engine` at `mountpoint`, blocks until `stop_rx` receives a
 /// signal, then unmounts cleanly. Same signature as the WinFsp shim's
-/// `mount_and_wait`, so `moku-vault-daemon::worker::run` needs no
+/// `mount_and_wait`, so `moku-volume-daemon::worker::run` needs no
 /// platform-specific code at all.
 pub fn mount_and_wait(engine: VolumeEngine, mountpoint: &str, stop_rx: Receiver<()>) -> Result<()> {
-    let fs = VaultFsFilesystem { engine, inodes: Mutex::new(InodeTable::new()) };
+    let fs = VolumeFsFilesystem { engine, inodes: Mutex::new(InodeTable::new()) };
     // `Config` is `#[non_exhaustive]`, so it can't be built with a struct
     // literal outside fuser's own crate — start from its `Default` and
     // mutate the one field that matters.
     let mut options = Config::default();
-    options.mount_options = vec![MountOption::FSName("mokuvault".to_string()), MountOption::DefaultPermissions];
+    options.mount_options = vec![MountOption::FSName("mokuvolume".to_string()), MountOption::DefaultPermissions];
 
     let session = fuser::spawn_mount(fs, mountpoint, &options).map_err(|e| anyhow!("failed to mount at '{mountpoint}': {e}"))?;
 

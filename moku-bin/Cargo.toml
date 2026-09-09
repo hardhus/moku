@@ -1,6 +1,6 @@
 [package]
 name = "moku-bin"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 
 [[bin]]
@@ -44,7 +44,7 @@ moku-context = { path = "../modules/moku-context" }
 moku-commit = { path = "../modules/moku-commit" }
 moku-rss = { path = "../modules/moku-rss" }
 moku-daemon = { path = "../moku-daemon" }
-moku-vault-daemon = { path = "../moku-vault-daemon" }
+moku-volume-daemon = { path = "../moku-volume-daemon" }
 moku-satz = { path = "../modules/moku-satz" }
 moku-secrets = { path = "../modules/moku-secrets" }
 moku-http = { path = "../modules/moku-http" }

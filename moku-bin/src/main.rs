@@ -11,7 +11,7 @@ mod config_cmd;
 mod registry;
 mod tui;
 mod utils;
-mod vault_cmd;
+mod volume_cmd;
 
 use moku_core::{
     CliContext, ConfigManager, ModuleId, MokuConfig, SecurityManager, StorageManager, VaultSession,
@@ -115,13 +115,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    if let Some(Commands::Vault { sub }) = &cli.command {
-        // Vault volumes are entirely independent of moku's own vault/
-        // session/storage — each has its own SecurityManager rooted at
-        // its own directory (see moku-vault-daemon::registry) — so this
-        // is handled before any of that is constructed, same early-exit
+    if let Some(Commands::Volume { sub }) = &cli.command {
+        // Volumes are entirely independent of moku's own vault/session/
+        // storage — each has its own SecurityManager rooted at its own
+        // directory (see moku-volume-daemon::registry) — so this is
+        // handled before any of that is constructed, same early-exit
         // shape as Commands::Config below.
-        if let Err(e) = vault_cmd::handle(sub).await {
+        if let Err(e) = volume_cmd::handle(sub).await {
             eprintln!("{}", e);
             std::process::exit(1);
         }

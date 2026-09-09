@@ -1,6 +1,6 @@
 //! The mount-password prompt (`PasswordPrompt`) — shown before mounting a
 //! volume, always visible even on the no-reprompt fast path (see
-//! `VaultManagerModule::start_mount_with_key`), just without a password
+//! `VolumeManagerModule::start_mount_with_key`), just without a password
 //! field in that case. Split out of `tui_module.rs` the same way
 //! `modules/moku-settings/src/tabs/*.rs` splits one file per self-contained
 //! sub-view.
@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use moku_core::{MokuTheme, SafeKey};
 
-use super::VaultManagerModule;
+use super::VolumeManagerModule;
 
 /// Which field of the mount prompt currently has keyboard focus.
 /// `Password` only exists (and is only reachable via `Tab`) when
@@ -38,7 +38,7 @@ pub(super) enum MountField {
 /// navigation, mirroring `moku-lock-screen`'s input handling directly
 /// (`push`/`pop` a `String`, Enter/Esc). Always shown before mounting,
 /// even on the no-reprompt fast path — a mountpoint is picked by default
-/// (`VaultManagerModule::default_mountpoint`) but stays visible and
+/// (`VolumeManagerModule::default_mountpoint`) but stays visible and
 /// editable rather than being silently auto-chosen, since more than one
 /// volume may be mounted and the user may want a specific drive letter.
 pub(super) struct PasswordPrompt {
@@ -58,7 +58,7 @@ pub(super) struct PasswordPrompt {
     pub(super) key: Option<Arc<SecretBox<SafeKey>>>,
 }
 
-impl VaultManagerModule {
+impl VolumeManagerModule {
     pub(super) fn handle_prompt_event(&mut self, event: &Event) -> Result<bool> {
         let Some(prompt) = &mut self.prompt else {
             return Ok(false);
@@ -229,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mount_prompt_char_input_routes_to_mountpoint_when_no_password_needed() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.prompt = Some(mount_prompt(Some(Arc::new(SecretBox::new(Box::new(
             SafeKey([1u8; 32]),
         ))))));
@@ -244,7 +244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mount_prompt_tab_switches_fields_when_password_needed() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.prompt = Some(mount_prompt(None));
         let mut ctx = create_test_context().await;
 
@@ -269,7 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mount_prompt_enter_with_key_submits_and_closes() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.prompt = Some(mount_prompt(Some(Arc::new(SecretBox::new(Box::new(
             SafeKey([2u8; 32]),
         ))))));
@@ -284,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mount_prompt_enter_without_key_submits_and_closes() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         let mut prompt = mount_prompt(None);
         prompt.focus = MountField::Password;
         prompt.input = Zeroizing::new("hunter2".to_string());
@@ -300,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mount_prompt_esc_cancels() {
-        let mut module = VaultManagerModule::new();
+        let mut module = VolumeManagerModule::new();
         module.prompt = Some(mount_prompt(None));
         let mut ctx = create_test_context().await;
 

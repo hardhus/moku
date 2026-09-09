@@ -9,7 +9,7 @@ use secrecy::SecretBox;
 
 use crate::keys::NameKey;
 use crate::names::NameCipher;
-use crate::types::{VResult, VaultFsError, VirtualPath};
+use crate::types::{VResult, VolumeFsError, VirtualPath};
 
 const DIR_IV_FILE: &str = ".moku_dir_iv";
 
@@ -63,12 +63,12 @@ impl PathMapper {
         let mut backing = self.data_root.clone();
         let comps = path.components();
         for (i, comp) in comps.iter().enumerate() {
-            let dir_iv = self.dir_iv_for_backing(&backing).map_err(VaultFsError::from)?;
-            let encrypted = cipher.encrypt_name(&dir_iv, comp).map_err(|_| VaultFsError::NameTooLong)?;
+            let dir_iv = self.dir_iv_for_backing(&backing).map_err(VolumeFsError::from)?;
+            let encrypted = cipher.encrypt_name(&dir_iv, comp).map_err(|_| VolumeFsError::NameTooLong)?;
             backing.push(encrypted);
             let is_last = i == comps.len() - 1;
             if !is_last && !backing.is_dir() {
-                return Err(VaultFsError::NotFound);
+                return Err(VolumeFsError::NotFound);
             }
         }
         Ok(backing)
@@ -143,7 +143,7 @@ mod tests {
         let mapper = PathMapper::new(dir.path().to_path_buf());
         mapper.ensure_root().unwrap();
         let result = mapper.resolve(&key(), &VirtualPath::parse("/missing-dir/file.md"));
-        assert!(matches!(result, Err(VaultFsError::NotFound)));
+        assert!(matches!(result, Err(VolumeFsError::NotFound)));
     }
 
     #[test]
