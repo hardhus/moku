@@ -315,6 +315,25 @@ impl FileSystemContext for VolumeFsContext {
         Ok(n as u32)
     }
 
+    fn flush(
+        &self,
+        context: Option<&Self::FileContext>,
+        file_info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
+        // VolumeEngine holds no OS-level write buffering of its own -- every
+        // write already lands on the backing file synchronously -- so this
+        // is a pass-through success. Left unimplemented, this falls to
+        // WinFsp's default STATUS_INVALID_DEVICE_REQUEST, which Win32
+        // surfaces as ERROR_INVALID_FUNCTION ("Incorrect function") -- what
+        // broke an editor's atomic save (write temp file, flush, rename
+        // over the destination) right after the flush call.
+        if let Some(ctx) = context {
+            let attr = self.engine.getattr(&ctx.path).map_err(map_err)?;
+            write_file_info(file_info, &attr);
+        }
+        Ok(())
+    }
+
     fn read_directory(
         &self,
         context: &Self::FileContext,

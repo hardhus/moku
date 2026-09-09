@@ -363,6 +363,16 @@ impl Filesystem for VolumeFsFilesystem {
         reply.ok();
     }
 
+    fn fsync(&self, _req: &Request, _ino: INodeNo, _fh: FileHandle, _datasync: bool, reply: ReplyEmpty) {
+        // Same rationale as `flush`: VolumeEngine has no OS-level write
+        // buffering to sync, every write already lands on the backing file
+        // synchronously. fuser's default replies ENOSYS, which breaks an
+        // editor's atomic save (write temp file, fsync, rename over the
+        // destination) on the fsync step -- the Linux counterpart of the
+        // WinFsp `flush` gap.
+        reply.ok();
+    }
+
     fn release(
         &self,
         _req: &Request,
