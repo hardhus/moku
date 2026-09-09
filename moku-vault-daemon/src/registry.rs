@@ -475,6 +475,38 @@ pub fn usage_bytes(id: &str) -> Result<u64> {
     Ok(usage.used_bytes())
 }
 
+/// A reasonable default mount target — always editable in the TUI's
+/// `PasswordPrompt` before mounting, and used as-is by the CLI's `mount`
+/// command when `--mountpoint` is omitted; this just picks a sensible
+/// starting point. On Windows: `M:` ("moku") if free, since it's easy to
+/// remember and unlikely to collide with anything the user already has
+/// mounted; otherwise the first free letter counting down from Z, which
+/// naturally spreads out further volumes across whatever's free without
+/// any extra bookkeeping (this function just checks the live filesystem
+/// state each time it's called). Elsewhere, a per-volume folder under the
+/// user's home directory.
+#[cfg_attr(windows, allow(unused_variables))]
+pub fn default_mountpoint(volume_id: &str) -> String {
+    #[cfg(windows)]
+    {
+        if !std::path::Path::new(r"M:\").exists() {
+            return "M:".to_string();
+        }
+        for c in ('D'..='Z').rev() {
+            let letter = format!("{c}:");
+            if !std::path::Path::new(&format!("{letter}\\")).exists() {
+                return letter;
+            }
+        }
+        "Z:".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        format!("{home}/mnt/{volume_id}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,5 +837,21 @@ mod tests {
         );
 
         remove_index_entry(&cfg.id);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_default_mountpoint_prefers_m_when_free() {
+        let result = default_mountpoint("some-volume");
+        if !std::path::Path::new(r"M:\").exists() {
+            assert_eq!(
+                result, "M:",
+                "M: is free on this machine and should be preferred"
+            );
+        } else {
+            // M: is already in use on this machine — just confirm we still
+            // fall back to a plausible drive-letter mountpoint.
+            assert!(result.ends_with(':') && result.len() == 2);
+        }
     }
 }

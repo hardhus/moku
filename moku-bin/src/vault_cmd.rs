@@ -172,7 +172,7 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
             );
             Ok(())
         }
-        VaultCommands::Mount { name, mountpoint } => mount(name, mountpoint).await,
+        VaultCommands::Mount { name, mountpoint } => mount(name, mountpoint.as_deref()).await,
         VaultCommands::Unmount { name } => unmount(name).await,
         VaultCommands::Delete { name, yes } => delete(name, *yes).await,
         VaultCommands::Import { path } => {
@@ -184,12 +184,17 @@ pub async fn handle(sub: &VaultCommands) -> Result<()> {
     }
 }
 
-async fn mount(name: &str, mountpoint: &str) -> Result<()> {
+async fn mount(name: &str, mountpoint: Option<&str>) -> Result<()> {
     let cfg = registry::find_volume(name).await?;
     if status::is_mounted(&cfg.id) {
         println!("'{}' is already mounted.", cfg.display_name);
         return Ok(());
     }
+
+    let resolved_mountpoint = match mountpoint {
+        Some(mp) => mp.to_string(),
+        None => registry::default_mountpoint(&cfg.id),
+    };
 
     let prompt_label = match cfg.password_mode {
         PasswordMode::Default => "Moku vault password: ",
@@ -198,11 +203,11 @@ async fn mount(name: &str, mountpoint: &str) -> Result<()> {
     let password = rpassword::prompt_password(prompt_label)
         .map_err(|e| anyhow!("Failed to read password: {e}"))?;
 
-    match worker::spawn_mount_process(&cfg.id, mountpoint, &password).await? {
+    match worker::spawn_mount_process(&cfg.id, &resolved_mountpoint, &password).await? {
         MountOutcome::Ready { pid } => {
             println!(
                 "✅ Mounted '{}' at {} (worker PID: {}).",
-                cfg.display_name, mountpoint, pid
+                cfg.display_name, resolved_mountpoint, pid
             );
         }
         MountOutcome::Failed { message } => bail!("Mount failed: {message}"),

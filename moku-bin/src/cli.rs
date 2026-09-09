@@ -132,9 +132,11 @@ pub enum VaultCommands {
     /// Mount a volume as a real drive/folder. Prompts for its password.
     Mount {
         name: String,
-        /// Drive letter ("X:") or an empty NTFS folder path.
+        /// Drive letter ("X:") or an empty NTFS folder path. Omit to pick
+        /// one automatically: "M:" if free, otherwise the first free
+        /// drive letter counting down from "Z:".
         #[arg(long)]
-        mountpoint: String,
+        mountpoint: Option<String>,
     },
     /// Unmount a volume.
     Unmount { name: String },
