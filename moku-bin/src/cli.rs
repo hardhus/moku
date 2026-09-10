@@ -92,6 +92,33 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Manage the background Pomodoro timer daemon (start/stop/status/reset).
+    Pomodoro {
+        #[command(subcommand)]
+        sub: PomodoroCommands,
+    },
+}
+
+#[derive(Subcommand, Clone, PartialEq, Debug)]
+pub enum PomodoroCommands {
+    /// Starts (or resends the plan to an already-running) daemon using the
+    /// named profile — e.g. `moku pomodoro start kitap` — or, if omitted,
+    /// the configured default profile / the first profile / the built-in
+    /// `classic` fallback (25 min work / 5 min break, forever). Profiles
+    /// are set up from the Pomodoro screen in the TUI.
+    Start { name: Option<String> },
+    /// Lists every configured profile, marking the default.
+    List,
+    /// Stops the running daemon.
+    Stop,
+    /// Shows the current phase and remaining time, if a daemon is running.
+    Status,
+    /// Resets the running plan back to its first phase.
+    Reset,
+    /// Internal: the daemon's own process entry point, spawned by `Start`.
+    /// Not for direct use.
+    #[command(hide = true)]
+    RunWorker,
 }
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
@@ -230,6 +257,9 @@ impl Cli {
             Some(Commands::Notes { .. }) => ModuleId::NOTES,
             Some(Commands::Secrets { .. }) => ModuleId::SECRETS,
             Some(Commands::Http { .. }) => ModuleId::HTTP,
+            // Always handled by an early return in main.rs before this
+            // matters for registry dispatch.
+            Some(Commands::Pomodoro { .. }) => ModuleId::POMODORO,
             None => ModuleId::LAUNCHER,
         }
     }

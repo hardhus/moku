@@ -25,6 +25,7 @@ pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
     r.insert(Box::new(moku_satz::NotesModule::new()));
     r.insert(Box::new(moku_secrets::SecretsModule::new()));
     r.insert(Box::new(moku_http::HttpModule::new()));
+    r.insert(Box::new(moku_pomodoro::PomodoroModule::new()));
 
     for module in loaded_plugins {
         r.insert(module);

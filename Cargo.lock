@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "moku-bin"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2439,6 +2439,7 @@ dependencies = [
  "moku-launcher",
  "moku-lock-screen",
  "moku-lua",
+ "moku-pomodoro",
  "moku-rss",
  "moku-satz",
  "moku-secrets",
@@ -2647,6 +2648,39 @@ dependencies = [
  "tracing",
  "windows 0.58.0",
  "winreg 0.52.0",
+]
+
+[[package]]
+name = "moku-pomodoro"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "clap",
+ "crossterm",
+ "moku-core",
+ "moku-pomodoro-daemon",
+ "ratatui",
+ "serde",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "moku-pomodoro-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "moku-core",
+ "moku-notify",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

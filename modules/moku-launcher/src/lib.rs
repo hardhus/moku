@@ -1082,33 +1082,33 @@ mod tests {
 
     #[test]
     fn test_ring_rotates_one_step_keeping_cursor_row_fixed() {
-        // The exact KARE2 -> KARE3 transition confirmed with the user (11
-        // modules, margin 3): Vault Security (index 4) selected, then one
-        // more Down to RSS Feed Reader (index 5) — the cursor's screen
-        // row must not change, but the ring rotates so Secrets (the item
-        // that wraps in from the far end) now appears at the very top.
+        // The exact transition confirmed with the user (12 modules, margin
+        // 3, now that Pomodoro is registered): RSS Feed Reader (index 5)
+        // selected, then one more Down to Daemon Status (index 6) — the
+        // cursor's screen row must not change, but the ring rotates so API
+        // Client (the item that wraps in from the far end) now appears at
+        // the very top.
         let mut launcher = launcher();
-        for _ in 0..4 {
-            launcher.next(); // Dashboard -> ... -> Vault Security
+        for _ in 0..5 {
+            launcher.next(); // Dashboard -> ... -> RSS Feed Reader
         }
-        assert_eq!(launcher.state.selected(), Some(4));
+        assert_eq!(launcher.state.selected(), Some(5));
         let (width, height) = (100usize, 30usize);
         let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
-        let lock_screen_row =
-            find_row(&mut launcher, width, height, "Vault Security").unwrap() - list_top;
-
-        launcher.next(); // Vault Security -> RSS Feed Reader
-        assert_eq!(launcher.state.selected(), Some(5));
-        let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
         let rss_row = find_row(&mut launcher, width, height, "RSS Feed Reader").unwrap() - list_top;
-        let secrets_row = find_row(&mut launcher, width, height, "Secrets").unwrap() - list_top;
+
+        launcher.next(); // RSS Feed Reader -> Daemon Status
+        assert_eq!(launcher.state.selected(), Some(6));
+        let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
+        let daemon_row = find_row(&mut launcher, width, height, "Daemon Status").unwrap() - list_top;
+        let api_client_row = find_row(&mut launcher, width, height, "API Client").unwrap() - list_top;
 
         assert_eq!(
-            rss_row, lock_screen_row,
+            daemon_row, rss_row,
             "the cursor's screen row should not move once scrolling has engaged"
         );
         assert_eq!(
-            secrets_row, 0,
+            api_client_row, 0,
             "the ring should have rotated so the wrapped-around item lands at the very top"
         );
     }
@@ -1160,7 +1160,7 @@ mod tests {
         let mut launcher = launcher_with_max_visible(5);
         assert_eq!(
             launcher.registered_modules.len(),
-            11,
+            12,
             "total module count should be unaffected"
         );
         let content = rendered_content(&mut launcher);

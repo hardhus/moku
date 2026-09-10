@@ -1,0 +1,25 @@
+[package]
+name = "moku-pomodoro"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["tui"]
+tui = ["dep:ratatui", "dep:crossterm"]
+
+[dependencies]
+moku-core.workspace = true
+moku-pomodoro-daemon = { path = "../../moku-pomodoro-daemon" }
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+arc-swap.workspace = true

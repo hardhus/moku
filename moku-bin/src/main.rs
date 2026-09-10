@@ -8,6 +8,7 @@ use color_eyre::eyre::eyre;
 mod app_loop;
 mod cli;
 mod config_cmd;
+mod pomodoro_cmd;
 mod registry;
 mod tui;
 mod utils;
@@ -160,6 +161,18 @@ async fn main() -> Result<()> {
         // panic/eyre-hook interaction (see tui::restore() in utils.rs)
         // when the terminal was never put into raw/alternate-screen mode.
         if let Err(e) = config_cmd::handle(sub, &config, &session, &security, &storage).await {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if let Some(Commands::Pomodoro { sub }) = &cli.command {
+        // Pomodoro needs none of session/security/storage (its plan lives
+        // in plaintext config.toml, not the encrypted vault) — positioned
+        // here anyway, symmetrically with Commands::Config above, rather
+        // than restructuring the unconditional setup above it.
+        if let Err(e) = pomodoro_cmd::handle(sub, &loaded_config).await {
             eprintln!("{}", e);
             std::process::exit(1);
         }

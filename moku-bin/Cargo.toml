@@ -1,6 +1,6 @@
 [package]
 name = "moku-bin"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 
 [[bin]]
@@ -48,6 +48,7 @@ moku-volume-daemon = { path = "../moku-volume-daemon" }
 moku-satz = { path = "../modules/moku-satz" }
 moku-secrets = { path = "../modules/moku-secrets" }
 moku-http = { path = "../modules/moku-http" }
+moku-pomodoro = { path = "../modules/moku-pomodoro" }
 
 [dev-dependencies]
 tempfile.workspace = true

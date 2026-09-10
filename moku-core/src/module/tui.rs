@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use crossterm::event::Event;
@@ -42,5 +44,24 @@ pub trait TuiModule: ModuleMeta + AsAny {
     /// including for modules the user hasn't opened this session.
     async fn dashboard_summary(&self, _ctx: &AppContext) -> Option<ModuleStatus> {
         None
+    }
+
+    /// How often this module wants a poll/redraw tick while it is the
+    /// *focused* module — `None` (the default, and what every module gets
+    /// for free) means never. `app_loop` only ever runs a tick timer for
+    /// the currently-focused module's own returned interval, so an idle
+    /// module (the common case) costs nothing extra: no wakeup, no
+    /// redraw. A module that needs one (e.g. a live countdown) should
+    /// return `Some` only while something is actually advancing —
+    /// returning `Some` unconditionally would defeat the point.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Called on each tick this module asked for via `tick_interval`.
+    /// Returns whether a redraw is actually needed (e.g. `false` if the
+    /// displayed value hasn't visibly changed since the last tick).
+    async fn on_tick(&mut self, _ctx: &mut AppContext) -> Result<bool> {
+        Ok(false)
     }
 }

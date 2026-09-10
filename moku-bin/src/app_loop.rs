@@ -78,6 +78,21 @@ fn draw_schema_upgrade_prompt(
 /// `module_ids` and turns the result into one human-readable summary
 /// line for a toast — shared by both the silent-auto-upgrade path and
 /// the confirm-prompt path below.
+/// Drives the currently-focused module's own opt-in redraw tick
+/// (`TuiModule::tick_interval`/`on_tick`) — pending forever (no wakeup at
+/// all) whenever that module doesn't currently want one, so an idle
+/// module costs nothing. Mirrors `worker.rs`'s `deadline_sleep` in the
+/// pomodoro daemon crate: same "own a plain `Option`, never hold a
+/// borrow across the await" shape.
+async fn focus_tick_wait(interval: Option<&mut tokio::time::Interval>) {
+    match interval {
+        Some(iv) => {
+            iv.tick().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
 async fn run_key_scheme_migration(ctx: &AppContext, module_ids: &[&str]) -> anyhow::Result<String> {
     let reports = ctx.storage.migrate_all_key_schemes(module_ids).await?;
     let total_migrated: usize = reports.iter().map(|(_, r)| r.migrated).sum();
@@ -134,7 +149,31 @@ pub async fn run(
     let mut last_activity = Instant::now();
     let mut dirty = true;
 
+    // The focused module's own opt-in tick (see `focus_tick_wait` above) —
+    // rebuilt whenever the focused module or its requested interval
+    // changes, so a module that stops wanting ticks (e.g. a pomodoro
+    // phase finishing) genuinely drops back to zero extra wakeups instead
+    // of an idle no-op firing forever.
+    let mut focus_tick_module: Option<ModuleId> = None;
+    let mut focus_tick_interval: Option<Duration> = None;
+    let mut focus_tick: Option<tokio::time::Interval> = None;
+
     loop {
+        if let AppState::Unlocked = state {
+            let desired = registry
+                .get_mut(router.focused())
+                .and_then(|m| m.tick_interval());
+            if desired != focus_tick_interval || focus_tick_module != Some(router.focused()) {
+                focus_tick = desired.map(tokio::time::interval);
+                focus_tick_interval = desired;
+                focus_tick_module = Some(router.focused());
+            }
+        } else if focus_tick.is_some() {
+            focus_tick = None;
+            focus_tick_interval = None;
+            focus_tick_module = None;
+        }
+
         if dirty {
             terminal.draw(|f| {
                 let cfg_guard = ctx.config.load();
@@ -276,6 +315,17 @@ pub async fn run(
                         .await
                         .map_err(|e| eyre!(e))?;
                     dirty = true;
+                }
+            }
+            _ = focus_tick_wait(focus_tick.as_mut()) => {
+                if let AppState::Unlocked = state
+                    && let Some(m) = registry.get_mut(router.focused())
+                {
+                    match m.on_tick(&mut ctx).await {
+                        Ok(true) => dirty = true,
+                        Ok(false) => {}
+                        Err(e) => return Err(eyre!(e)),
+                    }
                 }
             }
         }

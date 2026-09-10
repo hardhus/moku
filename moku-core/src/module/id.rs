@@ -26,6 +26,7 @@ impl ModuleId {
     pub const NOTES: Self = Self("notes");
     pub const SECRETS: Self = Self("secrets");
     pub const HTTP: Self = Self("http");
+    pub const POMODORO: Self = Self("pomodoro");
 
     pub const fn new(id: &'static str) -> Self {
         Self(id)
@@ -49,6 +50,7 @@ impl ModuleId {
             Self::NOTES => "Notes",
             Self::SECRETS => "Secrets",
             Self::HTTP => "API Client",
+            Self::POMODORO => "Pomodoro",
             _ => self.0,
         }
     }
@@ -71,6 +73,7 @@ impl ModuleId {
             Self::NOTES,
             Self::SECRETS,
             Self::HTTP,
+            Self::POMODORO,
         ]
     }
 }

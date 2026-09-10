@@ -1,5 +1,5 @@
 [workspace]
-members = ["moku-bin", "moku-core", "moku-daemon", "moku-lua", "moku-notify", "moku-volume-daemon", "moku-volume-fs", "moku-volume-mount", "xtask", "modules/*"]
+members = ["moku-bin", "moku-core", "moku-daemon", "moku-lua", "moku-notify", "moku-pomodoro-daemon", "moku-volume-daemon", "moku-volume-fs", "moku-volume-mount", "xtask", "modules/*"]
 
 resolver = "2"
 
@@ -74,3 +74,4 @@ windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_UI_WindowsAnd
 
 # Internal Crates
 moku-core = { path = "./moku-core" }
+moku-pomodoro-daemon = { path = "./moku-pomodoro-daemon" }
