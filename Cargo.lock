@@ -2446,6 +2446,7 @@ dependencies = [
  "moku-settings",
  "moku-todo",
  "moku-volume-daemon",
+ "moku-zk-view",
  "ratatui",
  "rpassword",
  "sysinfo",
@@ -2836,6 +2837,24 @@ dependencies = [
  "windows 0.62.2",
  "winfsp",
  "zeroize",
+]
+
+[[package]]
+name = "moku-zk-view"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "crossterm",
+ "moku-core",
+ "ratatui",
+ "satz-core",
+ "serde",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "unicode-width",
 ]
 
 [[package]]

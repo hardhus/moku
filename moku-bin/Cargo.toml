@@ -1,6 +1,6 @@
 [package]
 name = "moku-bin"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 
 [[bin]]
@@ -46,6 +46,7 @@ moku-rss = { path = "../modules/moku-rss" }
 moku-daemon = { path = "../moku-daemon" }
 moku-volume-daemon = { path = "../moku-volume-daemon" }
 moku-satz = { path = "../modules/moku-satz" }
+moku-zk-view = { path = "../modules/moku-zk-view" }
 moku-secrets = { path = "../modules/moku-secrets" }
 moku-http = { path = "../modules/moku-http" }
 moku-pomodoro = { path = "../modules/moku-pomodoro" }

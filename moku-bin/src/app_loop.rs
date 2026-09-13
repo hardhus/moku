@@ -335,6 +335,23 @@ pub async fn run(
             dirty = true;
         }
 
+        if let Some(req) = ctx.take_pending_suspend() {
+            crate::tui::restore()?;
+            // tokio::process::Command (not std::process::Command) so this
+            // .status().await doesn't block the whole async runtime for the
+            // entire child process's lifetime — inherits stdin/stdout/stderr
+            // by default, same as std::process::Command's own default.
+            let status = tokio::process::Command::new(&req.command)
+                .args(&req.args)
+                .status()
+                .await;
+            if let Err(e) = status {
+                ctx.show_error(format!("Failed to launch '{}': {e}", req.command));
+            }
+            terminal = crate::tui::init()?;
+            dirty = true;
+        }
+
         if ctx.should_quit() {
             break;
         }

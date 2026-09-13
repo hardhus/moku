@@ -23,6 +23,7 @@ pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
     r.insert(Box::new(DaemonStatusModule::new()));
     r.insert(Box::new(moku_volume_daemon::VolumeManagerModule::new()));
     r.insert(Box::new(moku_satz::NotesModule::new()));
+    r.insert(Box::new(moku_zk_view::ZkViewModule::new()));
     r.insert(Box::new(moku_secrets::SecretsModule::new()));
     r.insert(Box::new(moku_http::HttpModule::new()));
     r.insert(Box::new(moku_pomodoro::PomodoroModule::new()));

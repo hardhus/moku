@@ -1,0 +1,31 @@
+[package]
+name = "moku-zk-view"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moku-core.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+
+# satz-core is the user's own Markdown-vault library (github.com/hardhus/satz,
+# a workspace with satz-core/satz-cli/satz-lsp members) — pulled as a git
+# dependency by package name (no `path=`, per explicit instruction, same as
+# modules/moku-satz/Cargo.toml), tracking main since it's the same author's
+# actively-developed project.
+satz-core = { git = "https://github.com/hardhus/satz" }
+
+# Terminal-cell-accurate column widths for table rendering (Turkish/CJK/emoji
+# content) — satz-core's own table formatter depends on this for the same
+# reason, so this mirrors that rather than reimplementing width math.
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+arc-swap.workspace = true
+tokio.workspace = true
+toml.workspace = true

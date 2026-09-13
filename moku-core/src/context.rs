@@ -8,6 +8,16 @@ use crate::security::{SecurityManager, VaultSession};
 use crate::storage::StorageManager;
 use crate::toast::ToastType;
 
+/// A request to suspend the TUI, run an external command with inherited
+/// stdio, wait for it to exit, then restore the TUI — e.g. handing off to
+/// the user's editor at a specific line. Drained by
+/// `moku-bin/src/app_loop.rs` alongside `pending_navigation`/`pending_toasts`.
+#[derive(Debug, Clone)]
+pub struct SuspendRequest {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
 /// Shared state passed to every TUI module.
 /// Uses lock-free config reads (`ctx.config.load()`). Call `.load()` inline
 /// instead of storing it to avoid borrow-checker conflicts.
@@ -20,6 +30,7 @@ pub struct AppContext {
     should_quit: bool,
     pending_navigation: Option<ModuleId>,
     pending_toasts: Vec<(String, ToastType)>,
+    pending_suspend: Option<SuspendRequest>,
 }
 
 impl AppContext {
@@ -37,6 +48,7 @@ impl AppContext {
             should_quit: false,
             pending_navigation: None,
             pending_toasts: Vec::new(),
+            pending_suspend: None,
         }
     }
 
@@ -69,6 +81,17 @@ impl AppContext {
         self.pending_toasts.push((msg.into(), ToastType::Error));
     }
 
+    /// Requests that `moku-bin`'s app loop suspend the TUI, run `command
+    /// args` to completion with inherited stdio, then restore the TUI —
+    /// e.g. handing a file off to the user's editor. See
+    /// `moku-bin/src/app_loop.rs`'s drain point for what actually runs it.
+    pub fn request_suspend(&mut self, command: impl Into<String>, args: Vec<String>) {
+        self.pending_suspend = Some(SuspendRequest {
+            command: command.into(),
+            args,
+        });
+    }
+
     // --- Internal accessors for moku-bin app_loop ---
 
     pub fn should_quit(&self) -> bool {
@@ -81,6 +104,10 @@ impl AppContext {
 
     pub fn drain_toasts(&mut self) -> Vec<(String, ToastType)> {
         std::mem::take(&mut self.pending_toasts)
+    }
+
+    pub fn take_pending_suspend(&mut self) -> Option<SuspendRequest> {
+        self.pending_suspend.take()
     }
 }
 
@@ -151,5 +178,19 @@ mod tests {
         assert!(!ctx.should_quit());
         ctx.quit();
         assert!(ctx.should_quit());
+    }
+
+    #[tokio::test]
+    async fn test_context_pending_suspend() {
+        let mut ctx = test_ctx().await;
+        assert!(ctx.take_pending_suspend().is_none());
+        ctx.request_suspend("hx", vec!["+3".to_string(), "note.md".to_string()]);
+        let req = ctx.take_pending_suspend().expect("should be set");
+        assert_eq!(req.command, "hx");
+        assert_eq!(req.args, vec!["+3".to_string(), "note.md".to_string()]);
+        assert!(
+            ctx.take_pending_suspend().is_none(),
+            "should be cleared on second call"
+        );
     }
 }

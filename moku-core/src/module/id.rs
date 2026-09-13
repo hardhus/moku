@@ -24,6 +24,9 @@ impl ModuleId {
     // of existing users' data.
     pub const VOLUME: Self = Self("vault");
     pub const NOTES: Self = Self("notes");
+    // Distinct from NOTES ("notes", moku-satz's index/graph/stats browser)
+    // — this is the read-only Helix-style markdown content viewer.
+    pub const ZK_VIEW: Self = Self("zk_view");
     pub const SECRETS: Self = Self("secrets");
     pub const HTTP: Self = Self("http");
     pub const POMODORO: Self = Self("pomodoro");
@@ -48,6 +51,7 @@ impl ModuleId {
             Self::DAEMON => "Daemon Status",
             Self::VOLUME => "Encrypted Volumes",
             Self::NOTES => "Notes",
+            Self::ZK_VIEW => "Notes Viewer",
             Self::SECRETS => "Secrets",
             Self::HTTP => "API Client",
             Self::POMODORO => "Pomodoro",
@@ -71,6 +75,7 @@ impl ModuleId {
             Self::DAEMON,
             Self::VOLUME,
             Self::NOTES,
+            Self::ZK_VIEW,
             Self::SECRETS,
             Self::HTTP,
             Self::POMODORO,

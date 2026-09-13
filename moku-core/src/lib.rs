@@ -11,7 +11,7 @@ pub mod toast;
 pub mod util;
 
 pub use config::{ConfigManager, MokuConfig};
-pub use context::{AppContext, CliContext, DaemonContext};
+pub use context::{AppContext, CliContext, DaemonContext, SuspendRequest};
 pub use keys::{
     Command, ConfirmDeleteKey, is_delete_bypass, keys_match, resolve_confirm_delete_key,
     resolve_event,
