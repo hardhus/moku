@@ -5,8 +5,9 @@
 //! streams, extended attributes — none of which the volume format
 //! supports, matching moku's existing no-ACL, no-EA storage model).
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Receiver;
 
 use anyhow::{Result, anyhow};
@@ -15,13 +16,19 @@ use windows::Win32::Foundation::{
     STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_INVALID,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_UNSUCCESSFUL,
 };
-use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+use windows::Win32::Storage::FileSystem::{
+    FILE_ACTION_ADDED, FILE_ACTION_MODIFIED, FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_NEW_NAME,
+    FILE_ACTION_RENAMED_OLD_NAME, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
+    FILE_NOTIFY_CHANGE_SIZE,
+};
 use winfsp::U16CStr;
 use winfsp::filesystem::{
     DirInfo, DirMarker, FileInfo, FileSecurity, FileSystemContext, OpenFileInfo, VolumeInfo,
     WideNameInfo,
 };
 use winfsp::host::{FileSystemHost, FileSystemParams, VolumeParams};
+use winfsp::notify::{Notifier, NotifyInfo, NotifyingFileSystemContext};
 
 use moku_volume_fs::{Attr, DirEntry, FileKind, VolumeFsError, VirtualPath, VolumeEngine};
 
@@ -54,7 +61,7 @@ fn map_err(e: VolumeFsError) -> winfsp::FspError {
     }
 }
 
-fn write_file_info(dst: &mut FileInfo, attr: &Attr) {
+fn write_file_info(dst: &mut FileInfo, attr: &Attr, index_number: u64) {
     dst.file_attributes = match attr.kind {
         FileKind::Directory => FILE_ATTRIBUTE_DIRECTORY.0,
         FileKind::File => FILE_ATTRIBUTE_NORMAL.0,
@@ -67,9 +74,25 @@ fn write_file_info(dst: &mut FileInfo, attr: &Attr) {
     dst.last_access_time = modified;
     dst.last_write_time = modified;
     dst.change_time = modified;
-    dst.index_number = 0;
+    dst.index_number = index_number;
     dst.hard_links = 0;
     dst.ea_size = 0;
+}
+
+/// Folds the volume format's 16-byte per-file/per-directory identity value
+/// (a file's random `file_id` header, or a directory's `.moku_dir_iv`) down
+/// to the `u64` WinFsp's `index_number` expects. Degrades to 0 on error
+/// (e.g. a racing delete) rather than failing the caller's stat operation
+/// — matches this file's existing skip/degrade idiom (see `read_directory`).
+fn index_number_for(engine: &VolumeEngine, path: &VirtualPath) -> u64 {
+    match engine.file_id(path) {
+        Ok(id) => {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&id[0..8]);
+            u64::from_le_bytes(buf)
+        }
+        Err(_) => 0,
+    }
 }
 
 /// One open file or directory handle. Directories carry no engine file
@@ -80,8 +103,68 @@ pub struct VolumeFileHandle {
     fh: Option<u64>,
 }
 
+/// A queued OS change-notification event, drained and delivered by
+/// `NotifyingFileSystemContext`'s timer-driven `should_notify`/`notify`.
+struct PendingNotify {
+    path: String,
+    filter: u32,
+    action: u32,
+}
+
+/// Caps `pending_notify`'s growth if the notify timer thread ever stalls —
+/// dispatch threads drop the oldest event rather than block or grow
+/// unbounded memory.
+const MAX_PENDING_NOTIFY: usize = 4096;
+
 pub struct VolumeFsContext {
     engine: Arc<VolumeEngine>,
+    pending_notify: Mutex<VecDeque<PendingNotify>>,
+}
+
+impl VolumeFsContext {
+    /// Queues a change-notification event for the next notify-timer tick.
+    /// `path` is this crate's forward-slash `VirtualPath`; WinFsp expects
+    /// backslash-separated names, same convention `to_virtual_path` parses
+    /// in reverse.
+    fn queue_notify(&self, path: &VirtualPath, filter: u32, action: u32) {
+        let mut q = self.pending_notify.lock().unwrap();
+        if q.len() >= MAX_PENDING_NOTIFY {
+            q.pop_front();
+        }
+        q.push_back(PendingNotify { path: path.as_str().replace('/', "\\"), filter, action });
+    }
+
+    /// Test-only inspection hook: lets a real-mount test poll for the
+    /// pending-notify queue draining after an operation, proving the full
+    /// dispatch-thread-push -> timer-thread-drain pipeline actually runs.
+    #[cfg(test)]
+    pub(crate) fn pending_notify_len(&self) -> usize {
+        self.pending_notify.lock().unwrap().len()
+    }
+}
+
+impl NotifyingFileSystemContext<Vec<PendingNotify>> for VolumeFsContext {
+    fn should_notify(&self) -> Option<Vec<PendingNotify>> {
+        let mut q = self.pending_notify.lock().unwrap();
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.drain(..).collect())
+        }
+    }
+
+    fn notify(&self, events: Vec<PendingNotify>, notifier: &Notifier) {
+        for ev in events {
+            let mut info: NotifyInfo<255> = NotifyInfo::new();
+            info.filter = ev.filter;
+            info.action = ev.action;
+            // Skip (don't abort the rest of the batch) if a path doesn't
+            // fit the fixed-size wide-name buffer.
+            if info.set_name(&ev.path).is_ok() {
+                notifier.notify(&info);
+            }
+        }
+    }
 }
 
 impl FileSystemContext for VolumeFsContext {
@@ -121,7 +204,7 @@ impl FileSystemContext for VolumeFsContext {
             FileKind::Directory => None,
             FileKind::File => Some(self.engine.open(&path).map_err(map_err)?),
         };
-        write_file_info(file_info.as_mut(), &attr);
+        write_file_info(file_info.as_mut(), &attr, index_number_for(&self.engine, &path));
         Ok(VolumeFileHandle { path, fh })
     }
 
@@ -149,11 +232,13 @@ impl FileSystemContext for VolumeFsContext {
 
         if is_directory {
             let attr = self.engine.mkdir(&parent, &name).map_err(map_err)?;
-            write_file_info(file_info.as_mut(), &attr);
+            write_file_info(file_info.as_mut(), &attr, index_number_for(&self.engine, &path));
+            self.queue_notify(&path, FILE_NOTIFY_CHANGE_DIR_NAME.0, FILE_ACTION_ADDED.0);
             Ok(VolumeFileHandle { path, fh: None })
         } else {
             let (fh, attr) = self.engine.create(&parent, &name).map_err(map_err)?;
-            write_file_info(file_info.as_mut(), &attr);
+            write_file_info(file_info.as_mut(), &attr, index_number_for(&self.engine, &path));
+            self.queue_notify(&path, FILE_NOTIFY_CHANGE_FILE_NAME.0, FILE_ACTION_ADDED.0);
             Ok(VolumeFileHandle { path, fh: Some(fh) })
         }
     }
@@ -176,9 +261,11 @@ impl FileSystemContext for VolumeFsContext {
             return;
         };
         if context.fh.is_some() {
-            let _ = self.engine.unlink(&parent, name);
-        } else {
-            let _ = self.engine.rmdir(&parent, name);
+            if self.engine.unlink(&parent, name).is_ok() {
+                self.queue_notify(&context.path, FILE_NOTIFY_CHANGE_FILE_NAME.0, FILE_ACTION_REMOVED.0);
+            }
+        } else if self.engine.rmdir(&parent, name).is_ok() {
+            self.queue_notify(&context.path, FILE_NOTIFY_CHANGE_DIR_NAME.0, FILE_ACTION_REMOVED.0);
         }
     }
 
@@ -188,7 +275,7 @@ impl FileSystemContext for VolumeFsContext {
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
         let attr = self.engine.getattr(&context.path).map_err(map_err)?;
-        write_file_info(file_info, &attr);
+        write_file_info(file_info, &attr, index_number_for(&self.engine, &context.path));
         Ok(())
     }
 
@@ -206,7 +293,7 @@ impl FileSystemContext for VolumeFsContext {
         // attribute/timestamp writes are accepted but not persisted
         // (v1 scope cut, matches moku-volume-fs's Attr shape).
         let attr = self.engine.getattr(&context.path).map_err(map_err)?;
-        write_file_info(file_info, &attr);
+        write_file_info(file_info, &attr, index_number_for(&self.engine, &context.path));
         Ok(())
     }
 
@@ -221,7 +308,8 @@ impl FileSystemContext for VolumeFsContext {
             .engine
             .setattr_size(&context.path, new_size)
             .map_err(map_err)?;
-        write_file_info(file_info, &attr);
+        write_file_info(file_info, &attr, index_number_for(&self.engine, &context.path));
+        self.queue_notify(&context.path, FILE_NOTIFY_CHANGE_SIZE.0, FILE_ACTION_MODIFIED.0);
         Ok(())
     }
 
@@ -238,7 +326,12 @@ impl FileSystemContext for VolumeFsContext {
             .engine
             .setattr_size(&context.path, 0)
             .map_err(map_err)?;
-        write_file_info(file_info, &attr);
+        write_file_info(file_info, &attr, index_number_for(&self.engine, &context.path));
+        self.queue_notify(
+            &context.path,
+            FILE_NOTIFY_CHANGE_SIZE.0 | FILE_NOTIFY_CHANGE_LAST_WRITE.0,
+            FILE_ACTION_MODIFIED.0,
+        );
         Ok(())
     }
 
@@ -298,7 +391,7 @@ impl FileSystemContext for VolumeFsContext {
         };
         let n = if constrained_io {
             if start >= attr_before.size {
-                write_file_info(file_info, &attr_before);
+                write_file_info(file_info, &attr_before, index_number_for(&self.engine, &context.path));
                 return Ok(0);
             }
             let end = (start + buffer.len() as u64).min(attr_before.size);
@@ -311,7 +404,14 @@ impl FileSystemContext for VolumeFsContext {
         };
 
         let attr_after = self.engine.getattr(&context.path).map_err(map_err)?;
-        write_file_info(file_info, &attr_after);
+        write_file_info(file_info, &attr_after, index_number_for(&self.engine, &context.path));
+        if n > 0 {
+            self.queue_notify(
+                &context.path,
+                FILE_NOTIFY_CHANGE_LAST_WRITE.0 | FILE_NOTIFY_CHANGE_SIZE.0,
+                FILE_ACTION_MODIFIED.0,
+            );
+        }
         Ok(n as u32)
     }
 
@@ -329,7 +429,7 @@ impl FileSystemContext for VolumeFsContext {
         // over the destination) right after the flush call.
         if let Some(ctx) = context {
             let attr = self.engine.getattr(&ctx.path).map_err(map_err)?;
-            write_file_info(file_info, &attr);
+            write_file_info(file_info, &attr, index_number_for(&self.engine, &ctx.path));
         }
         Ok(())
     }
@@ -347,19 +447,23 @@ impl FileSystemContext for VolumeFsContext {
         if marker.is_none() {
             let self_attr = self.engine.getattr(&context.path).map_err(map_err)?;
             dir_info.reset();
-            write_file_info(dir_info.file_info_mut(), &self_attr);
+            write_file_info(dir_info.file_info_mut(), &self_attr, index_number_for(&self.engine, &context.path));
             dir_info.set_name_raw([b'.' as u16].as_slice())?;
             if !dir_info.append_to_buffer(buffer, &mut cursor) {
                 return Ok(cursor);
             }
 
-            let parent_attr = context
-                .path
-                .parent()
-                .and_then(|p| self.engine.getattr(&p).ok())
+            let parent_path = context.path.parent();
+            let parent_attr = parent_path
+                .as_ref()
+                .and_then(|p| self.engine.getattr(p).ok())
                 .unwrap_or_else(|| self_attr.clone());
+            let parent_index = parent_path
+                .as_ref()
+                .map(|p| index_number_for(&self.engine, p))
+                .unwrap_or(0);
             dir_info.reset();
-            write_file_info(dir_info.file_info_mut(), &parent_attr);
+            write_file_info(dir_info.file_info_mut(), &parent_attr, parent_index);
             dir_info.set_name_raw([b'.' as u16, b'.' as u16].as_slice())?;
             if !dir_info.append_to_buffer(buffer, &mut cursor) {
                 return Ok(cursor);
@@ -382,7 +486,7 @@ impl FileSystemContext for VolumeFsContext {
                 continue;
             };
             dir_info.reset();
-            write_file_info(dir_info.file_info_mut(), &attr);
+            write_file_info(dir_info.file_info_mut(), &attr, index_number_for(&self.engine, &child_path));
             dir_info.set_name(entry.name.as_str())?;
             if !dir_info.append_to_buffer(buffer, &mut cursor) {
                 return Ok(cursor);
@@ -420,7 +524,16 @@ impl FileSystemContext for VolumeFsContext {
 
         self.engine
             .rename(&old_parent, &old_name, &new_parent, &new_name, replace_if_exists)
-            .map_err(map_err)
+            .map_err(map_err)?;
+
+        let filter = if context.fh.is_some() {
+            FILE_NOTIFY_CHANGE_FILE_NAME.0
+        } else {
+            FILE_NOTIFY_CHANGE_DIR_NAME.0
+        };
+        self.queue_notify(&context.path, filter, FILE_ACTION_RENAMED_OLD_NAME.0);
+        self.queue_notify(&new_path, filter, FILE_ACTION_RENAMED_NEW_NAME.0);
+        Ok(())
     }
 
     fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> winfsp::Result<()> {
@@ -466,10 +579,14 @@ pub fn mount_and_wait(
     let engine = Arc::new(engine);
     let context = VolumeFsContext {
         engine: Arc::clone(&engine),
+        pending_notify: Mutex::new(VecDeque::new()),
     };
     let params = FileSystemParams::default_params(volume_params);
+    // 250ms notify-timer interval: a reasonable latency/CPU tradeoff for an
+    // external-change watcher (e.g. Obsidian) to see create/write/delete/
+    // rename events without polling too aggressively.
     let mut host: FileSystemHost<VolumeFsContext> =
-        FileSystemHost::new_with_options(params, context)
+        FileSystemHost::new_with_timer::<Vec<PendingNotify>, 250>(params, context)
             .map_err(|e| anyhow!("failed to create WinFsp filesystem host: {e:?}"))?;
 
     host.mount(mountpoint)
@@ -513,7 +630,15 @@ mod tests {
     /// phase of the real-mount tests below so each phase gets its own
     /// clean mount/unmount cycle without duplicating the thread/channel
     /// plumbing.
+    /// Serializes every real-mount test in this process. Without this, two
+    /// tests running concurrently (the default within one `cargo test`
+    /// binary) can both call `find_free_drive_letter()` before either has
+    /// actually mounted, pick the same "free" letter, and race — one
+    /// mount then fails with `STATUS_OBJECT_NAME_COLLISION`/disconnects.
+    static MOUNT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn with_real_mount(engine: VolumeEngine, body: impl FnOnce(&std::path::Path) + std::panic::UnwindSafe) {
+        let _guard = MOUNT_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mountpoint =
             find_free_drive_letter().expect("no free drive letter available for the test");
         let (stop_tx, stop_rx) = std::sync::mpsc::channel();
@@ -696,5 +821,136 @@ mod tests {
                 "a write past the volume's quota must fail, not silently succeed"
             );
         });
+    }
+
+    fn open_test_engine(root: &std::path::Path, password: &str, limit: u64) -> VolumeEngine {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let master_key = rt.block_on(async {
+            let security = moku_core::SecurityManager::new_with_root(root.to_path_buf());
+            security
+                .initialize_vault(zeroize::Zeroizing::new(password.to_string()))
+                .await
+                .expect("init vault")
+        });
+        let keys = moku_volume_fs::derive_volume_keys(&master_key);
+        VolumeEngine::open_volume(root.join("data"), keys, root.join("usage.json"), limit)
+            .expect("open_volume")
+    }
+
+    /// Reads a path's NTFS-style file index number the same way
+    /// `GetFinalPathNameByHandleW`-adjacent identity checks do —
+    /// `GetFileInformationByHandle`'s `nFileIndexHigh`/`nFileIndexLow`,
+    /// which is exactly what WinFsp's `FileInfo.index_number` populates on
+    /// the client side. `std::os::windows::fs::MetadataExt::file_index`
+    /// would read the same value but is gated behind an unstable feature,
+    /// so this calls the Win32 API directly instead.
+    fn file_index(path: &std::path::Path) -> u64 {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+            OPEN_EXISTING,
+        };
+        use windows::core::PCWSTR;
+
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        unsafe {
+            let handle = CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+            .expect("CreateFileW");
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            GetFileInformationByHandle(handle, &mut info).expect("GetFileInformationByHandle");
+            let _ = CloseHandle(handle);
+            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64
+        }
+    }
+
+    /// Proves the volume's `file_id` header actually reaches Windows as a
+    /// stable `index_number`: stable across repeated stats and across a
+    /// rename, and different after a delete + recreate at the same name
+    /// (the cache-invalidation regression case).
+    #[test]
+    fn test_real_mount_stable_file_index() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine = open_test_engine(tmp.path(), "file-id-test-password", 1_000_000);
+
+        with_real_mount(engine, |root| {
+            std::fs::write(root.join("a.md"), b"hello").expect("write a.md");
+            let idx1 = file_index(&root.join("a.md"));
+            let idx2 = file_index(&root.join("a.md"));
+            assert_eq!(idx1, idx2, "file_index must be stable across repeated stats");
+            assert_ne!(idx1, 0, "file_index must not be the placeholder 0");
+
+            std::fs::rename(root.join("a.md"), root.join("b.md")).expect("rename");
+            let idx_after_rename = file_index(&root.join("b.md"));
+            assert_eq!(idx1, idx_after_rename, "file_index must survive a rename");
+
+            std::fs::remove_file(root.join("b.md")).expect("delete b.md");
+            std::fs::write(root.join("b.md"), b"different file").expect("recreate b.md");
+            let idx_new = file_index(&root.join("b.md"));
+            assert_ne!(
+                idx1, idx_new,
+                "a new file created at a reused name must not inherit the deleted file's id"
+            );
+
+            std::fs::create_dir(root.join("notes")).expect("mkdir notes");
+            let dir_idx1 = file_index(&root.join("notes"));
+            let dir_idx2 = file_index(&root.join("notes"));
+            assert_eq!(dir_idx1, dir_idx2, "directory file_index must also be stable");
+            assert_ne!(dir_idx1, 0);
+
+            std::fs::remove_file(root.join("b.md")).expect("cleanup b.md");
+            std::fs::remove_dir(root.join("notes")).expect("cleanup notes");
+        });
+    }
+
+    /// Unit-level coverage (no mount needed) for the pending-notify queue's
+    /// push/drain logic that Feature B's `NotifyingFileSystemContext` impl
+    /// relies on.
+    #[test]
+    fn test_notify_queue_pushes_and_drains() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine = open_test_engine(tmp.path(), "notify-queue-test-password", 1_000_000);
+        let context = VolumeFsContext { engine: Arc::new(engine), pending_notify: Mutex::new(VecDeque::new()) };
+
+        assert_eq!(context.pending_notify_len(), 0);
+        assert!(context.should_notify().is_none(), "an empty queue must not fire a notify batch");
+
+        context.queue_notify(&VirtualPath::parse("/a.md"), FILE_NOTIFY_CHANGE_FILE_NAME.0, FILE_ACTION_ADDED.0);
+        context.queue_notify(&VirtualPath::parse("/b.md"), FILE_NOTIFY_CHANGE_FILE_NAME.0, FILE_ACTION_ADDED.0);
+        assert_eq!(context.pending_notify_len(), 2);
+
+        let drained = context.should_notify().expect("a non-empty queue must produce a batch");
+        assert_eq!(drained.len(), 2);
+        assert_eq!(context.pending_notify_len(), 0, "should_notify must drain the queue");
+        assert!(context.should_notify().is_none(), "draining twice in a row must not double-fire");
+    }
+
+    #[test]
+    fn test_notify_queue_caps_and_drops_oldest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine = open_test_engine(tmp.path(), "notify-cap-test-password", 1_000_000);
+        let context = VolumeFsContext { engine: Arc::new(engine), pending_notify: Mutex::new(VecDeque::new()) };
+
+        for i in 0..MAX_PENDING_NOTIFY + 5 {
+            context.queue_notify(
+                &VirtualPath::parse(&format!("/f{i}.md")),
+                FILE_NOTIFY_CHANGE_FILE_NAME.0,
+                FILE_ACTION_ADDED.0,
+            );
+        }
+        assert_eq!(
+            context.pending_notify_len(),
+            MAX_PENDING_NOTIFY,
+            "the queue must never grow past its cap"
+        );
     }
 }

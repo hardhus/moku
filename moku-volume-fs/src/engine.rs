@@ -32,6 +32,7 @@ pub struct VolumeEngine {
     quota: Quota,
     open_files: Mutex<HashMap<u64, OpenFile>>,
     next_fh: AtomicU64,
+    file_id_cache: Mutex<HashMap<PathBuf, [u8; 16]>>,
 }
 
 impl VolumeEngine {
@@ -51,6 +52,7 @@ impl VolumeEngine {
             quota,
             open_files: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
+            file_id_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -72,6 +74,39 @@ impl VolumeEngine {
 
     pub fn reconcile_usage(&self) -> anyhow::Result<()> {
         self.quota.reconcile_from_scan(self.pathmap.data_root())
+    }
+
+    /// Reads a file's on-disk `file_id` (mirrors `pathmap.rs`'s
+    /// `dir_iv_for_backing` caching shape: lock -> check -> drop -> I/O ->
+    /// lock -> insert, never holding the lock across I/O).
+    fn file_id_for_backing(&self, backing: &Path) -> VResult<[u8; 16]> {
+        if let Some(id) = self.file_id_cache.lock().unwrap().get(backing) {
+            return Ok(*id);
+        }
+        let mut file = File::open(backing)?;
+        let id = content::read_file_id(&mut file).map_err(VolumeFsError::from)?;
+        self.file_id_cache.lock().unwrap().insert(backing.to_path_buf(), id);
+        Ok(id)
+    }
+
+    fn cache_file_id(&self, backing: &Path, id: [u8; 16]) {
+        self.file_id_cache.lock().unwrap().insert(backing.to_path_buf(), id);
+    }
+
+    /// A stable identity value for a path — a file's on-disk `file_id` for
+    /// files, or the directory's own IV for directories/root. Used by the
+    /// WinFsp shim as a stable `index_number` (plan: stable file ID).
+    pub fn file_id(&self, path: &VirtualPath) -> VResult<[u8; 16]> {
+        let backing = if path.is_root() {
+            self.pathmap.data_root().clone()
+        } else {
+            self.pathmap.resolve(&self.name_key, path)?
+        };
+        if backing.is_dir() {
+            Ok(self.pathmap.dir_iv(&backing).map_err(VolumeFsError::from)?)
+        } else {
+            self.file_id_for_backing(&backing)
+        }
     }
 
     fn stat_backing(&self, backing: &Path) -> VResult<Attr> {
@@ -176,6 +211,7 @@ impl VolumeEngine {
         }
 
         let fh = self.next_fh.fetch_add(1, Ordering::SeqCst);
+        self.cache_file_id(&backing, file_id);
         self.open_files.lock().unwrap().insert(fh, OpenFile { backing: backing.clone(), file_id });
 
         let attr = self.stat_backing(&backing)?;
@@ -277,6 +313,9 @@ impl VolumeEngine {
         let size = meta.len();
         fs::remove_file(&backing)?;
         self.quota.shrink(size);
+        // Prevents a stale file_id from surviving in the cache and being
+        // handed out for a different file later created at this same path.
+        self.file_id_cache.lock().unwrap().remove(&backing);
         Ok(())
     }
 
@@ -321,6 +360,22 @@ impl VolumeEngine {
         // Code) relies on exactly this replace-on-rename behavior.
         fs::rename(&old_backing, &new_backing)?;
         self.pathmap.forget_dir(&old_backing);
+        // Single lock acquisition for the move so a concurrent file_id()
+        // call on new_backing can never observe a half-updated cache.
+        {
+            let mut cache = self.file_id_cache.lock().unwrap();
+            match cache.remove(&old_backing) {
+                Some(id) => {
+                    cache.insert(new_backing.clone(), id);
+                }
+                None => {
+                    // No cached id for the source -- don't let a stale
+                    // cached id for the (now-overwritten) destination
+                    // survive; force a lazy re-read of the real header.
+                    cache.remove(&new_backing);
+                }
+            }
+        }
         if let Some(size) = replaced_size {
             self.quota.shrink(size);
         }
@@ -553,5 +608,97 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert!(!backing_entries.iter().any(|n| n.contains("secret-plan")));
+    }
+
+    #[test]
+    fn test_file_id_stable_across_calls() {
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        eng.create(&VirtualPath::root(), "a.md").unwrap();
+
+        let id1 = eng.file_id(&VirtualPath::parse("/a.md")).unwrap();
+        let id2 = eng.file_id(&VirtualPath::parse("/a.md")).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_file_id_survives_rename() {
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        eng.create(&VirtualPath::root(), "a.md").unwrap();
+        let id_before = eng.file_id(&VirtualPath::parse("/a.md")).unwrap();
+
+        eng.rename(&VirtualPath::root(), "a.md", &VirtualPath::root(), "b.md", false).unwrap();
+        let id_after = eng.file_id(&VirtualPath::parse("/b.md")).unwrap();
+        assert_eq!(id_before, id_after);
+    }
+
+    #[test]
+    fn test_file_id_changes_after_unlink_and_recreate_same_name() {
+        // Regression test for the "stale cache after path reuse" bug: a
+        // deleted file's id must never leak into a later file created at
+        // the same virtual path.
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        eng.create(&VirtualPath::root(), "a.md").unwrap();
+        let id1 = eng.file_id(&VirtualPath::parse("/a.md")).unwrap();
+
+        eng.unlink(&VirtualPath::root(), "a.md").unwrap();
+        eng.create(&VirtualPath::root(), "a.md").unwrap();
+        let id2 = eng.file_id(&VirtualPath::parse("/a.md")).unwrap();
+
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_file_id_changes_after_rename_replace() {
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        eng.create(&VirtualPath::root(), "dest.md").unwrap();
+        let id_dest = eng.file_id(&VirtualPath::parse("/dest.md")).unwrap();
+
+        let (fh, _) = eng.create(&VirtualPath::root(), ".tmp").unwrap();
+        eng.release(fh).unwrap();
+        let id_tmp = eng.file_id(&VirtualPath::parse("/.tmp")).unwrap();
+        assert_ne!(id_dest, id_tmp);
+
+        eng.rename(&VirtualPath::root(), ".tmp", &VirtualPath::root(), "dest.md", true).unwrap();
+        let id_after = eng.file_id(&VirtualPath::parse("/dest.md")).unwrap();
+        // The surviving (renamed-in) file's id, not the clobbered one's.
+        assert_eq!(id_after, id_tmp);
+        assert_ne!(id_after, id_dest);
+    }
+
+    #[test]
+    fn test_two_files_have_different_file_ids() {
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        eng.create(&VirtualPath::root(), "a.md").unwrap();
+        eng.create(&VirtualPath::root(), "b.md").unwrap();
+
+        let id_a = eng.file_id(&VirtualPath::parse("/a.md")).unwrap();
+        let id_b = eng.file_id(&VirtualPath::parse("/b.md")).unwrap();
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn test_directory_file_id_stable() {
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+        eng.mkdir(&VirtualPath::root(), "notes").unwrap();
+
+        let id1 = eng.file_id(&VirtualPath::parse("/notes")).unwrap();
+        let id2 = eng.file_id(&VirtualPath::parse("/notes")).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_root_file_id_stable() {
+        let dir = tempdir().unwrap();
+        let eng = engine(dir.path(), 1_000_000);
+
+        let id1 = eng.file_id(&VirtualPath::root()).unwrap();
+        let id2 = eng.file_id(&VirtualPath::root()).unwrap();
+        assert_eq!(id1, id2);
     }
 }

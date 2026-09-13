@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
@@ -32,6 +32,14 @@ impl PathMapper {
         let root = self.data_root.clone();
         self.dir_iv_for_backing(&root)?;
         Ok(())
+    }
+
+    /// Public accessor for a directory's IV, reused as a stable identity
+    /// value for directories (WinFsp `index_number`) — directories have no
+    /// on-disk `file_id` header of their own, so this already-cached,
+    /// already-random-per-directory value fills that role for free.
+    pub fn dir_iv(&self, backing_dir: &Path) -> Result<[u8; 16]> {
+        self.dir_iv_for_backing(&backing_dir.to_path_buf())
     }
 
     fn dir_iv_for_backing(&self, backing_dir: &PathBuf) -> Result<[u8; 16]> {
