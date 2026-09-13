@@ -73,8 +73,11 @@ impl Default for ThemeColors {
     }
 }
 
-/// Parses a color string into a Ratatui Color.
-fn parse_color(s: &str) -> Color {
+/// Parses a color string into a Ratatui Color. `pub` so other crates (e.g.
+/// a module with its own config-driven color palette beyond `MokuTheme`'s
+/// fixed semantic fields) can reuse the same hex/named-color parsing
+/// instead of duplicating it.
+pub fn parse_color(s: &str) -> Color {
     let s = s.trim();
 
     // 1. Hex Code Handling (#RRGGBB or #RGB)

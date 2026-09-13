@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Margin, Rect},
     style::Style,
     widgets::{Block, Borders, Paragraph},
 };
@@ -14,24 +14,44 @@ use ratatui::{
 use moku_core::{AppContext, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, keys_match};
 use satz_core::{DocId, Document, Index, parser::structure::parse_structure};
 
-use crate::config::{self, ZkViewConfig};
+use crate::config::{self, ZkViewColors, ZkViewConfig, ZkViewPalette};
 use crate::cursor;
 use crate::engine;
 use crate::jumplist::{self, JumpAction, JumpListState};
 use crate::model::{Cursor, LinkResState, NavFrame, NoteEntry, OpenDoc};
 use crate::notelist::{self, NoteListAction, NoteListState};
+use crate::references::{self, ReferenceAction, ReferencesState};
 use crate::render;
 use crate::viewport;
 
-/// A "g" prefix awaiting a second key (`gg`/`gd`) times out after this long
-/// so a stray `g` doesn't silently swallow the next unrelated keypress.
-const PENDING_G_TIMEOUT: Duration = Duration::from_millis(600);
+/// A "g"/find-char prefix awaiting its second key times out after this
+/// long so a stray keypress doesn't silently swallow the next unrelated
+/// one.
+const PENDING_CHORD_TIMEOUT: Duration = Duration::from_millis(600);
+
+/// `f`/`F`/`t`/`T` — which direction/style of same-line character search is
+/// pending its target char.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FindKind {
+    Forward,
+    Backward,
+    TillForward,
+    TillBackward,
+}
+
+/// A `g`-prefixed goto chord (`gg`/`ge`/`gs`/`gl`/`gd`/`gr`), or an
+/// `f`/`F`/`t`/`T` awaiting its target character.
+enum PendingChord {
+    Goto,
+    FindChar(FindKind),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ViewMode {
     NoteList,
     Document,
     JumpList,
+    References,
 }
 
 pub struct ZkViewModule {
@@ -49,7 +69,13 @@ pub struct ZkViewModule {
     viewport_height: usize,
     nav_stack: Vec<NavFrame>,
     jump: Option<JumpListState>,
-    pending_g: Option<Instant>,
+    references: Option<ReferencesState>,
+    /// This module's own markdown-specific color palette, resolved from
+    /// `[modules.zk_view.colors]` — refreshed whenever the vault (re)loads
+    /// (see `load_vault`), since `draw()` has no `AppContext` to read
+    /// config from directly.
+    palette: ZkViewPalette,
+    pending_chord: Option<(PendingChord, Instant)>,
     /// Set right before requesting an editor suspend; consumed at the top
     /// of the next `draw()` call (guaranteed to run before further input is
     /// processed — see `moku-bin/src/app_loop.rs`'s suspend-drain, which
@@ -74,7 +100,9 @@ impl ZkViewModule {
             viewport_height: 20,
             nav_stack: Vec::new(),
             jump: None,
-            pending_g: None,
+            references: None,
+            palette: ZkViewPalette::from_colors(&ZkViewColors::default()),
+            pending_chord: None,
             needs_reload_current: false,
             busy: false,
             message: None,
@@ -98,6 +126,7 @@ impl ZkViewModule {
     // reasoning as `modules/moku-satz`'s own `load`).
     async fn load_vault(&mut self, ctx: &AppContext) {
         let cfg = Self::module_config(ctx);
+        self.palette = ZkViewPalette::from_colors(&cfg.colors);
         match config::resolve_vault_root(&cfg) {
             Ok(root) => {
                 let root_for_index = root.clone();
@@ -172,9 +201,13 @@ impl ZkViewModule {
     fn set_open_doc(&mut self, doc: Document, source: String, link_res: Vec<LinkResState>, line: usize) {
         let structure = parse_structure(&source);
         let line_ranges = cursor::compute_line_ranges(&source);
-        let blocks = render::build_layout(&source, &line_ranges, &structure);
+        let blocks = render::build_layout(&source, &line_ranges, &structure, &doc.frontmatter);
         let row_offsets = render::compute_row_offsets(&blocks);
         let total_rows = render::total_rows(&blocks);
+        let list_marker_ranges = render::compute_list_marker_ranges(&source, &structure);
+        let quote_marker_ranges = render::compute_quote_marker_ranges(&source, &line_ranges, &structure);
+        let checked_task_tail_ranges = render::compute_checked_task_tail_ranges(&line_ranges, &structure);
+        let code_fence_delim_lines = render::compute_code_fence_delim_lines(&line_ranges, &structure);
         let clamped_line = line.min(line_ranges.len().saturating_sub(1));
         self.cursor = Cursor { line: clamped_line, col: 0 };
         self.scroll_top = 0;
@@ -187,6 +220,10 @@ impl ZkViewModule {
             blocks,
             row_offsets,
             total_rows,
+            list_marker_ranges,
+            quote_marker_ranges,
+            checked_task_tail_ranges,
+            code_fence_delim_lines,
         });
         self.update_scroll_for_cursor();
     }
@@ -309,6 +346,39 @@ impl ZkViewModule {
         self.view = ViewMode::JumpList;
     }
 
+    /// `gr` — "what links here" for the currently open document.
+    fn open_references(&mut self) {
+        let (Some(index), Some(open)) = (&self.index, &self.open) else {
+            return;
+        };
+        self.references = Some(ReferencesState::new(index, &open.doc.id));
+        self.view = ViewMode::References;
+    }
+
+    fn apply_find_char(&mut self, kind: FindKind, target: char) {
+        let new_c = match &self.open {
+            Some(open) => match kind {
+                FindKind::Forward => {
+                    cursor::find_char_forward(&open.line_ranges, &open.source, self.cursor, target)
+                }
+                FindKind::Backward => {
+                    cursor::find_char_backward(&open.line_ranges, &open.source, self.cursor, target)
+                }
+                FindKind::TillForward => {
+                    cursor::till_char_forward(&open.line_ranges, &open.source, self.cursor, target)
+                }
+                FindKind::TillBackward => {
+                    cursor::till_char_backward(&open.line_ranges, &open.source, self.cursor, target)
+                }
+            },
+            None => None,
+        };
+        if let Some(c) = new_c {
+            self.cursor = c;
+            self.update_scroll_for_cursor();
+        }
+    }
+
     fn go_back(&mut self) {
         if let Some(frame) = self.nav_stack.pop() {
             self.restore_nav_frame(frame);
@@ -399,18 +469,49 @@ impl ZkViewModule {
             return Ok(false);
         }
 
-        if let Some(at) = self.pending_g.take() {
-            if at.elapsed() <= PENDING_G_TIMEOUT {
-                match key.code {
-                    KeyCode::Char('g') => {
-                        self.with_cursor_motion(|_open, _c| cursor::goto_top());
-                        return Ok(true);
+        if let Some((chord, at)) = self.pending_chord.take() {
+            if at.elapsed() <= PENDING_CHORD_TIMEOUT {
+                match chord {
+                    PendingChord::Goto => match key.code {
+                        KeyCode::Char('g') => {
+                            self.with_cursor_motion(|_open, _c| cursor::goto_top());
+                            return Ok(true);
+                        }
+                        // Helix's actual "go to end of file" chord is `ge`
+                        // (there's no `G` in Helix at all) — kept alongside
+                        // the already-working `G` as a harmless bonus alias.
+                        KeyCode::Char('e') => {
+                            self.with_cursor_motion(|open, _c| cursor::goto_bottom(&open.line_ranges));
+                            return Ok(true);
+                        }
+                        KeyCode::Char('s') => {
+                            self.with_cursor_motion(|open, c| {
+                                cursor::goto_first_non_blank(&open.line_ranges, &open.source, c)
+                            });
+                            return Ok(true);
+                        }
+                        KeyCode::Char('l') => {
+                            self.with_cursor_motion(|open, c| {
+                                cursor::goto_line_end(&open.line_ranges, &open.source, c)
+                            });
+                            return Ok(true);
+                        }
+                        KeyCode::Char('d') => {
+                            self.follow_link_under_cursor(ctx);
+                            return Ok(true);
+                        }
+                        KeyCode::Char('r') => {
+                            self.open_references();
+                            return Ok(true);
+                        }
+                        _ => {}
+                    },
+                    PendingChord::FindChar(kind) => {
+                        if let KeyCode::Char(target) = key.code {
+                            self.apply_find_char(kind, target);
+                            return Ok(true);
+                        }
                     }
-                    KeyCode::Char('d') => {
-                        self.follow_link_under_cursor(ctx);
-                        return Ok(true);
-                    }
-                    _ => {}
                 }
             }
         }
@@ -437,8 +538,34 @@ impl ZkViewModule {
             KeyCode::Char('b') => {
                 self.with_cursor_motion(|open, c| cursor::word_back(&open.line_ranges, &open.source, c))
             }
+            KeyCode::Char('e') => {
+                self.with_cursor_motion(|open, c| cursor::word_end_forward(&open.line_ranges, &open.source, c))
+            }
+            // Shift+w/b/e — vim/Helix's "WORD" motions (punctuation counts
+            // as part of the word, e.g. `foo.bar` is one WORD).
+            KeyCode::Char('W') => {
+                self.with_cursor_motion(|open, c| cursor::word_forward_big(&open.line_ranges, &open.source, c))
+            }
+            KeyCode::Char('B') => {
+                self.with_cursor_motion(|open, c| cursor::word_back_big(&open.line_ranges, &open.source, c))
+            }
+            KeyCode::Char('E') => {
+                self.with_cursor_motion(|open, c| cursor::word_end_forward_big(&open.line_ranges, &open.source, c))
+            }
             KeyCode::Char('G') => self.with_cursor_motion(|open, _c| cursor::goto_bottom(&open.line_ranges)),
-            KeyCode::Char('g') => self.pending_g = Some(Instant::now()),
+            KeyCode::Char('g') => self.pending_chord = Some((PendingChord::Goto, Instant::now())),
+            KeyCode::Char('f') => {
+                self.pending_chord = Some((PendingChord::FindChar(FindKind::Forward), Instant::now()))
+            }
+            KeyCode::Char('F') => {
+                self.pending_chord = Some((PendingChord::FindChar(FindKind::Backward), Instant::now()))
+            }
+            KeyCode::Char('t') => {
+                self.pending_chord = Some((PendingChord::FindChar(FindKind::TillForward), Instant::now()))
+            }
+            KeyCode::Char('T') => {
+                self.pending_chord = Some((PendingChord::FindChar(FindKind::TillBackward), Instant::now()))
+            }
             KeyCode::Char('/') => self.open_jump_list(),
             KeyCode::Char('r') => self.reindex_vault(ctx).await,
             KeyCode::Char('q') => ctx.navigate_to(ModuleId::LAUNCHER),
@@ -486,6 +613,32 @@ impl ZkViewModule {
             }
         }
     }
+
+    fn handle_references_event(&mut self, event: &Event) -> bool {
+        let Event::Key(key) = event else {
+            return false;
+        };
+        if key.kind != KeyEventKind::Press {
+            return false;
+        }
+        let Some(refs) = &mut self.references else {
+            return false;
+        };
+        match references::handle_key(refs, key) {
+            ReferenceAction::None => true,
+            ReferenceAction::Close => {
+                self.references = None;
+                self.view = ViewMode::Document;
+                true
+            }
+            ReferenceAction::Open(target_id) => {
+                self.references = None;
+                self.view = ViewMode::Document;
+                self.navigate_to_doc(target_id, 0);
+                true
+            }
+        }
+    }
 }
 
 impl Default for ZkViewModule {
@@ -525,6 +678,7 @@ impl TuiModule for ZkViewModule {
             ViewMode::NoteList => Ok(self.handle_notelist_event(event, ctx)),
             ViewMode::Document => self.handle_document_event(event, ctx).await,
             ViewMode::JumpList => Ok(self.handle_jumplist_event(event, ctx)),
+            ViewMode::References => Ok(self.handle_references_event(event)),
         }
     }
 
@@ -540,7 +694,12 @@ impl TuiModule for ZkViewModule {
         }
 
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
-        self.viewport_height = chunks[0].height as usize;
+        // A small inset keeps the document body from sitting flush against
+        // the pane edges. No border here — the list/jump/reference panels
+        // already have their own `Block` border for that; this is just
+        // breathing room for plain text.
+        let doc_area = chunks[0].inner(Margin { horizontal: 2, vertical: 1 });
+        self.viewport_height = doc_area.height as usize;
 
         match self.view {
             ViewMode::NoteList => notelist::draw_note_list(
@@ -552,15 +711,29 @@ impl TuiModule for ZkViewModule {
                 theme,
             ),
             ViewMode::Document => match &self.open {
-                Some(open) => render::draw_document(frame, chunks[0], open, self.scroll_top, self.cursor, true, theme),
+                Some(open) => render::draw_document(
+                    frame,
+                    doc_area,
+                    open,
+                    self.scroll_top,
+                    self.cursor,
+                    true,
+                    theme,
+                    &self.palette,
+                ),
                 None => {
                     let p = Paragraph::new("No document open.").style(Style::default().fg(theme.base_fg));
-                    frame.render_widget(p, chunks[0]);
+                    frame.render_widget(p, doc_area);
                 }
             },
             ViewMode::JumpList => {
                 if let Some(jump) = &mut self.jump {
                     jumplist::draw_jump_list(frame, chunks[0], jump, theme);
+                }
+            }
+            ViewMode::References => {
+                if let Some(refs) = &mut self.references {
+                    references::draw_references(frame, chunks[0], refs, theme);
                 }
             }
         }
@@ -569,10 +742,11 @@ impl TuiModule for ZkViewModule {
             match self.view {
                 ViewMode::NoteList => " [/] Filter  [Enter] Open  [r] Reindex  [Esc] Back ".to_string(),
                 ViewMode::Document => {
-                    " hjkl/w/b/gg/G Move  gd Follow  / Jump list  e Edit  r Reindex  Esc Back  q Quit "
+                    " hjkl/w/b/e/W/B/E Move  f/F/t/T Find  gg/ge/gs/gl Goto  gd Follow  gr Refs  / Jump  ctrl-e Edit  r Reindex  Esc Back  q Quit "
                         .to_string()
                 }
                 ViewMode::JumpList => " Type to filter  Enter Jump  Esc Close ".to_string(),
+                ViewMode::References => " j/k Move  Enter Open  Esc Close ".to_string(),
             }
         });
         let help_widget = Paragraph::new(help)

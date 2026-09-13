@@ -91,6 +91,17 @@ pub enum RenderBlock {
         last_line: usize,
         table: TableBlock,
     },
+    /// The YAML frontmatter block (`---`...`---`), rendered as a short
+    /// "Label: value" summary instead of raw YAML — `first_line` is always
+    /// `0` when present (a YAML frontmatter block must start on the
+    /// document's very first line). `first_line+1..=last_line` are never
+    /// real screen rows either (see cursor.rs's `skip_delim`, generalized
+    /// to cover this range too).
+    Frontmatter {
+        first_line: usize,
+        last_line: usize,
+        entries: Vec<(String, String)>,
+    },
 }
 
 /// Everything needed to render and navigate one currently-open document,
@@ -105,4 +116,18 @@ pub struct OpenDoc {
     pub blocks: Vec<RenderBlock>,
     pub row_offsets: Vec<usize>,
     pub total_rows: usize,
+    /// Byte ranges of each list item's own marker glyph (`-`/`*`/`1.` +
+    /// following whitespace) — computed once, not per draw, so `-`/`*`
+    /// itself can be colored distinctly from the item's text.
+    pub list_marker_ranges: Vec<ByteRange>,
+    /// Byte ranges of each blockquote line's leading `>` (+ nested `>`)
+    /// marker prefix — styled more dimly than the quoted text itself.
+    pub quote_marker_ranges: Vec<ByteRange>,
+    /// Byte ranges from a *checked* task's `[x]` marker to the end of its
+    /// line — struck through, unchecked tasks are left alone.
+    pub checked_task_tail_ranges: Vec<ByteRange>,
+    /// Source line indices that are a fenced code block's opening/closing
+    /// ` ``` ` line — rendered as a plain `code_bg` band instead of the
+    /// literal backticks.
+    pub code_fence_delim_lines: Vec<usize>,
 }

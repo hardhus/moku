@@ -5,6 +5,7 @@ pub mod highlight;
 pub mod jumplist;
 pub mod model;
 pub mod notelist;
+pub mod references;
 pub mod render;
 pub mod tui_module;
 pub mod viewport;
