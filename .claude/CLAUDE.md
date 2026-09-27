@@ -1,7 +1,7 @@
 # Moku — project conventions
 
 Rust workspace: a TUI app (`moku-bin`) built from independent per-feature
-modules (`modules/moku-*`, plus top-level crates like `moku-vault-daemon`,
+modules (`modules/moku-*`, plus top-level crates like `moku-volume-daemon`,
 `moku-daemon`, `moku-lua`) around a shared `moku-core` (theme, config,
 storage, security, module traits, keybinding resolution).
 
@@ -32,19 +32,29 @@ storage, security, module traits, keybinding resolution).
   Derive independent subkeys via HKDF-SHA256 with a fixed, versioned
   domain-separation `info` string per purpose, e.g.
   `moku-vault-fs/content-key/v1` / `moku-vault-fs/name-key/v1`
-  (`moku-vault-fs/src/keys.rs`), per-volume via `moku-vault-daemon/src/
+  (`moku-volume-fs/src/keys.rs`), per-volume via `moku-volume-daemon/src/
   registry.rs`'s `derive_default_volume_master_key`, or per-module via
   `moku-core/src/storage/keys.rs`'s `derive_module_storage_key` (info
   string `moku-core/storage/<module_id>/v1` — see below). One
   `Hkdf::new(None, master)` + one `hk.expand(info, &mut out)` call per
   subkey. Bump the `/v1` suffix (not the string itself) if a derivation
-  ever needs to change incompatibly.
+  ever needs to change incompatibly. The three volume info strings
+  (`moku-vault-fs/content-key/v1`, `moku-vault-fs/name-key/v1`,
+  `moku-vault-daemon/default-volume/v1/<id>`) intentionally still say
+  "vault": they predate the vault -> volume crate rename and are baked
+  into every existing volume's keys, so they stay byte-for-byte forever.
+  All four existing derivations (these three + `moku-core/storage/<m>/v1`)
+  are pinned by known-answer tests (`moku-core/tests/crypto_kat.rs`,
+  `moku-core/src/storage/keys.rs`, `moku-volume-fs/tests/crypto_kat.rs`,
+  `moku-volume-daemon/tests/crypto_kat.rs`). Never "update" a KAT's
+  expected value to match new code: a failing KAT means existing data
+  would no longer decrypt.
 - **`moku-core`'s general storage layer (`StorageManager::save`/`load`)
   uses per-module HKDF subkeys, not the raw vault master key directly.**
   Every module's encrypted data (todo/bookmark/secrets/rss/...) is
   encrypted under `derive_module_storage_key(master, module_id)`, never
   the raw master key — closing the same "raw key as cipher key" gap the
-  bullet above already covered for `moku-vault-fs`/`moku-vault-daemon`.
+  bullet above already covered for `moku-volume-fs`/`moku-volume-daemon`.
 - **`StorageEnvelope.key_scheme` is a numbered migration chain, not a
   one-off flag.** `KeyScheme` (`moku-core/src/storage/envelope.rs`) is
   `V0` (raw master key, `#[default]`/`#[serde(rename = "Legacy")]`) or
@@ -100,10 +110,10 @@ storage, security, module traits, keybinding resolution).
   API.** Never a plain `String`/`[u8; N]` for a password, key, or seed
   that outlives a single local computation — this includes TUI input
   buffers accumulating a password/secret keystroke-by-keystroke
-  (`moku-lock-screen`'s `input`, `moku-vault-daemon`'s `CreateForm`/
+  (`moku-lock-screen`'s `input`, `moku-volume-daemon`'s `CreateForm`/
   `PasswordPrompt` fields, `moku-secrets`'s `AddState.value`/
   `ExportState.password`, `SecretEntry.value`) and byte buffers crossing a
-  process boundary (`moku-vault-daemon/src/worker.rs`'s mount-secret stdin
+  process boundary (`moku-volume-daemon/src/worker.rs`'s mount-secret stdin
   protocol). `SecurityManager::initialize_vault`/`unlock_vault` take
   `Zeroizing<String>`, not `String` — wrap a freshly-read
   `rpassword::prompt_password()` result in `Zeroizing::new(...)`
@@ -113,7 +123,7 @@ storage, security, module traits, keybinding resolution).
   history. Always prompt interactively via `rpassword::prompt_password`
   (matches `modules/moku-secrets/src/cli_module.rs`'s `Add`/`Export`/
   `Import`), or — for a spawned worker process needing a secret handed to it
-  by its parent (e.g. `moku-vault-daemon`'s mount worker) — pass it over
+  by its parent (e.g. `moku-volume-daemon`'s mount worker) — pass it over
   stdin with a small tagged protocol, never argv or an environment variable.
 - **Password-prompt UX rule**: verifying an existing password (login/mount)
   asks once; setting a *new* password (create/change) asks twice
@@ -125,7 +135,7 @@ storage, security, module traits, keybinding resolution).
   (`ConfirmDeleteKey::Confirm`/`Cancel` from Enter/y vs. Esc/n), `Shift+D`
   (`is_delete_bypass`) deletes immediately, bypassing the prompt. Every
   module with a delete action (`moku-todo`, `moku-bookmark`,
-  `moku-secrets`, `moku-rss`, `moku-vault-daemon`) uses this same pair of
+  `moku-secrets`, `moku-rss`, `moku-volume-daemon`) uses this same pair of
   helpers rather than reimplementing the key matching.
 - **Untrusted external input needs its own validation layer before it
   reaches an OS call.** `moku-core/src/util.rs`'s `open_url` validates the
@@ -162,7 +172,7 @@ storage, security, module traits, keybinding resolution).
   so a user's custom `ThemeColors` config actually takes effect everywhere.
 - **Forms show every field at once; `Tab` moves focus; `Enter` submits from
   any field.** No sequential per-field wizard (ask name, then ask size,
-  then ask password...). See `moku-vault-daemon`'s `CreateForm`/
+  then ask password...). See `moku-volume-daemon`'s `CreateForm`/
   `PasswordPrompt`, `modules/moku-rss`'s `EditFeed` view, and
   `modules/moku-secrets`'s `AddState`/`ExportState` for the pattern — the
   latter two used to be sequential per-field wizards (`AddStage`/
@@ -185,7 +195,7 @@ storage, security, module traits, keybinding resolution).
   Applied later to `modules/moku-rss/src/tui_module/{view_split,
   view_edit_feed, view_detail}.rs` (a single `enum` with one match arm per
   variant — split as free functions taking the destructured state as
-  params) and `moku-vault-daemon/src/tui_module/{mount_prompt,
+  params) and `moku-volume-daemon/src/tui_module/{mount_prompt,
   create_form}.rs` (independent `Option<T>` fields, not one enum — split as
   additional `impl VaultManagerModule { .. }` blocks in separate files, so
   moved methods keep `&mut self` unchanged; Rust allows a type's impl to
@@ -196,7 +206,7 @@ storage, security, module traits, keybinding resolution).
     file (or the fields need `pub(super)`/`pub(crate)`) — a parent module
     can't reach a child module's private fields, even in `#[cfg(test)]`.
   - Keep as one file when it's a cohesive module of related free functions
-    with no independent per-variant state (e.g. `moku-vault-daemon/src/
+    with no independent per-variant state (e.g. `moku-volume-daemon/src/
     registry.rs` — a god-struct split would just add file-jumping cost with
     no behavioral payoff; `moku-launcher/src/lib.rs` at ~1200 lines is the
     same story — one cohesive filter+browse state machine, not several
@@ -232,7 +242,7 @@ storage, security, module traits, keybinding resolution).
   any module that spawns a background task from a keypress — otherwise key-
   mashing can spawn duplicate concurrent operations. Pattern used by
   `moku-rss` (`is_refreshing`), `moku-http` (`is_running`),
-  `moku-vault-daemon` (`busy`), and `modules/moku-settings`'s Storage tab
+  `moku-volume-daemon` (`busy`), and `modules/moku-settings`'s Storage tab
   (`busy`, guarding `migrate_module_encryption` — a real race, not just a
   wasted-work perf issue, since two concurrent migrations of the same
   module race on the same sled keys).
@@ -256,7 +266,28 @@ storage, security, module traits, keybinding resolution).
   pass, O(n)), not by having the recursive walk rescan the whole slice at
   every level (O(n²)).** See `modules/moku-todo/src/model.rs::build_view`.
 
+## Test fixtures and refactor plan
+
+- **`test-fixtures/v0.2.7/` is frozen.** Synthetic samples of every
+  on-disk format moku-bin 0.2.7 wrote: a mixed V0/V1/External/plaintext
+  data dir, a Default- and a Custom-mode volume, an MSXP v1 export, a
+  raw legacy GCM blob. Future format migrations are tested against these.
+  Never regenerate or edit them. `SHA256SUMS` +
+  `moku-core/tests/fixture_v0_2_7.rs` fail on any change; restore from
+  git instead. Tests always copy them to a temp dir before opening
+  anything. Fixtures must only ever contain synthetic data
+  (foo/bar/example.com, fixed test passwords). Never copy anything from
+  a real data dir or `moku_dev`.
+- The 0.3-foundations refactor plan and its per-phase status live in
+  `audit/99-checklist.md` (+ `audit/checklist/P0..P10`). That folder is
+  local and excluded via `.git/info/exclude`, never committed. This file
+  holds the conventions; `audit/` holds the plan.
+
 ## Health-check passes
+
+(Historical record. Crate names below are as they were at the time: the
+volume crates were still called `moku-vault-*` before the vault -> volume
+rename in `115d981`; today they are `moku-volume-*`.)
 
 ### 2026-09-04/05 (first pass)
 
@@ -309,8 +340,8 @@ list/filter logic, and `moku-lua`'s bridge-draining/event-dispatch logic.
 
 **Deliberately NOT changed this pass** (evaluated, judged out of scope or
 already-accepted):
-- `moku-vault-daemon/src/control.rs`'s control-channel named pipe uses the
-  OS default DACL (same class as the vault-mount pipe's already-accepted
+- `moku-volume-daemon/src/control.rs`'s control-channel named pipe uses the
+  OS default DACL (same class as the volume-mount pipe's already-accepted
   limitation) — local-only, same-user DoS risk (a forced unmount), no
   confidentiality impact. Fixing it needs a real Windows security-
   descriptor (not just a doc comment), which is a meaningfully separate
@@ -319,7 +350,7 @@ already-accepted):
   forward-looking note, not something to react to by swapping storage
   backends in a pass whose explicit goal was "same behavior, safer/
   cleaner code."
-- `VolumeSecret::Password`/`MountSecret::Password` (moku-vault-daemon,
+- `VolumeSecret::Password`/`MountSecret::Password` (moku-volume-daemon,
   worker.rs) still carry a plain `String`, not `Zeroizing<String>` — the
   same class of gap the crypto section's TUI-input-buffer fix addresses,
   but scoped out here since it cascades through the whole per-volume-vault
