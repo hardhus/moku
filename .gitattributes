@@ -1,0 +1,3 @@
+# Frozen on-disk format fixtures: byte-exact, never line-ending-converted
+# (a converted meta.json/volume.json would break their SHA256SUMS check).
+test-fixtures/** -text

@@ -53,6 +53,13 @@ moku-pomodoro = { path = "../modules/moku-pomodoro" }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Only for tests/gen_fixtures_v0_2_7.rs: writing legacy (KeyScheme::V0)
+# envelopes straight into sled and building volume fixtures without
+# touching the global volume index.
+sled.workspace = true
+serde_json.workspace = true
+secrecy.workspace = true
+moku-volume-fs = { path = "../moku-volume-fs" }
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

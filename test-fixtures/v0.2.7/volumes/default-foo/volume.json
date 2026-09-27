@@ -1,0 +1,7 @@
+{
+  "id": "default-foo",
+  "display_name": "Default Foo",
+  "size_limit_bytes": 67108864,
+  "password_mode": "Default",
+  "created_at": 1700000000
+}

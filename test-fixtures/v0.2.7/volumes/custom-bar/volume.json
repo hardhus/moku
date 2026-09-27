@@ -1,0 +1,7 @@
+{
+  "id": "custom-bar",
+  "display_name": "Custom Bar",
+  "size_limit_bytes": 67108864,
+  "password_mode": "Custom",
+  "created_at": 1700000000
+}
