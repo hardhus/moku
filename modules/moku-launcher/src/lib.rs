@@ -1080,36 +1080,62 @@ mod tests {
         );
     }
 
+    /// Screen row (relative to the first list row) of the currently
+    /// selected module's title.
+    fn selected_row(launcher: &mut LauncherModule, width: usize, height: usize) -> usize {
+        let selected = launcher
+            .state
+            .selected()
+            .expect("a module should be selected");
+        let title = launcher.registered_modules[selected].title();
+        let list_top = find_row(launcher, width, height, "Modules (").unwrap() + 1;
+        find_row(launcher, width, height, title).unwrap() - list_top
+    }
+
     #[test]
     fn test_ring_rotates_one_step_keeping_cursor_row_fixed() {
-        // The exact transition confirmed with the user (12 modules, margin
-        // 3, now that Pomodoro is registered): RSS Feed Reader (index 5)
-        // selected, then one more Down to Daemon Status (index 6) — the
-        // cursor's screen row must not change, but the ring rotates so API
-        // Client (the item that wraps in from the far end) now appears at
-        // the very top.
+        // Walk Down one step at a time. While the cursor is in the free zone
+        // its screen row grows; the first step where it doesn't grow is where
+        // scrolling engages. From there the cursor's row must stay fixed and
+        // the ring must rotate so the item that wraps in from the far end
+        // lands at the very top. Derived from the live module count rather
+        // than a hardcoded one, so registering a new module doesn't break it.
         let mut launcher = launcher();
-        for _ in 0..5 {
-            launcher.next(); // Dashboard -> ... -> RSS Feed Reader
-        }
-        assert_eq!(launcher.state.selected(), Some(5));
+        let n = launcher.registered_modules.len();
         let (width, height) = (100usize, 30usize);
-        let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
-        let rss_row = find_row(&mut launcher, width, height, "RSS Feed Reader").unwrap() - list_top;
 
-        launcher.next(); // RSS Feed Reader -> Daemon Status
-        assert_eq!(launcher.state.selected(), Some(6));
-        let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
-        let daemon_row = find_row(&mut launcher, width, height, "Daemon Status").unwrap() - list_top;
-        let api_client_row = find_row(&mut launcher, width, height, "API Client").unwrap() - list_top;
+        let mut prev_row = selected_row(&mut launcher, width, height);
+        let mut engaged_at = None;
+        for _ in 0..n {
+            launcher.next();
+            let row = selected_row(&mut launcher, width, height);
+            if row <= prev_row {
+                engaged_at = Some(row);
+                assert_eq!(
+                    row, prev_row,
+                    "the cursor's screen row should not move once scrolling has engaged"
+                );
+                break;
+            }
+            prev_row = row;
+        }
+        let fixed_row = engaged_at.expect("scrolling should engage within one full lap");
 
+        let selected = launcher.state.selected().unwrap();
+        let top_index = (selected + n - fixed_row) % n;
+        let top_title = launcher.registered_modules[top_index].title();
+        let list_top = find_row(&mut launcher, width, height, "Modules (").unwrap() + 1;
         assert_eq!(
-            daemon_row, rss_row,
-            "the cursor's screen row should not move once scrolling has engaged"
-        );
-        assert_eq!(
-            api_client_row, 0,
+            find_row(&mut launcher, width, height, top_title).unwrap() - list_top,
+            0,
             "the ring should have rotated so the wrapped-around item lands at the very top"
+        );
+
+        launcher.next();
+        assert_eq!(
+            selected_row(&mut launcher, width, height),
+            fixed_row,
+            "the cursor's row should stay pinned on further Down presses"
         );
     }
 
@@ -1157,10 +1183,11 @@ mod tests {
 
     #[test]
     fn test_max_visible_caps_how_many_items_render_at_once() {
+        let default_count = launcher().registered_modules.len();
         let mut launcher = launcher_with_max_visible(5);
         assert_eq!(
             launcher.registered_modules.len(),
-            12,
+            default_count,
             "total module count should be unaffected"
         );
         let content = rendered_content(&mut launcher);
