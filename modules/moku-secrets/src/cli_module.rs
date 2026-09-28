@@ -340,44 +340,17 @@ impl CliModule for SecretsCliModule {
     }
 }
 
-/// Prompts for the vault password and unlocks the shared session if it
-/// isn't already — mirrors `moku-bin/src/config_cmd.rs`'s
-/// `ensure_unlocked_if_needed`, generalized via `CliContext::session`/
-/// `security` (added alongside this module) so any CLI module can do the
-/// same, not just `moku config`.
+/// Unlocks the shared session from an interactive prompt if needed, via the
+/// one shared helper every vault-touching CLI command uses
+/// (`moku_core::security::cli::ensure_unlocked`: asks once, never creates
+/// a vault).
 async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
     let (Some(session), Some(security)) = (&ctx.session, &ctx.security) else {
         bail!("vault access unavailable (internal error: CliContext.session/security is empty).");
     };
-    if session.is_unlocked() {
-        return Ok(());
-    }
-
-    let password = zeroize::Zeroizing::new(
-        rpassword::prompt_password("Moku vault password: ")
-            .map_err(|e| anyhow!("Failed to read password: {e}"))?,
-    );
-    let result = if security.is_vault_initialized() {
-        security.unlock_vault(password).await
-    } else {
-        security.initialize_vault(password).await
-    };
-    match result {
-        Ok(key) => {
-            session.unlock(key);
-            Ok(())
-        }
-        Err(e) => Err(anyhow!("Vault unlock failed: {e}")),
-    }
+    moku_core::security::cli::ensure_unlocked(session, security, "Moku vault password: ").await
 }
 
-fn prompt_new_export_password() -> Result<String> {
-    let p1 = rpassword::prompt_password("New export password: ")
-        .map_err(|e| anyhow!("Failed to read password: {e}"))?;
-    let p2 = rpassword::prompt_password("Confirm export password: ")
-        .map_err(|e| anyhow!("Failed to read password: {e}"))?;
-    if p1 != p2 {
-        bail!("passwords did not match");
-    }
-    Ok(p1)
+fn prompt_new_export_password() -> Result<zeroize::Zeroizing<String>> {
+    moku_core::security::cli::prompt_new_password("New export password: ", "Confirm export password: ")
 }

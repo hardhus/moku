@@ -100,28 +100,10 @@ async fn ensure_unlocked_if_needed(
     security: &Arc<SecurityManager>,
     target_encrypted: bool,
 ) -> Result<()> {
-    if !target_encrypted || session.is_unlocked() {
+    if !target_encrypted {
         return Ok(());
     }
-
-    let password = zeroize::Zeroizing::new(
-        rpassword::prompt_password("Vault password: ")
-            .map_err(|e| anyhow!("Failed to read password: {e}"))?,
-    );
-
-    let result = if security.is_vault_initialized() {
-        security.unlock_vault(password).await
-    } else {
-        security.initialize_vault(password).await
-    };
-
-    match result {
-        Ok(key) => {
-            session.unlock(key);
-            Ok(())
-        }
-        Err(e) => Err(anyhow!("Vault unlock failed: {e}")),
-    }
+    moku_core::security::cli::ensure_unlocked(session, security, "Vault password: ").await
 }
 
 async fn run_migration(storage: &Arc<StorageManager>, module: &str, target_encrypted: bool) -> Result<()> {

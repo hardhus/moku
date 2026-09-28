@@ -160,30 +160,12 @@ fn print_result(r: &RunResult) {
     }
 }
 
-/// Prompts for the vault password and unlocks the shared session if it
-/// isn't already — mirrors `modules/moku-secrets/src/cli_module.rs`'s
-/// `ensure_unlocked` (itself mirroring `moku-bin/src/config_cmd.rs`'s
-/// `ensure_unlocked_if_needed`). Kept as its own small copy rather than a
-/// shared moku-core helper — same reasoning as the vault daemon's
-/// duplicated `pid_is_alive`: these are independent modules, not worth
-/// coupling for a ~15-line function.
+/// Unlocks the shared session from an interactive prompt if needed, via the
+/// shared `moku_core::security::cli::ensure_unlocked` (asks once, never
+/// creates a vault).
 async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
     let (Some(session), Some(security)) = (&ctx.session, &ctx.security) else {
         bail!("vault access unavailable (internal error: CliContext.session/security is empty).");
     };
-    if session.is_unlocked() {
-        return Ok(());
-    }
-
-    let password = zeroize::Zeroizing::new(
-        rpassword::prompt_password("Moku vault password: ").map_err(|e| anyhow!("Failed to read password: {e}"))?,
-    );
-    let result = if security.is_vault_initialized() { security.unlock_vault(password).await } else { security.initialize_vault(password).await };
-    match result {
-        Ok(key) => {
-            session.unlock(key);
-            Ok(())
-        }
-        Err(e) => Err(anyhow!("Vault unlock failed: {e}")),
-    }
+    moku_core::security::cli::ensure_unlocked(session, security, "Moku vault password: ").await
 }

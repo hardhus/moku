@@ -1,3 +1,4 @@
+pub mod cli;
 mod manager;
 mod session;
 

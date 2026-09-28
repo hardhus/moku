@@ -59,14 +59,13 @@ pub async fn handle(sub: &VolumeCommands) -> Result<()> {
             };
 
             let secret = if use_custom {
-                let p1 = rpassword::prompt_password("New volume password: ")
-                    .map_err(|e| anyhow!("Failed to read password: {e}"))?;
-                let p2 = rpassword::prompt_password("Confirm volume password: ")
-                    .map_err(|e| anyhow!("Failed to read password: {e}"))?;
-                if p1 != p2 {
-                    bail!("passwords did not match");
-                }
-                VolumeSecret::Password(p1)
+                let password = moku_core::security::cli::prompt_new_password(
+                    "New volume password: ",
+                    "Confirm volume password: ",
+                )?;
+                // `VolumeSecret::Password` still holds a plain String; it
+                // becomes a zeroizing secret type in P3.
+                VolumeSecret::Password(password.to_string())
             } else {
                 // Default mode: the volume gets no password of its own —
                 // its key is derived from moku's real app vault, so this
@@ -207,8 +206,10 @@ async fn mount(name: &str, mountpoint: Option<&str>) -> Result<()> {
         PasswordMode::Default => "Moku vault password: ",
         PasswordMode::Custom => "Volume password: ",
     };
-    let password = rpassword::prompt_password(prompt_label)
-        .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+    let password = zeroize::Zeroizing::new(
+        rpassword::prompt_password(prompt_label)
+            .map_err(|e| anyhow!("Failed to read password: {e}"))?,
+    );
 
     match worker::spawn_mount_process(&cfg.id, &resolved_mountpoint, &password).await? {
         MountOutcome::Ready { pid } => {
