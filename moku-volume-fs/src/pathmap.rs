@@ -47,16 +47,25 @@ impl PathMapper {
             return Ok(*iv);
         }
         let iv_path = backing_dir.join(DIR_IV_FILE);
-        let iv = if iv_path.exists() {
-            let bytes = std::fs::read(&iv_path).context("failed to read directory IV")?;
-            let arr: [u8; 16] =
-                bytes.as_slice().try_into().map_err(|_| anyhow!("corrupt .moku_dir_iv (wrong length)"))?;
-            arr
-        } else {
-            let mut arr = [0u8; 16];
-            OsRng.fill_bytes(&mut arr);
-            std::fs::write(&iv_path, arr).context("failed to write directory IV")?;
-            arr
+        let iv = match std::fs::read(&iv_path) {
+            Ok(bytes) => parse_dir_iv(&bytes)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // A missing IV may only be created for a directory that has
+                // no encrypted entries yet (a fresh volume root, or a crash
+                // between `mkdir` and writing its IV). If entries exist,
+                // their names were encrypted under the lost IV: minting a
+                // new one would make every one of them permanently
+                // unreadable, so that is an error the user must see (restore
+                // `.moku_dir_iv` from a backup), never a silent reset.
+                if has_encrypted_entries(backing_dir)? {
+                    return Err(anyhow!(
+                        "{} is missing its {DIR_IV_FILE}: the names in this directory can't be decrypted without it (restore it from a backup)",
+                        backing_dir.display()
+                    ));
+                }
+                create_dir_iv_no_replace(backing_dir)?
+            }
+            Err(e) => return Err(e).context("failed to read directory IV"),
         };
         self.dir_iv_cache.lock().unwrap().insert(backing_dir.clone(), iv);
         Ok(iv)
@@ -96,7 +105,9 @@ impl PathMapper {
             let entry = entry?;
             let raw_name = entry.file_name();
             let raw_name = raw_name.to_string_lossy();
-            if raw_name == DIR_IV_FILE {
+            // The IV file itself, plus any temp file left by an interrupted
+            // `create_dir_iv_no_replace`, are bookkeeping, not entries.
+            if raw_name.starts_with(DIR_IV_FILE) {
                 continue;
             }
             let plain = cipher.decrypt_name(&dir_iv, &raw_name)?;
@@ -121,6 +132,82 @@ impl PathMapper {
 
     pub fn data_root(&self) -> &PathBuf {
         &self.data_root
+    }
+}
+
+fn parse_dir_iv(bytes: &[u8]) -> Result<[u8; 16]> {
+    bytes
+        .try_into()
+        .map_err(|_| anyhow!("corrupt {DIR_IV_FILE} (wrong length)"))
+}
+
+/// Whether `dir` holds anything besides IV bookkeeping files.
+fn has_encrypted_entries(dir: &Path) -> Result<bool> {
+    for entry in std::fs::read_dir(dir).context("failed to list directory")? {
+        let name = entry?.file_name();
+        if !name.to_string_lossy().starts_with(DIR_IV_FILE) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Writes a fresh random IV for `dir` without ever replacing an existing
+/// one: the bytes go to a temp file first, which is then hard-linked into
+/// place. The link fails if the target already exists, so two racing
+/// creators (threads or processes) can never leave a directory with two
+/// different IVs: the loser reads the winner's. A torn write can't occur
+/// either, since the IV file only ever appears complete. On filesystems
+/// without hard links (FAT/exFAT) it falls back to `create_new`, which
+/// still never replaces an existing IV.
+fn create_dir_iv_no_replace(dir: &Path) -> Result<[u8; 16]> {
+    use std::io::Write;
+
+    let mut iv = [0u8; 16];
+    OsRng.fill_bytes(&mut iv);
+    let iv_path = dir.join(DIR_IV_FILE);
+    let mut suffix = [0u8; 8];
+    OsRng.fill_bytes(&mut suffix);
+    let tmp_name = format!(
+        "{DIR_IV_FILE}.tmp-{}",
+        suffix.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    );
+    let tmp_path = dir.join(tmp_name);
+
+    let write_tmp = || -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        f.write_all(&iv)?;
+        f.sync_all()
+    };
+    let linked = write_tmp().and_then(|()| std::fs::hard_link(&tmp_path, &iv_path));
+    // Best-effort: the temp file is ignored by listings either way.
+    let _ = std::fs::remove_file(&tmp_path);
+    match linked {
+        Ok(()) => Ok(iv),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            parse_dir_iv(&std::fs::read(&iv_path).context("failed to read directory IV")?)
+        }
+        Err(_) => {
+            // No hard-link support: create_new directly (still never replaces).
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&iv_path)
+            {
+                Ok(mut f) => {
+                    f.write_all(&iv).context("failed to write directory IV")?;
+                    f.sync_all().context("failed to write directory IV")?;
+                    Ok(iv)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    parse_dir_iv(&std::fs::read(&iv_path).context("failed to read directory IV")?)
+                }
+                Err(e) => Err(e).context("failed to write directory IV"),
+            }
+        }
     }
 }
 
@@ -182,5 +269,71 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "a.md");
         assert!(!entries[0].2);
+    }
+
+    #[test]
+    fn test_missing_iv_in_populated_directory_is_an_error_not_a_reset() {
+        let tmp = tempdir().unwrap();
+        let mapper = PathMapper::new(tmp.path().join("data"));
+        let k = key();
+        mapper.ensure_root().unwrap();
+        let root = mapper.data_root().clone();
+        let root_iv = std::fs::read(root.join(DIR_IV_FILE)).unwrap();
+        // An encrypted entry exists, then the IV file goes missing.
+        let entry = mapper.resolve(&k, &VirtualPath::parse("/a.md")).unwrap();
+        std::fs::write(&entry, b"x").unwrap();
+        std::fs::remove_file(root.join(DIR_IV_FILE)).unwrap();
+
+        let fresh = PathMapper::new(root.clone());
+        assert!(fresh.read_dir_plain(&k, &root).is_err());
+        assert!(
+            !root.join(DIR_IV_FILE).exists(),
+            "a new IV must never be minted for a populated directory"
+        );
+        // Restoring the original IV brings the names back.
+        std::fs::write(root.join(DIR_IV_FILE), &root_iv).unwrap();
+        let names: Vec<String> = fresh
+            .read_dir_plain(&k, &root)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        assert_eq!(names, vec!["a.md".to_string()]);
+    }
+
+    #[test]
+    fn test_missing_iv_in_empty_directory_is_created() {
+        let tmp = tempdir().unwrap();
+        let mapper = PathMapper::new(tmp.path().join("data"));
+        mapper.ensure_root().unwrap();
+        let dir = mapper.data_root().join("empty");
+        std::fs::create_dir(&dir).unwrap();
+        mapper.init_dir_iv(&dir).unwrap();
+        assert_eq!(std::fs::read(dir.join(DIR_IV_FILE)).unwrap().len(), 16);
+    }
+
+    #[test]
+    fn test_create_dir_iv_never_replaces_an_existing_iv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = create_dir_iv_no_replace(tmp.path()).unwrap();
+        let second = create_dir_iv_no_replace(tmp.path()).unwrap();
+        assert_eq!(first, second, "a second creator must read the first IV");
+        assert_eq!(std::fs::read(tmp.path().join(DIR_IV_FILE)).unwrap(), first);
+        let leftovers = std::fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(leftovers, 1, "temp files are cleaned up");
+    }
+
+    #[test]
+    fn test_concurrent_creators_agree_on_one_iv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let d = dir.clone();
+                std::thread::spawn(move || create_dir_iv_no_replace(&d).unwrap())
+            })
+            .collect();
+        let ivs: Vec<[u8; 16]> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(ivs.windows(2).all(|w| w[0] == w[1]));
     }
 }
