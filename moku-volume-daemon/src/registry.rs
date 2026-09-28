@@ -167,52 +167,76 @@ pub fn volume_dir(id: &str) -> Result<PathBuf> {
     Ok(volumes_root()?.join(id))
 }
 
-fn index_path() -> Result<PathBuf> {
-    Ok(volumes_root()?.join(INDEX_FILE))
-}
-
-/// Serializes read-modify-write access to the index file within this
-/// process — without it, two registrations happening back to back (e.g.
-/// two volumes created in quick succession from the TUI, or just two
-/// concurrent tests) can race: both read the same starting content, and
-/// whichever writes second silently clobbers the other's insert. Doesn't
-/// protect against a *second moku process* writing at the same instant
-/// (no cross-process file lock here), but that's an extremely narrow case
-/// this app doesn't guard against for its other data files either.
+/// Serializes read-modify-write access to the index within this process.
+/// Without it, two registrations back to back (two volumes created in
+/// quick succession, or two concurrent tests) race: both read the same
+/// starting content and the second write clobbers the first's insert.
+/// `update_index` additionally takes a cross-process file lock
+/// (`INDEX_LOCK_FILE`), so a CLI command and the TUI can't race either.
 static INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Small, blocking read — the index is a tiny JSON map, and keeping
-/// `volume_dir` (a widely-used, synchronous function) synchronous avoids
-/// cascading an async signature change through every caller for what's a
-/// negligible amount of I/O. Missing/corrupt index → empty map, so a
-/// volume just falls back to the fixed-root lookup instead of erroring.
+const INDEX_LOCK_FILE: &str = "index.lock";
+
+/// Reads the index strictly. A missing file is an empty index; an
+/// unreadable or corrupt file is an `Err`. It is never silently treated
+/// as empty, because the next write would then permanently drop every
+/// registered volume's location.
+fn read_index() -> Result<HashMap<String, PathBuf>> {
+    read_index_at(&volumes_root()?)
+}
+
+fn read_index_at(root: &Path) -> Result<HashMap<String, PathBuf>> {
+    let path = root.join(INDEX_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content)
+            .with_context(|| format!("volume index {} is corrupt", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(e) => Err(e).with_context(|| format!("failed to read volume index {}", path.display())),
+    }
+}
+
+/// Lenient read for lookups: small and blocking (keeping `volume_dir`
+/// synchronous avoids an async cascade through every caller). If the index
+/// can't be read, lookups fall back to the fixed-root location, but with a
+/// warning, and nothing is written.
 fn load_index() -> HashMap<String, PathBuf> {
-    let Ok(path) = index_path() else {
-        return HashMap::new();
-    };
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return HashMap::new();
-    };
-    serde_json::from_str(&content).unwrap_or_default()
+    read_index().unwrap_or_else(|e| {
+        eprintln!("warning: {e:#}; using the default volume location");
+        HashMap::new()
+    })
 }
 
-fn save_index(index: &HashMap<String, PathBuf>) -> Result<()> {
-    let root = volumes_root()?;
-    std::fs::create_dir_all(&root)?;
+fn save_index_at(root: &Path, index: &HashMap<String, PathBuf>) -> Result<()> {
+    std::fs::create_dir_all(root)?;
     let json = serde_json::to_string_pretty(index)?;
-    std::fs::write(root.join(INDEX_FILE), json)?;
-    Ok(())
+    moku_core::util::atomic_write(&root.join(INDEX_FILE), json.as_bytes())
 }
 
-/// Reads, mutates, and writes back the index as one locked step — see
-/// `INDEX_LOCK`. Synchronous end to end (no `.await` inside the critical
-/// section) specifically so the lock never needs to be held across an
-/// await point.
+/// Reads, mutates and writes back the index as one locked step: the
+/// in-process `INDEX_LOCK` plus an OS file lock on `index.lock`, which is
+/// released when the guard drops or the process exits. Synchronous end to
+/// end, so no lock is held across an await point. If the current index
+/// can't be read, this fails instead of overwriting it.
 fn update_index(mutate: impl FnOnce(&mut HashMap<String, PathBuf>)) -> Result<()> {
-    let _guard = INDEX_LOCK.lock().unwrap();
-    let mut index = load_index();
+    update_index_at(&volumes_root()?, mutate)
+}
+
+fn update_index_at(root: &Path, mutate: impl FnOnce(&mut HashMap<String, PathBuf>)) -> Result<()> {
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    std::fs::create_dir_all(root)?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(root.join(INDEX_LOCK_FILE))
+        .context("failed to open the volume index lock")?;
+    lock_file
+        .lock()
+        .context("failed to lock the volume index")?;
+    let mut index = read_index_at(root)?;
     mutate(&mut index);
-    save_index(&index)
+    save_index_at(root, &index)
 }
 
 /// Loads the index and forgets any entry whose directory is *completely
@@ -239,11 +263,16 @@ fn pruned_index() -> HashMap<String, PathBuf> {
         }
     }
     if !stale.is_empty() {
-        let _ = update_index(|index| {
+        // Pruning is housekeeping: if it can't be written now, the ghosts
+        // are still filtered out of `alive` below, and pruning is retried
+        // on the next call.
+        if let Err(e) = update_index(|index| {
             for id in &stale {
                 index.remove(id);
             }
-        });
+        }) {
+            eprintln!("warning: failed to prune stale volume index entries: {e:#}");
+        }
     }
     alive
 }
@@ -297,8 +326,7 @@ fn now() -> u64 {
 
 async fn save_config(dir: &Path, config: &VolumeConfig) -> Result<()> {
     let json = serde_json::to_string_pretty(config)?;
-    tokio::fs::write(dir.join(VOLUME_FILE), json).await?;
-    Ok(())
+    moku_core::util::atomic_write_async(dir.join(VOLUME_FILE), json.into_bytes()).await
 }
 
 pub async fn load_config(dir: &Path) -> Result<VolumeConfig> {
@@ -560,6 +588,41 @@ mod tests {
         let id = unique_id("claude-plan-test-7a21bd", dir.path()).unwrap();
         assert_ne!(id, "claude-plan-test-7a21bd");
         assert!(id.starts_with("claude-plan-test-7a21bd-"));
+    }
+
+    #[test]
+    fn test_corrupt_index_is_an_error_and_is_never_overwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(INDEX_FILE);
+        std::fs::write(&path, b"{ not json").unwrap();
+        assert!(read_index_at(root.path()).is_err());
+        let res = update_index_at(root.path(), |index| {
+            index.insert("x".into(), PathBuf::from("y"));
+        });
+        assert!(res.is_err(), "a corrupt index must not be replaced");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ not json");
+    }
+
+    #[test]
+    fn test_update_index_at_roundtrips_and_leaves_no_temp_files() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(read_index_at(root.path()).unwrap().is_empty());
+        update_index_at(root.path(), |index| {
+            index.insert("a".into(), PathBuf::from("/vol/a"));
+        })
+        .unwrap();
+        update_index_at(root.path(), |index| {
+            index.insert("b".into(), PathBuf::from("/vol/b"));
+        })
+        .unwrap();
+        let index = read_index_at(root.path()).unwrap();
+        assert_eq!(index.len(), 2);
+        let mut names: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec![INDEX_FILE.to_string(), INDEX_LOCK_FILE.to_string()]);
     }
 
     #[test]
