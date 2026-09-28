@@ -190,6 +190,13 @@ async fn mount(name: &str, mountpoint: Option<&str>) -> Result<()> {
         println!("'{}' is already mounted.", cfg.display_name);
         return Ok(());
     }
+    // Checked before the password prompt (and the Argon2 wait behind it).
+    if status::is_in_use(&cfg.id) {
+        bail!(
+            "'{}' is already open in another moku process (mounting or mounted).",
+            cfg.display_name
+        );
+    }
 
     let resolved_mountpoint = match mountpoint {
         Some(mp) => mp.to_string(),

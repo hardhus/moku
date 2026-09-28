@@ -55,7 +55,17 @@ pub async fn listen_for_stop(volume_id: &str, stop_tx: Sender<()>) -> Result<()>
     use tokio::net::UnixListener;
 
     let path = socket_path(volume_id)?;
-    let _ = std::fs::remove_file(&path); // stale socket from a previous unclean exit
+    // Only remove the socket if nobody is listening on it: deleting a LIVE
+    // worker's socket would leave that worker unreachable (no graceful
+    // unmount). A socket nobody answers on is a stale leftover from an
+    // unclean exit and is safe to remove.
+    if path.exists() {
+        if tokio::net::UnixStream::connect(&path).await.is_ok() {
+            anyhow::bail!("another worker is already listening on {}", path.display());
+        }
+        // Best-effort: if this fails, the bind below reports the real error.
+        let _ = std::fs::remove_file(&path);
+    }
     let listener = UnixListener::bind(&path).context("failed to bind control socket")?;
     let (mut stream, _) = listener.accept().await.context("failed accepting control socket connection")?;
 

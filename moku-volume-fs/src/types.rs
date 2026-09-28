@@ -97,6 +97,9 @@ pub enum VolumeFsError {
     NameTooLong,
     QuotaExceeded,
     BadFileHandle,
+    /// Another engine (another process, or another handle in this one)
+    /// already holds this volume's `VolumeLock`.
+    Locked,
     Other(anyhow::Error),
 }
 
@@ -111,6 +114,7 @@ impl std::fmt::Display for VolumeFsError {
             Self::NameTooLong => write!(f, "name too long"),
             Self::QuotaExceeded => write!(f, "volume is full (quota exceeded)"),
             Self::BadFileHandle => write!(f, "invalid file handle"),
+            Self::Locked => write!(f, "volume is already open (mounted or in use by another moku process)"),
             Self::Other(e) => write!(f, "{e}"),
         }
     }

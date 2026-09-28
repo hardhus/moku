@@ -413,6 +413,8 @@ impl TuiModule for VolumeManagerModule {
                     if let Some(row) = self.selected() {
                         if row.mounted {
                             self.show_message("Already mounted.");
+                        } else if status::is_in_use(&row.cfg.id) {
+                            self.show_message("Volume is already open in another moku process.");
                         } else {
                             let volume_id = row.cfg.id.clone();
                             let display_name = row.cfg.display_name.clone();

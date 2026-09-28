@@ -85,6 +85,7 @@ fn map_err(e: VolumeFsError) -> Errno {
         VolumeFsError::NameTooLong => Errno::ENAMETOOLONG,
         VolumeFsError::QuotaExceeded => Errno::ENOSPC,
         VolumeFsError::BadFileHandle => Errno::EBADF,
+        VolumeFsError::Locked => Errno::EBUSY,
         VolumeFsError::Other(_) => Errno::EIO,
     }
 }

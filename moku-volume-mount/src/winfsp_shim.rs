@@ -57,7 +57,9 @@ fn map_err(e: VolumeFsError) -> winfsp::FspError {
         VolumeFsError::NameTooLong => STATUS_OBJECT_NAME_INVALID.into(),
         VolumeFsError::QuotaExceeded => STATUS_DISK_FULL.into(),
         VolumeFsError::BadFileHandle => STATUS_INVALID_HANDLE.into(),
-        VolumeFsError::Other(_) => STATUS_UNSUCCESSFUL.into(),
+        // `Locked` only comes from `VolumeLock::acquire`, before a mount
+        // exists; no filesystem callback can produce it.
+        VolumeFsError::Locked | VolumeFsError::Other(_) => STATUS_UNSUCCESSFUL.into(),
     }
 }
 
@@ -703,6 +705,7 @@ mod tests {
                 keys,
                 volume_tmp.path().join("usage.json"),
                 50_000_000,
+                moku_volume_fs::VolumeLock::acquire(volume_tmp.path()).expect("volume lock"),
             )
             .expect("open_volume")
         };
@@ -811,6 +814,7 @@ mod tests {
             quota_keys,
             quota_tmp.path().join("usage.json"),
             200,
+            moku_volume_fs::VolumeLock::acquire(quota_tmp.path()).expect("volume lock"),
         )
         .expect("open_volume with a tiny quota");
         with_real_mount(quota_engine, |root| {
@@ -832,7 +836,8 @@ mod tests {
                 .expect("init vault")
         });
         let keys = moku_volume_fs::derive_volume_keys(&master_key);
-        VolumeEngine::open_volume(root.join("data"), keys, root.join("usage.json"), limit)
+        let lock = moku_volume_fs::VolumeLock::acquire(root).expect("volume lock");
+        VolumeEngine::open_volume(root.join("data"), keys, root.join("usage.json"), limit, lock)
             .expect("open_volume")
     }
 

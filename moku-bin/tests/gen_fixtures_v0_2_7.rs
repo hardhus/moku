@@ -306,6 +306,9 @@ async fn generate_v0_2_7_fixtures() {
         derive_volume_keys(&vm),
         default_dir.join("usage.json"),
         default_cfg.size_limit_bytes,
+        // Compile-only adaptation to the later `open_volume(.., lock)`
+        // signature (P1); this generator is never re-run.
+        moku_volume_fs::VolumeLock::acquire(&default_dir).unwrap(),
     )
     .unwrap();
     write_volume_tree(&engine);
@@ -330,6 +333,9 @@ async fn generate_v0_2_7_fixtures() {
         derive_volume_keys(&custom_master),
         custom_dir.join("usage.json"),
         custom_cfg.size_limit_bytes,
+        // Compile-only adaptation to the later `open_volume(.., lock)`
+        // signature (P1); this generator is never re-run.
+        moku_volume_fs::VolumeLock::acquire(&custom_dir).unwrap(),
     )
     .unwrap();
     write_volume_tree(&engine);

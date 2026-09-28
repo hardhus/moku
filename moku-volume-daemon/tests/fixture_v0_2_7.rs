@@ -71,12 +71,14 @@ fn assert_expected_tree(engine: &VolumeEngine) {
 
 async fn open(dir: &Path, secret: MountSecret) -> VolumeEngine {
     let cfg = load_config(dir).await.unwrap();
+    let lock = moku_volume_fs::VolumeLock::acquire(dir).unwrap();
     let master = resolve_volume_master_key(dir, &cfg, secret).await.unwrap();
     VolumeEngine::open_volume(
         dir.join("data"),
         derive_volume_keys(&master),
         dir.join("usage.json"),
         cfg.size_limit_bytes,
+        lock,
     )
     .unwrap()
 }

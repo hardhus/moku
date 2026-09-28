@@ -60,6 +60,17 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     let volume_dir = registry::volume_dir(volume_id)?;
     let cfg = registry::load_config(&volume_dir).await?;
 
+    // Take the cross-process volume lock BEFORE resolving the key: a second
+    // mount of the same volume fails right here, instead of after the
+    // multi-second Argon2 password derivation.
+    let lock = moku_volume_fs::VolumeLock::acquire(&volume_dir).map_err(|e| match e {
+        moku_volume_fs::VolumeFsError::Locked => anyhow!(
+            "volume '{}' is already mounted (or in use by another moku process)",
+            cfg.display_name
+        ),
+        other => anyhow!("failed to lock volume '{}': {other}", cfg.display_name),
+    })?;
+
     let master_key = registry::resolve_volume_master_key(&volume_dir, &cfg, secret).await?;
     let keys = derive_volume_keys(&master_key);
 
@@ -77,6 +88,7 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
         keys,
         volume_dir.join(registry::USAGE_FILE),
         cfg.size_limit_bytes,
+        lock,
     )?);
 
     if previous_session_unclean {
@@ -100,7 +112,13 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
         let tx = stop_tx.clone();
         let id = volume_id.to_string();
         tokio::spawn(async move {
-            let _ = crate::control::listen_for_stop(&id, tx).await;
+            // Without the control channel `moku volume unmount` can't stop
+            // this worker gracefully (it falls back to a hard kill, which
+            // skips the clean unmount), so a failure here must be visible.
+            // stderr is captured by the parent and the worker log.
+            if let Err(e) = crate::control::listen_for_stop(&id, tx).await {
+                eprintln!("volume control channel unavailable: {e:#}");
+            }
         });
     }
 

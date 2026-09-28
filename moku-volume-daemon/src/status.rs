@@ -18,6 +18,17 @@ pub fn pid_is_alive(pid: u32) -> bool {
 /// Whether this volume currently has a live mount worker process: its
 /// `mount.pid` (written by the worker once the mount is live) names a
 /// process that is still running.
+/// Whether some moku process currently holds this volume's cross-process
+/// `VolumeLock` (a mount worker, or anything else with the volume open).
+/// Checked before asking for a password so a second mount attempt fails
+/// fast; only a hint, since the worker takes the real lock itself.
+pub fn is_in_use(volume_id: &str) -> bool {
+    crate::registry::volume_dir(volume_id)
+        .ok()
+        .and_then(|dir| moku_volume_fs::VolumeLock::is_held(&dir).ok())
+        .unwrap_or(false)
+}
+
 pub fn is_mounted(volume_id: &str) -> bool {
     match crate::pid::read(volume_id) {
         None => false,

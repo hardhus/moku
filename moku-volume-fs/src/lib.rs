@@ -10,6 +10,7 @@ pub mod block_cipher;
 pub mod content;
 pub mod engine;
 pub mod keys;
+pub mod lock;
 pub mod names;
 pub mod pathmap;
 pub mod quota;
@@ -17,4 +18,5 @@ pub mod types;
 
 pub use engine::VolumeEngine;
 pub use keys::{VolumeKeys, derive_volume_keys};
+pub use lock::{LockMode, VolumeLock};
 pub use types::{Attr, DirEntry, FileKind, VResult, VolumeFsError, VirtualPath};

@@ -11,6 +11,7 @@ use secrecy::SecretBox;
 
 use crate::content;
 use crate::keys::{ContentKey, NameKey, VolumeKeys};
+use crate::lock::VolumeLock;
 use crate::names::MAX_VIRTUAL_NAME_LEN;
 use crate::pathmap::PathMapper;
 use crate::quota::Quota;
@@ -33,14 +34,20 @@ pub struct VolumeEngine {
     open_files: Mutex<HashMap<u64, OpenFile>>,
     next_fh: AtomicU64,
     file_id_cache: Mutex<HashMap<PathBuf, [u8; 16]>>,
+    /// Held for the engine's whole lifetime; see `VolumeLock`.
+    _lock: VolumeLock,
 }
 
 impl VolumeEngine {
+    /// Opens a volume's data. `lock` must already be held on the volume's
+    /// directory (take it with `VolumeLock::acquire` BEFORE deriving keys,
+    /// so a second mount fails fast instead of after the Argon2 wait).
     pub fn open_volume(
         data_root: PathBuf,
         keys: VolumeKeys,
         usage_path: PathBuf,
         size_limit_bytes: u64,
+        lock: VolumeLock,
     ) -> anyhow::Result<Self> {
         let pathmap = PathMapper::new(data_root);
         pathmap.ensure_root()?;
@@ -53,6 +60,7 @@ impl VolumeEngine {
             open_files: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             file_id_cache: Mutex::new(HashMap::new()),
+            _lock: lock,
         })
     }
 
@@ -395,7 +403,22 @@ mod tests {
             content: SecretBox::new(Box::new(ContentKey([1u8; 32]))),
             name: SecretBox::new(Box::new(NameKey([2u8; 64]))),
         };
-        VolumeEngine::open_volume(dir.join("data"), keys, dir.join("usage.json"), limit).unwrap()
+        let lock = VolumeLock::acquire(dir).unwrap();
+        VolumeEngine::open_volume(dir.join("data"), keys, dir.join("usage.json"), limit, lock)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_second_engine_on_same_volume_is_rejected_while_first_is_open() {
+        let dir = tempdir().unwrap();
+        let first = engine(dir.path(), 1_000_000);
+        assert!(matches!(
+            VolumeLock::acquire(dir.path()),
+            Err(VolumeFsError::Locked)
+        ));
+        drop(first);
+        // Released with the engine: the volume can be opened again.
+        let _second = engine(dir.path(), 1_000_000);
     }
 
     #[test]
