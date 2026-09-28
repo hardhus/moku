@@ -28,6 +28,9 @@ secrecy.workspace = true
 # handing a remote (RSS feed) URL to the OS's default-handler mechanism.
 url = "2"
 
+# util::atomic_write: temp file in the target directory + persist (rename).
+tempfile.workspace = true
+
 # Per-module storage subkey derivation (storage/keys.rs) — same
 # scoped-not-workspace pinning as moku-volume-fs/moku-volume-daemon's own
 # HKDF usage.
@@ -37,5 +40,3 @@ sha2 = "0.10"
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true

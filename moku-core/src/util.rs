@@ -1,4 +1,42 @@
-use anyhow::{Result, bail};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+
+/// Writes `bytes` to `path` atomically: the data goes to a temp file in the
+/// same directory, is fsynced, and is then renamed over `path` (replacing
+/// it on Windows too). A crash or a full disk mid-write therefore leaves
+/// either the complete old file or the complete new one, never a torn
+/// mix. Every piece of moku state written to disk as a whole file
+/// (`meta.json`, `volume.json`, `usage.json`, the volume index, config
+/// files, ...) should go through this instead of a plain `fs::write`.
+///
+/// The parent directory must already exist.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("failed to create a temp file next to {}", path.display()))?;
+    tmp.write_all(bytes)
+        .with_context(|| format!("failed to write temp file for {}", path.display()))?;
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("failed to fsync temp file for {}", path.display()))?;
+    tmp.persist(path)
+        .map_err(|e| e.error)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
+}
+
+/// Async wrapper around [`atomic_write`] for callers on the tokio runtime,
+/// so the fsync never blocks an async worker thread.
+pub async fn atomic_write_async(path: PathBuf, bytes: Vec<u8>) -> Result<()> {
+    tokio::task::spawn_blocking(move || atomic_write(&path, &bytes))
+        .await
+        .context("atomic_write task panicked")?
+}
 
 /// Truncates `s` to at most `max_bytes` bytes without splitting a UTF-8
 /// code point — plain `&s[..max_bytes]` panics ("byte index is not a char
@@ -114,6 +152,52 @@ mod tests {
     fn test_require_http_scheme_rejects_malformed_urls() {
         assert!(require_http_scheme("not a url at all").is_err());
         assert!(require_http_scheme("").is_err());
+    }
+
+    #[test]
+    fn test_atomic_write_creates_then_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        atomic_write(&path, b"first").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        atomic_write(&path, b"second, longer").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second, longer");
+        // No temp files are left behind next to the target.
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("state.json")]);
+    }
+
+    #[test]
+    fn test_atomic_write_fails_when_parent_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("state.json");
+        assert!(atomic_write(&path, b"x").is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_atomic_write_leftover_temp_file_does_not_touch_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        atomic_write(&path, b"good").unwrap();
+        // Simulate a crash mid-write: a temp file was created and partially
+        // written but never persisted.
+        let mut stray = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        stray.write_all(b"torn").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"good");
+    }
+
+    #[tokio::test]
+    async fn test_atomic_write_async_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        atomic_write_async(path.clone(), b"async".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"async");
     }
 
     #[test]
