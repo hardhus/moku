@@ -17,20 +17,28 @@ use crate::status;
 /// "spawned, therefore succeeded" assumption.
 const MOUNT_READY_SENTINEL: &str = "MOKU_MOUNT_READY";
 
-/// Reads the mount secret from stdin (piped by the parent process — see
-/// `spawn_mount_process`/`spawn_mount_process_with_key` below) rather than
-/// a CLI arg or env var, so it never appears in `ps`/Task Manager or
-/// `/proc/<pid>/environ` (plan §5). The first byte tags the payload:
-/// `0x00` followed by a UTF-8 password (typed by a human, CLI or TUI
-/// prompt), or `0x01` followed by 32 raw key bytes (the app vault's
-/// already-unlocked master key, handed straight through by the TUI's
-/// no-reprompt fast path for Default-mode volumes — see
-/// `registry::resolve_volume_master_key`).
+/// Reads the mount secret from stdin (piped by the parent process, see
+/// `spawn_mount_process`/`spawn_mount_process_with_volume_key` below)
+/// rather than a CLI arg or env var, so it never appears in `ps`/Task
+/// Manager or `/proc/<pid>/environ` (plan §5). The first byte tags the
+/// payload:
+/// - `0x00` + a UTF-8 password (typed by a human, CLI or TUI prompt);
+/// - `0x02` + 32 raw bytes: the volume's own derived master key (the
+///   TUI's no-reprompt fast path for new-scheme Default-mode volumes);
+/// - `0x01` + 32 raw bytes: the app vault's master key. Legacy: still
+///   accepted from an older binary, never sent any more; removed in P9.
+///   The worker only needs one volume's key, never the key that also
+///   opens every module's data.
 fn read_mount_secret_from_stdin() -> Result<registry::MountSecret> {
     let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::new());
     std::io::stdin()
         .read_to_end(&mut buf)
         .context("failed to read mount secret from stdin")?;
+    parse_mount_secret(&buf)
+}
+
+/// Decodes the tagged stdin payload; see `read_mount_secret_from_stdin`.
+fn parse_mount_secret(buf: &[u8]) -> Result<registry::MountSecret> {
     match buf.split_first() {
         Some((0x01, rest)) if rest.len() == 32 => {
             let mut key = [0u8; 32];
@@ -38,6 +46,11 @@ fn read_mount_secret_from_stdin() -> Result<registry::MountSecret> {
             Ok(registry::MountSecret::Key(SecretBox::new(Box::new(
                 SafeKey(key),
             ))))
+        }
+        Some((0x02, rest)) if rest.len() == 32 => {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(rest);
+            Ok(registry::MountSecret::VolumeKey(SecretBox::new(Box::new(SafeKey(key)))))
         }
         Some((0x00, rest)) => {
             let password: Zeroizing<String> = Zeroizing::new(
@@ -346,20 +359,24 @@ pub async fn spawn_mount_process(
     run_and_wait_for_outcome(volume_id, mountpoint, payload).await
 }
 
-/// Same as `spawn_mount_process`, but for a Default-mode volume whose real
-/// key can be derived from an already-unlocked app-vault master key
-/// without asking the user to type anything — the TUI's no-reprompt mount
-/// path (`VolumeManagerModule::start_mount_with_key`), used only when
-/// `ctx.session.is_unlocked()` and the volume has no vault of its own
-/// (`registry::has_own_vault` is false).
-pub async fn spawn_mount_process_with_key(
+/// Spawns a mount worker for a new-scheme Default-mode volume, handing it
+/// only that volume's derived master key (stdin tag `0x02`, see
+/// `read_mount_secret_from_stdin`). The worker never receives the app
+/// vault's master key, which would also decrypt every module's data; the
+/// caller derives the volume key itself (`registry::
+/// derive_default_volume_master_key`) and drops the app key right after.
+///
+/// The worker still ACCEPTS the older `0x01` (app master key) tag, for a
+/// worker spawned by a pre-P1 binary during an upgrade; nothing sends it
+/// any more, and it goes away with P9's agent-side volume supervisor.
+pub async fn spawn_mount_process_with_volume_key(
     volume_id: &str,
     mountpoint: &str,
-    key: &SecretBox<SafeKey>,
+    volume_key: &SecretBox<SafeKey>,
 ) -> Result<MountOutcome> {
     use secrecy::ExposeSecret;
-    let mut payload: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0x01u8]);
-    payload.extend_from_slice(&key.expose_secret().0);
+    let mut payload: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0x02u8]);
+    payload.extend_from_slice(&volume_key.expose_secret().0);
     run_and_wait_for_outcome(volume_id, mountpoint, payload).await
 }
 
@@ -413,4 +430,29 @@ pub async fn stop_mount_process(volume_id: &str) -> Result<StopOutcome> {
     std::thread::sleep(std::time::Duration::from_millis(400));
     crate::pid::remove(volume_id);
     Ok(StopOutcome::Forced)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_mount_secret_tags() {
+        use secrecy::ExposeSecret;
+        let mut vk = vec![0x02u8];
+        vk.extend_from_slice(&[9u8; 32]);
+        match parse_mount_secret(&vk).unwrap() {
+            registry::MountSecret::VolumeKey(k) => assert_eq!(k.expose_secret().0, [9u8; 32]),
+            _ => panic!("0x02 must decode to a derived volume key"),
+        }
+        let mut app = vec![0x01u8];
+        app.extend_from_slice(&[7u8; 32]);
+        assert!(matches!(parse_mount_secret(&app).unwrap(), registry::MountSecret::Key(_)));
+        match parse_mount_secret(b"\x00hunter2\n").unwrap() {
+            registry::MountSecret::Password(p) => assert_eq!(p, "hunter2"),
+            _ => panic!("0x00 must decode to a password"),
+        }
+        assert!(parse_mount_secret(&[0x02, 1, 2, 3]).is_err(), "a short key is malformed");
+        assert!(parse_mount_secret(&[0x7f]).is_err());
+    }
 }

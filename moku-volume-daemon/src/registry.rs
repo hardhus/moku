@@ -60,6 +60,13 @@ pub enum MountSecret {
     /// was encrypted under a different key — never pass an unverified key
     /// through this variant.
     Key(SecretBox<SafeKey>),
+    /// The volume's own, already-derived master key
+    /// (`derive_default_volume_master_key`), for a new-scheme Default-mode
+    /// volume. This is what the TUI sends to a mount worker now: the worker
+    /// only ever needs this one volume's key, never the app vault's master
+    /// key (which would also decrypt every module's data). Same trust
+    /// caveat as `Key`: only pass a key derived from a verified app key.
+    VolumeKey(SecretBox<SafeKey>),
 }
 
 // NOTE: intentionally still "moku-vault-daemon" even though this crate is
@@ -111,6 +118,8 @@ pub async fn resolve_volume_master_key(
 ) -> Result<SecretBox<SafeKey>> {
     if cfg.password_mode == PasswordMode::Custom || has_own_vault(volume_dir) {
         let MountSecret::Password(password) = secret else {
+            // Neither an app key nor a pre-derived Default-volume key can
+            // open a volume that has its own password.
             bail!(
                 "'{}' needs its own password to mount — it can't be unlocked from an already-open moku vault",
                 cfg.display_name
@@ -127,6 +136,7 @@ pub async fn resolve_volume_master_key(
     // key comes from moku's real app vault, either freshly verified here
     // (CLI) or already unlocked and handed straight in (TUI fast path).
     let app_key = match secret {
+        MountSecret::VolumeKey(volume_key) => return Ok(volume_key),
         MountSecret::Key(key) => key,
         MountSecret::Password(password) => SecurityManager::new()?
             .unlock_vault(zeroize::Zeroizing::new(password))

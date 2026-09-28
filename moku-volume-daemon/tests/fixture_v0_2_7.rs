@@ -100,6 +100,30 @@ async fn v0_2_7_default_volume_opens_with_the_app_vault_key() {
     assert_expected_tree(&engine);
 }
 
+/// P1: the TUI now hands the worker only the volume's derived key
+/// (`MountSecret::VolumeKey`, stdin tag 0x02), never the app master key.
+#[tokio::test]
+async fn v0_2_7_default_volume_opens_with_a_derived_volume_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixture_root(), tmp.path());
+
+    let app_key = SecurityManager::new_with_root(tmp.path().join("datadir"))
+        .unlock_vault(Zeroizing::new(VAULT_PASSWORD.into()))
+        .await
+        .unwrap();
+    let volume_key = moku_volume_daemon::registry::derive_default_volume_master_key(
+        &app_key,
+        "default-foo",
+    );
+    drop(app_key);
+    let engine = open(
+        &tmp.path().join("volumes/default-foo"),
+        MountSecret::VolumeKey(volume_key),
+    )
+    .await;
+    assert_expected_tree(&engine);
+}
+
 #[tokio::test]
 async fn v0_2_7_custom_volume_opens_with_its_own_password() {
     let tmp = tempfile::tempdir().unwrap();

@@ -169,16 +169,15 @@ impl VolumeManagerModule {
         self.show_message("Mounting...");
     }
 
-    /// Same as `start_mount`, but for a Default-mode volume mounted with
-    /// moku's already-unlocked app-vault key instead of a typed password —
-    /// the no-reprompt fast path (see the `KeyCode::Char('m') | KeyCode::
-    /// Enter` handler below for when this is used instead of `start_mount`).
-    fn start_mount_with_key(
+    /// Same as `start_mount`, but for a new-scheme Default-mode volume on
+    /// the no-reprompt fast path: the worker gets only this volume's
+    /// derived key (never the app vault's master key).
+    pub(super) fn start_mount_with_volume_key(
         &mut self,
         volume_id: String,
         display_name: String,
         mountpoint: String,
-        key: Arc<SecretBox<SafeKey>>,
+        volume_key: SecretBox<SafeKey>,
     ) {
         if self.busy {
             return;
@@ -187,7 +186,7 @@ impl VolumeManagerModule {
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
             let msg =
-                match worker::spawn_mount_process_with_key(&volume_id, &mountpoint, key.as_ref())
+                match worker::spawn_mount_process_with_volume_key(&volume_id, &mountpoint, &volume_key)
                     .await
                 {
                     Ok(worker::MountOutcome::Ready { pid }) => {
@@ -350,7 +349,7 @@ impl TuiModule for VolumeManagerModule {
         }
 
         if self.prompt.is_some() {
-            return self.handle_prompt_event(event);
+            return self.handle_prompt_event(event, ctx);
         }
 
         if self.create_form.is_some() {
@@ -436,7 +435,6 @@ impl TuiModule for VolumeManagerModule {
                                 && registry::volume_dir(&volume_id)
                                     .map(|dir| !registry::has_own_vault(&dir))
                                     .unwrap_or(false);
-                            let key = fast_path.then(|| ctx.session.current()).flatten();
 
                             self.prompt = Some(PasswordPrompt {
                                 volume_id,
@@ -444,7 +442,7 @@ impl TuiModule for VolumeManagerModule {
                                 mountpoint,
                                 focus: MountField::Mountpoint,
                                 input: zeroize::Zeroizing::new(String::new()),
-                                key,
+                                use_app_key: fast_path,
                             });
                         }
                     }

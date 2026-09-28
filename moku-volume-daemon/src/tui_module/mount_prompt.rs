@@ -1,11 +1,9 @@
 //! The mount-password prompt (`PasswordPrompt`) — shown before mounting a
 //! volume, always visible even on the no-reprompt fast path (see
-//! `VolumeManagerModule::start_mount_with_key`), just without a password
-//! field in that case. Split out of `tui_module.rs` the same way
+//! `VolumeManagerModule::start_mount_with_volume_key`), just without a
+//! password field in that case. Split out of `tui_module.rs` the same way
 //! `modules/moku-settings/src/tabs/*.rs` splits one file per self-contained
 //! sub-view.
-
-use std::sync::Arc;
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -16,16 +14,16 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, Paragraph},
 };
-use secrecy::SecretBox;
 use zeroize::Zeroizing;
 
-use moku_core::{MokuTheme, SafeKey};
+use moku_core::{AppContext, MokuTheme};
 
 use super::VolumeManagerModule;
+use crate::registry;
 
 /// Which field of the mount prompt currently has keyboard focus.
 /// `Password` only exists (and is only reachable via `Tab`) when
-/// `PasswordPrompt::key` is `None` — a Default-mode volume with the app
+/// `PasswordPrompt::use_app_key` is false — a Default-mode volume with the app
 /// vault already unlocked needs no password at all, only a mountpoint to
 /// (optionally) confirm or change.
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -49,17 +47,20 @@ pub(super) struct PasswordPrompt {
     /// Zeroized on drop — the actual mount password while it's being
     /// typed, not just a display string.
     pub(super) input: Zeroizing<String>,
-    /// Some(key): the app vault's already-unlocked master key (Default
-    /// mode, verified when the main vault was unlocked) — no password
-    /// field is shown or needed, Enter mounts with just the mountpoint.
-    /// None: a password must be typed (Custom mode, an old-scheme
+    /// true: a new-scheme Default-mode volume whose key derives from the
+    /// app vault. No password field; on Enter the app key is read from
+    /// the session AT THAT MOMENT, the volume key is derived, and the app
+    /// key is dropped right away. The prompt itself never holds a key, so
+    /// a lock (ctrl-l, auto-lock) while it is open really does lock, and
+    /// Enter afterwards refuses to mount.
+    /// false: a password must be typed (Custom mode, an old-scheme
     /// Default-mode volume with its own vault, or a currently-locked main
     /// vault) — the Password field is shown too.
-    pub(super) key: Option<Arc<SecretBox<SafeKey>>>,
+    pub(super) use_app_key: bool,
 }
 
 impl VolumeManagerModule {
-    pub(super) fn handle_prompt_event(&mut self, event: &Event) -> Result<bool> {
+    pub(super) fn handle_prompt_event(&mut self, event: &Event, ctx: &AppContext) -> Result<bool> {
         let Some(prompt) = &mut self.prompt else {
             return Ok(false);
         };
@@ -74,20 +75,23 @@ impl VolumeManagerModule {
                 let volume_id = prompt.volume_id.clone();
                 let display_name = prompt.display_name.clone();
                 let mountpoint = prompt.mountpoint.clone();
-                match prompt.key.clone() {
-                    Some(key) => {
-                        self.prompt = None;
-                        self.start_mount_with_key(volume_id, display_name, mountpoint, key);
-                    }
-                    None => {
-                        let password = prompt.input.to_string();
-                        self.prompt = None;
-                        self.start_mount(volume_id, display_name, mountpoint, password);
-                    }
+                if prompt.use_app_key {
+                    self.prompt = None;
+                    let Some(app_key) = ctx.session.current() else {
+                        self.show_message("Main vault is locked, unlock it first.");
+                        return Ok(true);
+                    };
+                    let volume_key = registry::derive_default_volume_master_key(&app_key, &volume_id);
+                    drop(app_key);
+                    self.start_mount_with_volume_key(volume_id, display_name, mountpoint, volume_key);
+                } else {
+                    let password = prompt.input.to_string();
+                    self.prompt = None;
+                    self.start_mount(volume_id, display_name, mountpoint, password);
                 }
             }
             KeyCode::Esc => self.prompt = None,
-            KeyCode::Tab if prompt.key.is_none() => {
+            KeyCode::Tab if !prompt.use_app_key => {
                 prompt.focus = match prompt.focus {
                     MountField::Mountpoint => MountField::Password,
                     MountField::Password => MountField::Mountpoint,
@@ -148,7 +152,7 @@ impl VolumeManagerModule {
             ),
             field_style(prompt.focus == MountField::Mountpoint),
         )];
-        if prompt.key.is_none() {
+        if !prompt.use_app_key {
             let masked: String = prompt.input.chars().map(|_| '•').collect();
             lines.push(Line::styled(
                 format!(
@@ -171,7 +175,7 @@ impl VolumeManagerModule {
             .style(Style::default().fg(theme.base_fg).bg(theme.base_bg));
         frame.render_widget(p, box_area);
 
-        let hint = if prompt.key.is_none() {
+        let hint = if !prompt.use_app_key {
             "[Tab] Switch field  [Enter] Mount  [Esc] Cancel"
         } else {
             "[Enter] Mount  [Esc] Cancel"
@@ -216,23 +220,21 @@ mod tests {
         Event::Key(KeyEvent::new(code, KeyModifiers::empty()))
     }
 
-    fn mount_prompt(key: Option<Arc<SecretBox<SafeKey>>>) -> PasswordPrompt {
+    fn mount_prompt(use_app_key: bool) -> PasswordPrompt {
         PasswordPrompt {
             volume_id: "vol-1".to_string(),
             display_name: "vol-1".to_string(),
             mountpoint: "M:".to_string(),
             focus: MountField::Mountpoint,
             input: Zeroizing::new(String::new()),
-            key,
+            use_app_key,
         }
     }
 
     #[tokio::test]
     async fn test_mount_prompt_char_input_routes_to_mountpoint_when_no_password_needed() {
         let mut module = VolumeManagerModule::new();
-        module.prompt = Some(mount_prompt(Some(Arc::new(SecretBox::new(Box::new(
-            SafeKey([1u8; 32]),
-        ))))));
+        module.prompt = Some(mount_prompt(true));
         let mut ctx = create_test_context().await;
 
         module
@@ -245,7 +247,7 @@ mod tests {
     #[tokio::test]
     async fn test_mount_prompt_tab_switches_fields_when_password_needed() {
         let mut module = VolumeManagerModule::new();
-        module.prompt = Some(mount_prompt(None));
+        module.prompt = Some(mount_prompt(false));
         let mut ctx = create_test_context().await;
 
         assert_eq!(
@@ -270,22 +272,43 @@ mod tests {
     #[tokio::test]
     async fn test_mount_prompt_enter_with_key_submits_and_closes() {
         let mut module = VolumeManagerModule::new();
-        module.prompt = Some(mount_prompt(Some(Arc::new(SecretBox::new(Box::new(
-            SafeKey([2u8; 32]),
-        ))))));
+        module.prompt = Some(mount_prompt(true));
         let mut ctx = create_test_context().await;
+        let app_key = SecurityManager::derive_key("pw", &[2u8; 16]).await.unwrap();
+        ctx.session.unlock(app_key);
 
         module
             .handle_event(&key(KeyCode::Enter), &mut ctx)
             .await
             .unwrap();
         assert!(module.prompt.is_none());
+        assert!(module.busy, "an unlocked vault starts the mount");
+    }
+
+    /// Regression: the prompt used to capture the app master key when it
+    /// opened, so locking the vault while it was open didn't stop the
+    /// mount (and kept the key alive in memory).
+    #[tokio::test]
+    async fn test_mount_prompt_enter_after_the_vault_was_locked_does_not_mount() {
+        let mut module = VolumeManagerModule::new();
+        let mut ctx = create_test_context().await;
+        let app_key = SecurityManager::derive_key("pw", &[2u8; 16]).await.unwrap();
+        ctx.session.unlock(app_key);
+        module.prompt = Some(mount_prompt(true));
+
+        ctx.session.lock();
+        module
+            .handle_event(&key(KeyCode::Enter), &mut ctx)
+            .await
+            .unwrap();
+        assert!(module.prompt.is_none());
+        assert!(!module.busy, "no mount may start with a locked vault");
     }
 
     #[tokio::test]
     async fn test_mount_prompt_enter_without_key_submits_and_closes() {
         let mut module = VolumeManagerModule::new();
-        let mut prompt = mount_prompt(None);
+        let mut prompt = mount_prompt(false);
         prompt.focus = MountField::Password;
         prompt.input = Zeroizing::new("hunter2".to_string());
         module.prompt = Some(prompt);
@@ -301,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn test_mount_prompt_esc_cancels() {
         let mut module = VolumeManagerModule::new();
-        module.prompt = Some(mount_prompt(None));
+        module.prompt = Some(mount_prompt(false));
         let mut ctx = create_test_context().await;
 
         module
