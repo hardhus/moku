@@ -40,6 +40,10 @@ pub struct BookmarkModule {
     state: ListState,
     input_buffer: String,
     mode: AppMode,
+    /// `Some(reason)` when stored bookmarks couldn't be loaded. The module
+    /// then stays read-only (banner, every mutating key refused) so the
+    /// unreadable-but-intact data on disk is never overwritten.
+    load_error: Option<String>,
 }
 
 impl Default for BookmarkModule {
@@ -50,6 +54,7 @@ impl Default for BookmarkModule {
             state: ListState::default(),
             input_buffer: String::new(),
             mode: AppMode::Normal,
+            load_error: None,
         }
     }
 }
@@ -179,9 +184,25 @@ impl ModuleMeta for BookmarkModule {
     }
 }
 
+/// Keys that add, delete, import, dedupe, paste or export bookmarks: all
+/// refused while the module is read-only after a failed load.
+fn is_mutating_key(event: &Event, ctx: &AppContext) -> bool {
+    if moku_core::is_delete_bypass(event) {
+        return true;
+    }
+    if resolve_event(event, &ctx.config.load().keys, None) == Command::Delete {
+        return true;
+    }
+    matches!(
+        event,
+        Event::Key(key) if matches!(key.code, KeyCode::Char('a' | 'p' | 'i' | 'x' | 'e'))
+    )
+}
+
 #[async_trait]
 impl TuiModule for BookmarkModule {
     async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
+        self.load_error = None;
         match BookmarkEngine::load_all(ctx).await {
             Ok(loaded) => {
                 self.items = loaded;
@@ -190,13 +211,19 @@ impl TuiModule for BookmarkModule {
                 if !self.filtered_items.is_empty() {
                     self.state.select(Some(0));
                 }
-                Ok(())
             }
+            // Don't return the error: an `Err` from `init` tears down the
+            // whole app. Stay open, read-only, with the reason on screen.
             Err(e) => {
-                ctx.show_error(format!("Load failed: {}", e));
-                Err(e)
+                self.items.clear();
+                self.refresh_filter();
+                self.state.select(None);
+                let reason = format!("{e:#}");
+                ctx.show_error(format!("Load failed: {reason}"));
+                self.load_error = Some(reason);
             }
         }
+        Ok(())
     }
 
     async fn handle_event(&mut self, event: &Event, ctx: &mut AppContext) -> Result<bool> {
@@ -291,6 +318,13 @@ impl TuiModule for BookmarkModule {
                 moku_core::ConfirmDeleteKey::Other => {}
             }
             return Ok(changed);
+        }
+
+        // Read-only after a failed load: refuse everything that would
+        // change (or export) the in-memory list, before any dispatch.
+        if self.load_error.is_some() && is_mutating_key(event, ctx) {
+            ctx.show_warning("Bookmarks are read-only: stored bookmarks failed to load.");
+            return Ok(true);
         }
 
         // Shift+D bypasses the confirmation prompt entirely and deletes
@@ -457,6 +491,19 @@ impl TuiModule for BookmarkModule {
             }
         };
 
+        let area = match &self.load_error {
+            Some(reason) => {
+                let split = ratatui::layout::Layout::vertical([
+                    ratatui::layout::Constraint::Length(3),
+                    ratatui::layout::Constraint::Min(0),
+                ])
+                .split(area);
+                moku_core::draw_load_error_banner(frame, split[0], theme, reason);
+                split[1]
+            }
+            None => area,
+        };
+
         BookmarkUi::draw(
             frame,
             area,
@@ -476,8 +523,10 @@ impl TuiModule for BookmarkModule {
         if needs_vault && !ctx.session.is_unlocked() {
             return Some(ModuleStatus::locked());
         }
-        let items = BookmarkEngine::load_all(ctx).await.unwrap_or_default();
-        Some(ModuleStatus::normal(format!("{} bookmarks", items.len())))
+        match BookmarkEngine::load_all(ctx).await {
+            Ok(items) => Some(ModuleStatus::normal(format!("{} bookmarks", items.len()))),
+            Err(_) => Some(ModuleStatus::error("Failed to load bookmarks")),
+        }
     }
 }
 
@@ -508,6 +557,54 @@ mod confirm_delete_tests {
         );
 
         AppContext::new(config, session, security, storage)
+    }
+
+    /// Stores bookmarks under key A, then leaves the session unlocked with
+    /// a different key B, so loading fails: stored-but-unreadable data.
+    async fn ctx_with_unreadable_bookmarks() -> AppContext {
+        let ctx = create_test_context().await;
+        let key_a = SecurityManager::derive_key("key-a", &[3u8; 16]).await.unwrap();
+        ctx.session.unlock(key_a);
+        let items = vec![Bookmark::new("https://example.com/keep".to_string())];
+        BookmarkEngine::save_all(&ctx, &items).await.unwrap();
+        let key_b = SecurityManager::derive_key("key-b", &[3u8; 16]).await.unwrap();
+        ctx.session.unlock(key_b);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn test_unreadable_bookmarks_keep_module_open_read_only_and_never_overwrite() {
+        let mut ctx = ctx_with_unreadable_bookmarks().await;
+        let mut module = BookmarkModule::new();
+        // Must not return Err: that would tear down the whole app.
+        module.init(&mut ctx).await.unwrap();
+        assert!(module.load_error.is_some());
+        assert!(module.items.is_empty());
+
+        for (code, mods) in [
+            (KeyCode::Char('a'), KeyModifiers::empty()),
+            (KeyCode::Char('d'), KeyModifiers::empty()),
+            (KeyCode::Char('D'), KeyModifiers::SHIFT),
+            (KeyCode::Char('x'), KeyModifiers::empty()),
+            (KeyCode::Char('i'), KeyModifiers::empty()),
+        ] {
+            let ev = Event::Key(KeyEvent::new(code, mods));
+            module.handle_event(&ev, &mut ctx).await.unwrap();
+        }
+        assert!(module.mode == AppMode::Normal, "no add/confirm mode while read-only");
+
+        let key_a = SecurityManager::derive_key("key-a", &[3u8; 16]).await.unwrap();
+        ctx.session.unlock(key_a);
+        let stored = BookmarkEngine::load_all(&ctx).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].url, "https://example.com/keep");
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_reports_bookmark_load_error() {
+        let ctx = ctx_with_unreadable_bookmarks().await;
+        let status = BookmarkModule::new().dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Error);
     }
 
     async fn module_with_one_bookmark() -> (BookmarkModule, AppContext) {

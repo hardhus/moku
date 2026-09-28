@@ -208,7 +208,7 @@ impl CliModule for SecretsCliModule {
                 totp,
                 notes,
             }) => {
-                let mut entries = engine::load_entries(storage).await;
+                let mut entries = engine::load_entries(storage).await?;
                 if engine::find_by_name(&entries, &name).is_some() {
                     bail!("an entry named '{name}' already exists");
                 }
@@ -240,7 +240,7 @@ impl CliModule for SecretsCliModule {
                 println!("✅ Added '{name}'");
             }
             Some(SecretsCmd::List { category }) => {
-                let entries = engine::load_entries(storage).await;
+                let entries = engine::load_entries(storage).await?;
                 let filtered: Vec<&SecretEntry> = entries
                     .iter()
                     .filter(|e| {
@@ -262,7 +262,7 @@ impl CliModule for SecretsCliModule {
                 }
             }
             Some(SecretsCmd::Show { name, reveal }) => {
-                let entries = engine::load_entries(storage).await;
+                let entries = engine::load_entries(storage).await?;
                 let entry = engine::find_by_name(&entries, &name)
                     .ok_or_else(|| anyhow!("no entry named '{name}'"))?;
                 println!("Name:     {}", entry.name);
@@ -282,7 +282,7 @@ impl CliModule for SecretsCliModule {
                 }
             }
             Some(SecretsCmd::Totp { name }) => {
-                let entries = engine::load_entries(storage).await;
+                let entries = engine::load_entries(storage).await?;
                 let entry = engine::find_by_name(&entries, &name)
                     .ok_or_else(|| anyhow!("no entry named '{name}'"))?;
                 let seed = entry
@@ -292,7 +292,7 @@ impl CliModule for SecretsCliModule {
                 println!("{}", engine::totp_code_now(seed)?);
             }
             Some(SecretsCmd::Remove { name }) => {
-                let mut entries = engine::load_entries(storage).await;
+                let mut entries = engine::load_entries(storage).await?;
                 let before = entries.len();
                 entries.retain(|e| !e.name.eq_ignore_ascii_case(&name));
                 if entries.len() == before {
@@ -302,7 +302,7 @@ impl CliModule for SecretsCliModule {
                 println!("🧹 Removed '{name}'");
             }
             Some(SecretsCmd::Export { format, out }) => {
-                let entries = engine::load_entries(storage).await;
+                let entries = engine::load_entries(storage).await?;
                 let bytes = match format {
                     ExportFormatArg::Json => engine::export_plain(&entries, PlainFormat::Json)?,
                     ExportFormatArg::Csv => engine::export_plain(&entries, PlainFormat::Csv)?,
@@ -324,7 +324,7 @@ impl CliModule for SecretsCliModule {
                         engine::import_encrypted(&data, &password).await?
                     }
                 };
-                let mut entries = engine::load_entries(storage).await;
+                let mut entries = engine::load_entries(storage).await?;
                 let mut added = 0usize;
                 for entry in imported {
                     if engine::find_by_name(&entries, &entry.name).is_none() {

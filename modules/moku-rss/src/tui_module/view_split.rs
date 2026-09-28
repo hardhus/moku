@@ -211,9 +211,11 @@ pub(super) async fn handle_event(
                                 let mut slot = result_slot.lock().unwrap();
                                 *slot = Some(Err(e.to_string()));
                             } else {
-                                let all_items = RssEngine::load_items(&storage).await;
+                                let all_items = RssEngine::load_items(&storage)
+                                    .await
+                                    .map_err(|e| format!("{e:#}"));
                                 let mut slot = result_slot.lock().unwrap();
-                                *slot = Some(Ok(all_items));
+                                *slot = Some(all_items);
                             }
                         });
                         changed = true;

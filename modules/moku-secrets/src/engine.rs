@@ -6,8 +6,12 @@ use crate::model::SecretEntry;
 
 const STORAGE_KEY: &str = "entries";
 
-pub async fn load_entries(storage: &StorageManager) -> Vec<SecretEntry> {
-    storage.load(ModuleId::SECRETS.as_str(), STORAGE_KEY).await.unwrap_or_default()
+/// Loads every stored secret. Nothing stored yet is an empty list; any
+/// real failure (locked vault, wrong key, corrupt record, shape change) is
+/// an `Err`, never an empty list, so no caller can mistake unreadable data
+/// for "no secrets" and then save over it.
+pub async fn load_entries(storage: &StorageManager) -> Result<Vec<SecretEntry>> {
+    Ok(storage.load_opt(ModuleId::SECRETS.as_str(), STORAGE_KEY).await?.unwrap_or_default())
 }
 
 pub async fn save_entries(storage: &StorageManager, config: &MokuConfig, entries: &[SecretEntry]) -> Result<()> {

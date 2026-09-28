@@ -9,6 +9,7 @@ pub mod storage;
 pub mod theme;
 pub mod toast;
 pub mod util;
+pub mod widgets;
 
 pub use config::{ConfigManager, MokuConfig};
 pub use context::{AppContext, CliContext, DaemonContext, SuspendRequest};
@@ -25,3 +26,4 @@ pub use security::{SafeKey, SecurityManager, VaultSession};
 pub use storage::{CURRENT_KEY_SCHEME, MigrationReport, StorageManager, resolve_encryption};
 pub use theme::MokuTheme;
 pub use toast::{ToastManager, ToastType};
+pub use widgets::draw_load_error_banner;

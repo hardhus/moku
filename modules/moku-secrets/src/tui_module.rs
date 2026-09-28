@@ -83,6 +83,10 @@ pub struct SecretsModule {
     /// entry — plain `d` sets this instead of deleting right away;
     /// `Shift+D` (`moku_core::is_delete_bypass`) still deletes immediately.
     confirm_delete: Option<usize>,
+    /// `Some(reason)` when stored secrets couldn't be loaded. The module
+    /// then stays read-only (banner, no add/delete/export, no save) so the
+    /// unreadable-but-intact data on disk is never overwritten.
+    load_error: Option<String>,
 }
 
 impl SecretsModule {
@@ -95,10 +99,23 @@ impl SecretsModule {
             add: None,
             export: None,
             confirm_delete: None,
+            load_error: None,
         }
     }
 
+    fn refuse_if_read_only(&self, ctx: &mut AppContext) -> bool {
+        if self.load_error.is_some() {
+            ctx.show_warning("Secrets are read-only: stored secrets failed to load.");
+            return true;
+        }
+        false
+    }
+
     async fn save(&self, ctx: &mut AppContext) {
+        if self.load_error.is_some() {
+            ctx.show_error("Not saved: secrets are read-only because stored secrets failed to load.");
+            return;
+        }
         if let Err(e) = engine::save_entries(&ctx.storage, &ctx.config.load(), &self.entries).await
         {
             ctx.show_error(format!("Save error: {e}"));
@@ -526,9 +543,21 @@ impl ModuleMeta for SecretsModule {
 #[async_trait]
 impl TuiModule for SecretsModule {
     async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
-        self.entries = engine::load_entries(&ctx.storage).await;
-        if !self.entries.is_empty() {
-            self.state.select(Some(0));
+        self.load_error = None;
+        match engine::load_entries(&ctx.storage).await {
+            Ok(entries) => {
+                self.entries = entries;
+                if !self.entries.is_empty() {
+                    self.state.select(Some(0));
+                }
+            }
+            Err(e) => {
+                self.entries.clear();
+                self.state.select(None);
+                let reason = format!("{e:#}");
+                ctx.show_error(format!("Failed to load secrets: {reason}"));
+                self.load_error = Some(reason);
+            }
         }
         Ok(())
     }
@@ -555,7 +584,9 @@ impl TuiModule for SecretsModule {
         // immediately — checked as a raw key before the normal dispatch,
         // same shape as other raw Shift-key checks in this app.
         if moku_core::is_delete_bypass(event) {
-            self.delete_selected(ctx).await;
+            if !self.refuse_if_read_only(ctx) {
+                self.delete_selected(ctx).await;
+            }
             return Ok(true);
         }
 
@@ -570,6 +601,9 @@ impl TuiModule for SecretsModule {
             _ => {}
         }
 
+        if matches!(key.code, KeyCode::Char('a' | 'd' | 'e')) && self.refuse_if_read_only(ctx) {
+            return Ok(true);
+        }
         match key.code {
             KeyCode::Char('a') => {
                 self.add = Some(AddState {
@@ -619,6 +653,14 @@ impl TuiModule for SecretsModule {
             return;
         }
 
+        let area = match &self.load_error {
+            Some(reason) => {
+                let split = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
+                moku_core::draw_load_error_banner(frame, split[0], theme, reason);
+                split[1]
+            }
+            None => area,
+        };
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
         let panes = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(chunks[0]);
@@ -717,8 +759,10 @@ impl TuiModule for SecretsModule {
         if needs_vault && !ctx.session.is_unlocked() {
             return Some(ModuleStatus::locked());
         }
-        let entries = engine::load_entries(&ctx.storage).await;
-        Some(ModuleStatus::normal(format!("{} secrets", entries.len())))
+        match engine::load_entries(&ctx.storage).await {
+            Ok(entries) => Some(ModuleStatus::normal(format!("{} secrets", entries.len()))),
+            Err(_) => Some(ModuleStatus::error("Failed to load secrets")),
+        }
     }
 }
 
@@ -750,6 +794,50 @@ mod confirm_delete_tests {
         );
 
         AppContext::new(config, session, security, storage)
+    }
+
+    /// Stores secrets under key A, then leaves the session unlocked with a
+    /// different key B, so loading fails: stored-but-unreadable data.
+    async fn ctx_with_unreadable_secrets() -> AppContext {
+        let ctx = create_test_context().await;
+        let key_a = SecurityManager::derive_key("key-a", &[2u8; 16]).await.unwrap();
+        ctx.session.unlock(key_a);
+        let entries = vec![SecretEntry::new("keep".to_string(), "v".to_string())];
+        engine::save_entries(&ctx.storage, &ctx.config.load(), &entries).await.unwrap();
+        let key_b = SecurityManager::derive_key("key-b", &[2u8; 16]).await.unwrap();
+        ctx.session.unlock(key_b);
+        ctx
+    }
+
+    #[tokio::test]
+    async fn test_unreadable_secrets_make_module_read_only_and_never_overwrite() {
+        let mut ctx = ctx_with_unreadable_secrets().await;
+        let mut module = SecretsModule::new();
+        module.init(&mut ctx).await.unwrap();
+        assert!(module.load_error.is_some());
+        assert!(module.entries.is_empty());
+
+        for code in [KeyCode::Char('a'), KeyCode::Char('d'), KeyCode::Char('e')] {
+            let ev = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+            module.handle_event(&ev, &mut ctx).await.unwrap();
+        }
+        assert!(module.add.is_none() && module.export.is_none() && module.confirm_delete.is_none());
+        let shift_d = Event::Key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        module.handle_event(&shift_d, &mut ctx).await.unwrap();
+        module.save(&mut ctx).await;
+
+        let key_a = SecurityManager::derive_key("key-a", &[2u8; 16]).await.unwrap();
+        ctx.session.unlock(key_a);
+        let stored = engine::load_entries(&ctx.storage).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].name, "keep");
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_reports_secrets_load_error() {
+        let ctx = ctx_with_unreadable_secrets().await;
+        let status = SecretsModule::new().dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Error);
     }
 
     async fn module_with_one_entry() -> (SecretsModule, AppContext) {

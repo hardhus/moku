@@ -31,11 +31,14 @@ const MAX_ITEMS: usize = 200;
 pub struct RssEngine;
 
 impl RssEngine {
-    pub async fn load_feeds(storage: &moku_core::StorageManager) -> Vec<FeedSubscription> {
-        storage
-            .load(STORAGE_NS, FEEDS_KEY)
-            .await
-            .unwrap_or_default()
+    /// Nothing stored yet is an empty list; any real failure (corrupt
+    /// record, locked vault if RSS is encrypted, shape change) is an `Err`,
+    /// never an empty list, so no caller saves over unreadable data.
+    pub async fn load_feeds(storage: &moku_core::StorageManager) -> Result<Vec<FeedSubscription>> {
+        Ok(storage
+            .load_opt(STORAGE_NS, FEEDS_KEY)
+            .await?
+            .unwrap_or_default())
     }
 
     pub async fn save_feeds(
@@ -49,11 +52,12 @@ impl RssEngine {
             .await
     }
 
-    pub async fn load_items(storage: &moku_core::StorageManager) -> Vec<FeedItem> {
-        storage
-            .load(STORAGE_NS, ITEMS_KEY)
-            .await
-            .unwrap_or_default()
+    /// Same contract as `load_feeds`.
+    pub async fn load_items(storage: &moku_core::StorageManager) -> Result<Vec<FeedItem>> {
+        Ok(storage
+            .load_opt(STORAGE_NS, ITEMS_KEY)
+            .await?
+            .unwrap_or_default())
     }
 
     /// Best-effort peek at a feed's own declared title, without storing
@@ -83,8 +87,11 @@ impl RssEngine {
         storage: &moku_core::StorageManager,
         config: &moku_core::MokuConfig,
     ) -> Result<Vec<FeedItem>> {
-        let mut feeds = Self::load_feeds(storage).await;
-        let mut items = Self::load_items(storage).await;
+        // `?`: if either list can't be read, fetch nothing and write
+        // nothing, rather than appending new items to an empty list and
+        // saving that over the unreadable stored one.
+        let mut feeds = Self::load_feeds(storage).await?;
+        let mut items = Self::load_items(storage).await?;
         let known_ids: std::collections::HashSet<String> =
             items.iter().map(|i| i.id.clone()).collect();
 

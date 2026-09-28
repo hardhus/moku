@@ -7,17 +7,16 @@ use crate::model::Bookmark;
 pub struct BookmarkEngine;
 
 impl BookmarkEngine {
-    /// Loads the entire bookmark list securely from encrypted storage.
+    /// Loads the entire bookmark list. Nothing stored yet is an empty list;
+    /// any real failure (locked vault, wrong key, corrupt record, shape
+    /// change) is an `Err`, never an empty list, so unreadable data can't
+    /// be mistaken for "no bookmarks" and then saved over.
     pub async fn load_all(ctx: &AppContext) -> Result<Vec<Bookmark>> {
-        let result: Result<Vec<Bookmark>> = ctx
+        Ok(ctx
             .storage
-            .load(ModuleId::BOOKMARK.as_str(), "bookmarks_encrypted")
-            .await;
-
-        match result {
-            Ok(items) => Ok(items),
-            Err(_) => Ok(Vec::new()),
-        }
+            .load_opt(ModuleId::BOOKMARK.as_str(), "bookmarks_encrypted")
+            .await?
+            .unwrap_or_default())
     }
 
     /// Atomically saves the bookmark list to disk (encrypted unless

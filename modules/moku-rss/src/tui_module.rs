@@ -72,6 +72,10 @@ pub struct RssTuiModule {
     /// title_or_none)`. Kept on the module (not the transient `RssView`)
     /// since the spawned task outlives any single view value.
     title_suggestion: TitleSuggestionSlot,
+    /// `Some(reason)` when stored feeds/items couldn't be loaded. The module
+    /// then stays read-only (banner; add/edit/delete/favorite/refresh
+    /// refused) so the unreadable-but-intact data is never overwritten.
+    load_error: Option<String>,
 }
 
 /// Slot a background `[r]`-refresh task reports into — shared between
@@ -100,8 +104,20 @@ impl RssTuiModule {
             refresh_result: Arc::new(Mutex::new(None)),
             is_refreshing: false,
             title_suggestion: Arc::new(Mutex::new(None)),
+            load_error: None,
         }
     }
+}
+
+/// Split-view keys that change stored feeds/items: refresh, add, edit,
+/// favorite and delete (plain `d` and `Shift+D`).
+fn is_mutating_key(event: &Event) -> bool {
+    use crossterm::event::KeyCode;
+    moku_core::is_delete_bypass(event)
+        || matches!(
+            event,
+            Event::Key(key) if matches!(key.code, KeyCode::Char('r' | 'a' | 'e' | 'f' | 'd'))
+        )
 }
 
 /// A URL's host with any leading `www.` stripped (same `reqwest::Url`
@@ -192,8 +208,27 @@ impl ModuleMeta for RssTuiModule {
 #[async_trait]
 impl TuiModule for RssTuiModule {
     async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
-        self.feeds = RssEngine::load_feeds(&ctx.storage).await;
-        self.items = RssEngine::load_items(&ctx.storage).await;
+        self.load_error = None;
+        let loaded = async {
+            Ok::<_, anyhow::Error>((
+                RssEngine::load_feeds(&ctx.storage).await?,
+                RssEngine::load_items(&ctx.storage).await?,
+            ))
+        }
+        .await;
+        match loaded {
+            Ok((feeds, items)) => {
+                self.feeds = feeds;
+                self.items = items;
+            }
+            Err(e) => {
+                self.feeds.clear();
+                self.items.clear();
+                let reason = format!("{e:#}");
+                ctx.show_error(format!("Failed to load feeds: {reason}"));
+                self.load_error = Some(reason);
+            }
+        }
         Ok(())
     }
 
@@ -221,6 +256,14 @@ impl TuiModule for RssTuiModule {
             changed = true;
         }
 
+        if self.load_error.is_some()
+            && matches!(self.view, RssView::Split { .. })
+            && is_mutating_key(event)
+        {
+            ctx.show_warning("RSS is read-only: stored feeds failed to load.");
+            return Ok(true);
+        }
+
         // Destructure self to allow disjoint mutable borrows of fields —
         // each view module below only takes exactly the fields it needs.
         let RssTuiModule {
@@ -230,6 +273,7 @@ impl TuiModule for RssTuiModule {
             refresh_result,
             is_refreshing,
             title_suggestion,
+            load_error: _,
         } = self;
 
         let view_changed = match view {
@@ -278,6 +322,15 @@ impl TuiModule for RssTuiModule {
             }
         }
 
+        let area = match &self.load_error {
+            Some(reason) => {
+                let split = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).split(area);
+                moku_core::draw_load_error_banner(frame, split[0], theme, reason);
+                split[1]
+            }
+            None => area,
+        };
+
         // Destructure self to allow disjoint field accesses
         let RssTuiModule {
             feeds,
@@ -286,6 +339,7 @@ impl TuiModule for RssTuiModule {
             refresh_result: _,
             is_refreshing,
             title_suggestion: _,
+            load_error: _,
         } = self;
 
         match view {
@@ -301,8 +355,12 @@ impl TuiModule for RssTuiModule {
     }
 
     async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
-        let feeds = RssEngine::load_feeds(&ctx.storage).await;
-        let items = RssEngine::load_items(&ctx.storage).await;
+        let (Ok(feeds), Ok(items)) = (
+            RssEngine::load_feeds(&ctx.storage).await,
+            RssEngine::load_items(&ctx.storage).await,
+        ) else {
+            return Some(ModuleStatus::error("Failed to load feeds"));
+        };
         Some(ModuleStatus::normal(format!(
             "{} feeds, {} articles",
             feeds.len(),
@@ -616,6 +674,57 @@ mod dashboard_summary_tests {
         );
 
         AppContext::new(config, session, security, storage)
+    }
+
+    /// A stored `feeds` record that no longer matches the expected shape:
+    /// stored-but-unreadable data (RSS is plaintext, so a wrong key can't
+    /// be used to simulate it).
+    async fn ctx_with_unreadable_feeds() -> AppContext {
+        let ctx = create_test_context().await;
+        ctx.storage.save("rss", "feeds", &42u32, false).await.unwrap();
+        ctx
+    }
+
+    #[tokio::test]
+    async fn test_unreadable_feeds_make_module_read_only_and_never_overwrite() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut ctx = ctx_with_unreadable_feeds().await;
+        let mut module = RssTuiModule::new();
+        module.init(&mut ctx).await.unwrap();
+        assert!(module.load_error.is_some());
+
+        for (code, mods) in [
+            (KeyCode::Char('a'), KeyModifiers::empty()),
+            (KeyCode::Char('r'), KeyModifiers::empty()),
+            (KeyCode::Char('f'), KeyModifiers::empty()),
+            (KeyCode::Char('d'), KeyModifiers::empty()),
+            (KeyCode::Char('D'), KeyModifiers::SHIFT),
+        ] {
+            let ev = Event::Key(KeyEvent::new(code, mods));
+            module.handle_event(&ev, &mut ctx).await.unwrap();
+        }
+        assert!(matches!(module.view, RssView::Split { .. }));
+        assert!(!module.is_refreshing, "refresh must not start while read-only");
+
+        let raw: u32 = ctx.storage.load("rss", "feeds").await.unwrap();
+        assert_eq!(raw, 42, "the stored record must be untouched");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_all_refuses_to_write_when_stored_items_are_unreadable() {
+        let ctx = create_test_context().await;
+        ctx.storage.save("rss", "items", &42u32, false).await.unwrap();
+        assert!(RssEngine::fetch_all(&ctx.storage, &ctx.config.load()).await.is_err());
+        let raw: u32 = ctx.storage.load("rss", "items").await.unwrap();
+        assert_eq!(raw, 42);
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_reports_rss_load_error() {
+        let ctx = ctx_with_unreadable_feeds().await;
+        let status = RssTuiModule::new().dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Error);
     }
 
     #[tokio::test]

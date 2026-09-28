@@ -45,7 +45,9 @@ pub async fn resolve_secret_refs(raw_source: &str, storage: &StorageManager, var
     if names.is_empty() {
         return Ok(());
     }
-    let entries = moku_secrets::engine::load_entries(storage).await;
+    let entries = moku_secrets::engine::load_entries(storage)
+        .await
+        .context("failed to load secrets for {secrets.*} references")?;
     for name in names {
         let entry = moku_secrets::engine::find_by_name(&entries, &name)
             .ok_or_else(|| anyhow!("secrets.{name} is referenced but no such secret exists"))?;

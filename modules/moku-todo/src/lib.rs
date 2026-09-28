@@ -42,6 +42,12 @@ pub struct TodoModule {
     /// away; `Shift+D` (`moku_core::is_delete_bypass`) still deletes
     /// immediately, bypassing confirmation entirely.
     confirm_delete: Option<String>,
+    /// `Some(reason)` when the stored task list couldn't be loaded
+    /// (corrupt record, wrong key, shape change...). The module then stays
+    /// read-only, showing an error banner, and never saves: saving the
+    /// empty in-memory list would permanently overwrite the user's real
+    /// (still intact on disk) tasks.
+    load_error: Option<String>,
 }
 
 impl TodoModule {
@@ -54,10 +60,25 @@ impl TodoModule {
             input_buffer: String::new(),
             input_parent: None,
             confirm_delete: None,
+            load_error: None,
         }
     }
 
+    /// True (after warning the user) when a mutating action must be
+    /// refused because the stored data failed to load — see `load_error`.
+    fn refuse_if_read_only(&self, ctx: &mut AppContext) -> bool {
+        if self.load_error.is_some() {
+            ctx.show_warning("Todo is read-only: stored tasks failed to load.");
+            return true;
+        }
+        false
+    }
+
     async fn save(&self, ctx: &mut AppContext) {
+        if self.load_error.is_some() {
+            ctx.show_error("Not saved: todo is read-only because stored tasks failed to load.");
+            return;
+        }
         let encrypt =
             moku_core::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true);
         if let Err(e) = ctx
@@ -275,19 +296,31 @@ impl ModuleMeta for TodoModule {
 #[async_trait]
 impl TuiModule for TodoModule {
     async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
-        let loaded_items: Result<Vec<Task>> =
-            ctx.storage.load(ModuleId::TODO.as_str(), "items").await;
+        self.load_error = None;
+        let loaded_items: Result<Option<Vec<Task>>> =
+            ctx.storage.load_opt(ModuleId::TODO.as_str(), "items").await;
 
         match loaded_items {
-            Ok(items) => {
+            Ok(Some(items)) => {
                 self.items = items;
                 if !self.items.is_empty() {
                     self.state.select(Some(0));
                 }
             }
-            Err(_) => {
+            // Genuinely nothing stored yet: first run.
+            Ok(None) => {
                 self.items = vec![Task::new("Welcome to Moku! 👋".to_string(), None)];
+                self.state.select(Some(0));
                 self.save(ctx).await;
+            }
+            // Something IS stored but couldn't be read. Never treat that as
+            // "empty": stay read-only so nothing overwrites it.
+            Err(e) => {
+                self.items.clear();
+                self.state.select(None);
+                let reason = format!("{e:#}");
+                ctx.show_error(format!("Failed to load tasks: {reason}"));
+                self.load_error = Some(reason);
             }
         }
         Ok(())
@@ -351,10 +384,16 @@ impl TuiModule for TodoModule {
             && key.kind == KeyEventKind::Press
             && key.code == KeyCode::Tab
         {
+            if self.refuse_if_read_only(ctx) {
+                return Ok(true);
+            }
             self.start_add_subtask();
             return Ok(true);
         }
         if moku_core::is_delete_bypass(event) {
+            if self.refuse_if_read_only(ctx) {
+                return Ok(true);
+            }
             return Ok(self.delete_selected_immediately(ctx).await);
         }
 
@@ -373,6 +412,11 @@ impl TuiModule for TodoModule {
             Command::Down => self.next(),
             Command::Left => self.collapse_selected(),
             Command::Right => self.expand_selected(),
+            Command::Confirm | Command::Toggle | Command::Delete | Command::Add
+                if self.refuse_if_read_only(ctx) =>
+            {
+                true
+            }
             Command::Confirm | Command::Toggle => self.toggle_status(ctx).await,
             Command::Delete => self.start_confirm_delete(),
             Command::Add => {
@@ -385,6 +429,17 @@ impl TuiModule for TodoModule {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &MokuTheme) {
+        let area = match &self.load_error {
+            Some(reason) => {
+                let split = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(3), Constraint::Min(0)])
+                    .split(area);
+                moku_core::draw_load_error_banner(frame, split[0], theme, reason);
+                split[1]
+            }
+            None => area,
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(3)])
@@ -492,11 +547,10 @@ impl TuiModule for TodoModule {
         if needs_vault && !ctx.session.is_unlocked() {
             return Some(ModuleStatus::locked());
         }
-        let items: Vec<Task> = ctx
-            .storage
-            .load(ModuleId::TODO.as_str(), "items")
-            .await
-            .unwrap_or_default();
+        let items: Vec<Task> = match ctx.storage.load_opt(ModuleId::TODO.as_str(), "items").await {
+            Ok(items) => items.unwrap_or_default(),
+            Err(_) => return Some(ModuleStatus::error("Failed to load tasks")),
+        };
         let done = items.iter().filter(|t| t.completed).count();
         Some(ModuleStatus::normal(format!(
             "{} tasks, {} done",
@@ -752,5 +806,102 @@ mod tests {
         let status = module.dashboard_summary(&ctx).await.unwrap();
         assert_eq!(status.tone, moku_core::StatusTone::Normal);
         assert_eq!(status.text, "3 tasks, 0 done");
+    }
+
+    /// Stores `items` under key A, then leaves the session unlocked with a
+    /// DIFFERENT key B, so the next load fails to decrypt: a realistic
+    /// "something is stored but can't be read" state.
+    async fn ctx_with_unreadable_tasks(items: &[Task]) -> AppContext {
+        let ctx = create_test_context().await;
+        let key_a = SecurityManager::derive_key("key-a", &[1u8; 16])
+            .await
+            .unwrap();
+        ctx.session.unlock(key_a);
+        ctx.storage
+            .save(ModuleId::TODO.as_str(), "items", &items.to_vec(), true)
+            .await
+            .unwrap();
+        let key_b = SecurityManager::derive_key("key-b", &[1u8; 16])
+            .await
+            .unwrap();
+        ctx.session.unlock(key_b);
+        ctx
+    }
+
+    fn press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[tokio::test]
+    async fn test_init_with_nothing_stored_seeds_welcome_task() {
+        let mut module = TodoModule::new();
+        let mut ctx = create_test_context().await;
+        let key = SecurityManager::derive_key("k", &[1u8; 16]).await.unwrap();
+        ctx.session.unlock(key);
+        module.init(&mut ctx).await.unwrap();
+        assert!(module.load_error.is_none());
+        assert_eq!(module.items.len(), 1);
+        let stored: Option<Vec<Task>> = ctx
+            .storage
+            .load_opt(ModuleId::TODO.as_str(), "items")
+            .await
+            .unwrap();
+        assert_eq!(stored.map(|v| v.len()), Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_unreadable_stored_tasks_make_module_read_only_and_never_overwrite() {
+        let original = vec![task("1", "keep me", None), task("2", "me too", None)];
+        let mut ctx = ctx_with_unreadable_tasks(&original).await;
+        let mut module = TodoModule::new();
+
+        module.init(&mut ctx).await.unwrap();
+        assert!(module.load_error.is_some(), "load failure must be surfaced");
+        assert!(module.items.is_empty());
+
+        // Every mutating key is refused; none of them may reach storage.
+        for code in [
+            KeyCode::Char('a'),
+            KeyCode::Char(' '),
+            KeyCode::Char('d'),
+            KeyCode::Tab,
+        ] {
+            module.handle_event(&press(code), &mut ctx).await.unwrap();
+        }
+        assert!(
+            !module.input_mode,
+            "add input must not open while read-only"
+        );
+        module.save(&mut ctx).await;
+
+        // With the right key again, the original data is still intact.
+        let key_a = SecurityManager::derive_key("key-a", &[1u8; 16])
+            .await
+            .unwrap();
+        ctx.session.unlock(key_a);
+        let stored: Vec<Task> = ctx
+            .storage
+            .load(ModuleId::TODO.as_str(), "items")
+            .await
+            .unwrap();
+        let titles: Vec<&str> = stored.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["keep me", "me too"]);
+    }
+
+    #[tokio::test]
+    async fn test_read_only_todo_renders_load_error_banner() {
+        let mut ctx = ctx_with_unreadable_tasks(&[task("1", "x", None)]).await;
+        let mut module = TodoModule::new();
+        module.init(&mut ctx).await.unwrap();
+        let content = rendered_rows(&mut module).join("");
+        assert!(content.contains("Load failed"));
+        assert!(content.contains("READ-ONLY"));
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_summary_reports_load_error() {
+        let ctx = ctx_with_unreadable_tasks(&[task("1", "x", None)]).await;
+        let status = TodoModule::new().dashboard_summary(&ctx).await.unwrap();
+        assert_eq!(status.tone, moku_core::StatusTone::Error);
     }
 }

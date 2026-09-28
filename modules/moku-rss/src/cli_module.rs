@@ -77,7 +77,7 @@ impl CliModule for RssCliModule {
 
         match parsed.cmd.unwrap_or(RssCmd::List) {
             RssCmd::Add { url } => {
-                let mut feeds = RssEngine::load_feeds(storage).await;
+                let mut feeds = RssEngine::load_feeds(storage).await?;
                 if feeds.iter().any(|f| f.url == url) {
                     println!("This feed is already added: {url}");
                     return Ok(());
@@ -87,7 +87,7 @@ impl CliModule for RssCliModule {
                 println!("✅ Added: {url}");
             }
             RssCmd::Remove { url } => {
-                let mut feeds = RssEngine::load_feeds(storage).await;
+                let mut feeds = RssEngine::load_feeds(storage).await?;
                 let before = feeds.len();
                 feeds.retain(|f| f.url != url);
                 RssEngine::save_feeds(storage, &ctx.config, &feeds).await?;
@@ -98,7 +98,7 @@ impl CliModule for RssCliModule {
                 }
             }
             RssCmd::List => {
-                let feeds = RssEngine::load_feeds(storage).await;
+                let feeds = RssEngine::load_feeds(storage).await?;
                 if feeds.is_empty() {
                     println!("No subscribed feeds yet. To add: moku rss add <url>");
                 } else {

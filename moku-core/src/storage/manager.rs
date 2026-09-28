@@ -121,9 +121,7 @@ impl StorageManager {
         let db_path = self.vault_root.join(module_id).join("db");
         let opened = tokio::task::spawn_blocking({
             let db_path = db_path.clone();
-            move || {
-                sled::open(&db_path).context(format!("Failed to open sled DB: {:?}", db_path))
-            }
+            move || sled::open(&db_path).context(format!("Failed to open sled DB: {:?}", db_path))
         })
         .await
         .map_err(|e| anyhow!("sled::open task panicked: {e}"))??;
@@ -280,13 +278,27 @@ impl StorageManager {
         module_id: &str,
         key: &str,
     ) -> Result<(StorageEnvelope, Vec<u8>)> {
+        self.fetch_envelope_opt(module_id, key)
+            .await?
+            .ok_or_else(|| anyhow!("Key not found: {}", key))
+    }
+
+    /// Like `fetch_envelope`, but a key that simply doesn't exist yet is
+    /// `Ok(None)`: the one case that genuinely means "nothing stored",
+    /// kept separate from every real failure (unreadable DB, corrupt
+    /// envelope, missing blob), which stays an `Err`.
+    async fn fetch_envelope_opt(
+        &self,
+        module_id: &str,
+        key: &str,
+    ) -> Result<Option<(StorageEnvelope, Vec<u8>)>> {
         let (_, blobs_path) = self.prepare_module_paths(module_id).await?;
         let db = self.get_or_open_db(module_id).await?;
         let key_string = key.to_string();
 
-        let iv = tokio::task::spawn_blocking(move || db.get(&key_string))
-            .await??
-            .ok_or_else(|| anyhow!("Key not found: {}", key))?;
+        let Some(iv) = tokio::task::spawn_blocking(move || db.get(&key_string)).await?? else {
+            return Ok(None);
+        };
 
         let envelope: StorageEnvelope =
             serde_json::from_slice(&iv).context("Envelope corrupted")?;
@@ -301,7 +313,7 @@ impl StorageManager {
             }
         };
 
-        Ok((envelope, raw_data))
+        Ok(Some((envelope, raw_data)))
     }
 
     /// Decrypts (if needed) and deserializes an already-fetched envelope's
@@ -329,12 +341,35 @@ impl StorageManager {
         })
         .await??;
 
-        Ok(serde_json::from_slice(&decrypted_data)?)
+        serde_json::from_slice(&decrypted_data)
+            .context("Stored record doesn't match the expected data shape")
     }
 
     pub async fn load<T: DeserializeOwned>(&self, module_id: &str, key: &str) -> Result<T> {
         let (envelope, raw_data) = self.fetch_envelope(module_id, key).await?;
         self.decrypt_payload(module_id, &envelope, raw_data).await
+    }
+
+    /// Loads `key`, distinguishing "nothing stored yet" (`Ok(None)`) from
+    /// every real failure: locked vault, wrong key, corrupt envelope,
+    /// missing blob, or a shape change (`Err`).
+    ///
+    /// Modules must use this rather than treating any `load` error as an
+    /// empty collection: a module that shows "empty" after a failed load
+    /// and then saves overwrites the user's real data with that empty (or
+    /// newly-edited, partial) list.
+    pub async fn load_opt<T: DeserializeOwned>(
+        &self,
+        module_id: &str,
+        key: &str,
+    ) -> Result<Option<T>> {
+        match self.fetch_envelope_opt(module_id, key).await? {
+            None => Ok(None),
+            Some((envelope, raw_data)) => self
+                .decrypt_payload(module_id, &envelope, raw_data)
+                .await
+                .map(Some),
+        }
     }
 
     /// Lists every key currently stored for `module_id`, via a
@@ -411,8 +446,7 @@ impl StorageManager {
             return Ok(false);
         }
 
-        let value: serde_json::Value =
-            self.decrypt_payload(module_id, &envelope, raw_data).await?;
+        let value: serde_json::Value = self.decrypt_payload(module_id, &envelope, raw_data).await?;
         self.save_impl(module_id, key, &value, target_encrypted, false)
             .await?;
         Ok(true)
@@ -426,10 +460,7 @@ impl StorageManager {
     /// encrypted/plaintext toggle: this only ever moves an already-
     /// encrypted record forward to a newer key scheme. Idempotent — a
     /// record already on `CURRENT_KEY_SCHEME` is left untouched.
-    pub async fn migrate_key_scheme_to_latest(
-        &self,
-        module_id: &str,
-    ) -> Result<MigrationReport> {
+    pub async fn migrate_key_scheme_to_latest(&self, module_id: &str) -> Result<MigrationReport> {
         if self.session.current().is_none() {
             anyhow::bail!("Vault must be unlocked to migrate '{module_id}' key scheme");
         }
@@ -532,6 +563,71 @@ mod tests {
             .unwrap();
         session.unlock(key);
         Arc::new(session)
+    }
+
+    #[tokio::test]
+    async fn test_load_opt_missing_key_is_none() {
+        let temp = tempdir().unwrap();
+        let manager = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let loaded: Option<Vec<String>> = manager.load_opt("mod1", "items").await.unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_load_opt_returns_stored_value() {
+        let temp = tempdir().unwrap();
+        let manager = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
+            .await
+            .unwrap();
+        manager
+            .save("mod1", "items", &vec!["a".to_string()], false)
+            .await
+            .unwrap();
+        let loaded: Option<Vec<String>> = manager.load_opt("mod1", "items").await.unwrap();
+        assert_eq!(loaded, Some(vec!["a".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_load_opt_corrupt_envelope_is_an_error_not_none() {
+        let temp = tempdir().unwrap();
+        let manager = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let db = manager.get_or_open_db("mod1").await.unwrap();
+        db.insert("items", b"not an envelope".to_vec()).unwrap();
+        db.flush().unwrap();
+        let loaded: Result<Option<Vec<String>>> = manager.load_opt("mod1", "items").await;
+        assert!(loaded.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_opt_locked_vault_is_an_error_not_none() {
+        let temp = tempdir().unwrap();
+        let session = unlocked_session().await;
+        let manager =
+            StorageManager::new_with_root(Arc::clone(&session), temp.path().to_path_buf())
+                .await
+                .unwrap();
+        manager
+            .save("mod1", "items", &vec!["secret".to_string()], true)
+            .await
+            .unwrap();
+        session.lock();
+        let loaded: Result<Option<Vec<String>>> = manager.load_opt("mod1", "items").await;
+        assert!(loaded.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_opt_shape_mismatch_is_an_error_not_none() {
+        let temp = tempdir().unwrap();
+        let manager = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
+            .await
+            .unwrap();
+        manager.save("mod1", "items", &42u32, false).await.unwrap();
+        let loaded: Result<Option<Vec<String>>> = manager.load_opt("mod1", "items").await;
+        assert!(loaded.is_err());
     }
 
     #[tokio::test]
