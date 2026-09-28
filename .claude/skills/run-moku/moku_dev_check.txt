@@ -1,0 +1,58 @@
+# Phase-end moku_dev smoke check (audit/99-checklist.md §4 step 4).
+# Unlocks the dev vault, opens every data-bearing module, locks, quits.
+# Needs MOKU_DEV_PASSWORD in the environment. Uses `outline`, not `snap`,
+# so personal dev data (feeds, secrets, notes) never lands in the output.
+wait "Moku Launcher" 30
+keys / text:todo enter
+wait "Secure Login" 10
+keys env:MOKU_DEV_PASSWORD enter
+wait "Todo List" 30
+expect "Session Unlocked"
+outline todo
+keys esc
+wait "Moku Launcher" 10
+keys / text:bookmark enter
+wait "Bookmark Manager" 10
+outline bookmark
+keys esc
+wait "Moku Launcher" 10
+keys / text:secrets enter
+wait "Secrets" 10
+outline secrets
+keys esc
+wait "Moku Launcher" 10
+keys / text:rss enter
+wait "Feeds" 10
+outline rss
+keys esc
+wait "Moku Launcher" 10
+keys / text:encrypted enter
+wait "Encrypted Volumes" 10
+outline volumes
+keys esc
+wait "Moku Launcher" 10
+keys / text:pomodoro enter
+wait "Pomodoro" 10
+outline pomodoro
+keys esc
+wait "Moku Launcher" 10
+keys / text:settings enter
+wait "Settings" 10
+outline settings
+keys esc
+wait "Moku Launcher" 10
+keys / text:dashboard enter
+wait "Dashboard" 10
+outline dashboard
+keys esc
+wait "Moku Launcher" 10
+# ctrl-l must re-lock: an encrypted module asks for the password again.
+keys ctrl-l
+sleep 1
+keys / text:secrets enter
+wait "Secure Login" 10
+outline after-lock
+keys esc
+sleep 1
+keys q
+sleep 1

@@ -484,3 +484,6 @@ FodyWeavers.xsd
 
 # Local-only backlog of future feature ideas — deliberately never committed
 /BACKLOG.local.md
+
+# Skill-local Python venv for the TUI driver (.claude/skills/run-moku)
+.claude/skills/*/.venv/
