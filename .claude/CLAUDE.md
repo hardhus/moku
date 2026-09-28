@@ -7,16 +7,17 @@ storage, security, module traits, keybinding resolution).
 
 ## Versioning convention
 
-- **`moku-bin`'s `Cargo.toml` version is the one git tags track.** Bump
-  its patch number (`0.2.0` → `0.2.1` → `0.2.2` → ...) whenever a
-  distinct, complete-enough change or feature lands — not on every
-  commit, and not silently: flag that a bump looks due and ask before
-  doing it.
-- **A patch bump gets a plain commit, no git tag.** Only two things get
-  a git tag (`vX.Y.0`): moving to a new minor/major version (e.g.
-  `0.2.x` → `0.3.0`), or a hotfix release. `v0.2.0` (this file's
-  "Health-check passes" section) is the precedent for the tagged case;
-  patch bumps in between accumulate untagged on `dev`/`main`.
+- **Branches:** work happens on `dev`, which may be temporarily broken
+  mid-phase. `main` must never be broken: build and `cargo test
+  --workspace` are green at every merge. `main` is updated by
+  fast-forwarding it to `dev`, and only with the user's go-ahead. Nothing
+  is pushed unless asked.
+- **Every `dev` → `main` merge bumps `moku-bin`'s patch version by one**
+  (`0.2.8` → `0.2.9` → ...), as its own `chore: bump moku-bin to X`
+  commit right before the merge. That is the only version rule: no git
+  tags are created (the user decided this on 2026-09-28; the older
+  `v0.x.y` tags are history). A move to a new minor version happens
+  only when the user asks for it.
 - Storage/crypto schema versioning (`KeyScheme`, below) is a completely
   separate axis from this — the app version and the on-disk schema
   version are allowed to move independently, on their own schedules.
@@ -128,7 +129,9 @@ storage, security, module traits, keybinding resolution).
 - **Password-prompt UX rule**: verifying an existing password (login/mount)
   asks once; setting a *new* password (create/change) asks twice
   (password + confirmation), since a fresh password has nothing else to
-  check a typo against. Don't invent a third pattern.
+  check a typo against. Don't invent a third pattern. Implementations:
+  the lock screen's setup mode (password + Confirm fields),
+  `moku_core::security::cli::prompt_new_password` for CLI.
 - **Shared delete-confirmation convention**: a destructive delete goes
   through `moku_core::keys::{is_delete_bypass, resolve_confirm_delete_key,
   ConfirmDeleteKey}` — plain `d`/`Delete` opens a confirm prompt
@@ -162,6 +165,54 @@ storage, security, module traits, keybinding resolution).
   Text of external origin (a git diff, a feed/task error string) isn't
   guaranteed ASCII, so an arbitrary byte offset can land mid-codepoint and
   panic. Always go through `moku_core::util::truncate_at_char_boundary`.
+
+## Data-safety conventions (from the 0.3-foundations P1 phase)
+
+- **Whole-file state is written with `moku_core::util::atomic_write`**
+  (or `atomic_write_async`): temp file in the same directory, fsync,
+  rename over the target. Never a plain `fs::write` for `meta.json`,
+  `volume.json`, `usage.json`, the volume index, config files or any
+  future state file. A torn write of `meta.json` loses the salt and with
+  it every encrypted record.
+- **A failed load is never "empty".** Use `StorageManager::load_opt`.
+  `Ok(None)` means nothing was stored yet (start empty or seed); `Err`
+  means something IS stored but couldn't be read.
+  - On `Err`, the module opens read-only: it shows the persistent
+    `moku_core::draw_load_error_banner`, refuses every mutating key
+    with `show_warning`, and its save path refuses to write.
+  - CLI commands propagate the error instead of saving.
+  - The old pattern, `load(..).unwrap_or_default()` followed by a save,
+    silently overwrote real data; see todo/secrets/bookmark/rss.
+  - A `TuiModule::init` must not return `Err` for a data problem, since
+    that tears down the whole app. Stay open read-only instead.
+- **A volume is opened only under its `VolumeLock`.**
+  `VolumeEngine::open_volume(.., lock)` requires one. Take it with
+  `VolumeLock::acquire(volume_dir)` BEFORE deriving keys, so a second
+  opener fails fast instead of after the Argon2 wait.
+  `VolumeLock::is_held` / `status::is_in_use` are pre-prompt hints
+  only. Two engines on one volume corrupt data.
+- **A lost `.moku_dir_iv` is an error, never silently regenerated.** It
+  is created only for a directory with no encrypted entries yet, and
+  never over an existing one.
+- **The mount worker only ever gets one volume's key.** Stdin tag `0x02`
+  carries the derived `derive_default_volume_master_key` output; the TUI
+  derives it and drops the app key immediately. Tag `0x01` (app master
+  key) is still accepted for upgrade compatibility but never sent; it
+  goes away in P9. Never keep an app-key `Arc` in module state (a prompt
+  must read `ctx.session.current()` at the moment of use), or locking
+  can't wipe it.
+- **CLI vault access goes through `moku_core::security::cli`:**
+  `ensure_unlocked` asks once and never creates a vault; first-time
+  setup is the TUI's (or a future `moku vault init`).
+  `prompt_new_password` asks twice. Never create a vault from a single
+  prompt.
+- **Password buffers are wiped with `zeroize()`, never `clear()`.**
+  `clear()` only resets the length and leaves the bytes behind.
+- **`let _ = fallible()` needs a one-line comment saying why ignoring it
+  is safe.** Otherwise log it (`tracing::warn!`) or surface it.
+- **Show error chains:** user-facing error text uses `{e:#}`
+  (`show_error(format!("...: {e:#}"))`, fatal CLI prints), so the cause
+  isn't cut off.
 
 ## Theme / UI conventions
 
