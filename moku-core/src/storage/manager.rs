@@ -372,6 +372,44 @@ impl StorageManager {
         }
     }
 
+    /// Whether any module has at least one ENCRYPTED record on disk. The
+    /// lock screen uses this when `vault/meta.json` is missing: if encrypted
+    /// data exists, that data was sealed under the lost meta's key, and
+    /// setting up a fresh vault would orphan it for good, so the user must
+    /// be told to restore `meta.json` instead. Plaintext-only modules (e.g.
+    /// RSS by default, which can be written before any vault exists) don't
+    /// count. Only scans module directories that already exist.
+    pub async fn has_encrypted_records(&self) -> Result<bool> {
+        let mut entries = match fs::read_dir(&self.vault_root).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e).context("failed to list the vault directory"),
+        };
+        let mut modules = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.path().join("db").is_dir() {
+                modules.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        for module in modules {
+            let db = self.get_or_open_db(&module).await?;
+            let found = tokio::task::spawn_blocking(move || {
+                db.iter().filter_map(|entry| entry.ok()).any(|(_, value)| {
+                    serde_json::from_slice::<StorageEnvelope>(&value)
+                        .map(|env| env.status == EncryptionStatus::Encrypted)
+                        // An unparseable record may well be encrypted data:
+                        // err on the side of "don't orphan it".
+                        .unwrap_or(true)
+                })
+            })
+            .await?;
+            if found {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Lists every key currently stored for `module_id`, via a
     /// `spawn_blocking` sled scan — shared by both migration passes below
     /// so they don't each reimplement the same scan.
@@ -563,6 +601,20 @@ mod tests {
             .unwrap();
         session.unlock(key);
         Arc::new(session)
+    }
+
+    #[tokio::test]
+    async fn test_has_encrypted_records_ignores_plaintext_and_finds_encrypted() {
+        let temp = tempdir().unwrap();
+        let session = unlocked_session().await;
+        let manager = StorageManager::new_with_root(Arc::clone(&session), temp.path().to_path_buf())
+            .await
+            .unwrap();
+        assert!(!manager.has_encrypted_records().await.unwrap());
+        manager.save("rss", "feeds", &vec!["x".to_string()], false).await.unwrap();
+        assert!(!manager.has_encrypted_records().await.unwrap());
+        manager.save("todo", "items", &vec!["y".to_string()], true).await.unwrap();
+        assert!(manager.has_encrypted_records().await.unwrap());
     }
 
     #[tokio::test]

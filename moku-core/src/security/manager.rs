@@ -112,10 +112,21 @@ impl SecurityManager {
         self.get_meta_path().exists()
     }
 
+    /// Creates a brand-new vault. Refuses if a `meta.json` already exists:
+    /// overwriting it would replace the salt, silently orphaning every
+    /// record encrypted under the old key. The file is written atomically,
+    /// because a torn `meta.json` would lose the salt (and with it all
+    /// data) just the same.
     pub async fn initialize_vault(
         &self,
         password: Zeroizing<String>,
     ) -> Result<SecretBox<SafeKey>> {
+        if self.is_vault_initialized() {
+            return Err(anyhow!(
+                "a vault already exists at {}; refusing to overwrite it",
+                self.get_meta_path().display()
+            ));
+        }
         let salt = Self::generate_salt(16);
         let key = Self::derive_key(&password, &salt).await?;
 
@@ -133,7 +144,7 @@ impl SecurityManager {
         }
 
         let json = serde_json::to_string_pretty(&meta)?;
-        fs::write(path, json).await?;
+        crate::util::atomic_write_async(path, json.into_bytes()).await?;
 
         Ok(key)
     }
@@ -254,5 +265,17 @@ mod tests {
             result.is_ok(),
             "System must not crash on oversized passwords"
         );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_vault_refuses_to_overwrite_an_existing_vault() {
+        let temp = tempfile::tempdir().unwrap();
+        let sm = SecurityManager::new_with_root(temp.path().to_path_buf());
+        sm.initialize_vault(Zeroizing::new("first".to_string())).await.unwrap();
+        let meta_before = std::fs::read(sm.get_meta_path()).unwrap();
+        assert!(sm.initialize_vault(Zeroizing::new("second".to_string())).await.is_err());
+        assert_eq!(std::fs::read(sm.get_meta_path()).unwrap(), meta_before);
+        // The original password still unlocks it.
+        sm.unlock_vault(Zeroizing::new("first".to_string())).await.unwrap();
     }
 }
