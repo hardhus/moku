@@ -8,9 +8,9 @@ moku-volume-fs = { path = "../moku-volume-fs" }
 anyhow.workspace = true
 
 # WinFsp shim — only compiled (and only depended on) when targeting
-# Windows. The FUSE/Unix shim lands in a later pass (see plan §2/§3); this
-# crate is Windows-first because that's what's actually installable and
-# testable in this environment (WinFsp SDK confirmed present).
+# Windows. The FUSE/Unix shim (fuser, below) is implemented and
+# cross-compile-checked but not runtime-tested; this crate is Windows-first
+# because that's what's actually installable and testable here.
 [target.'cfg(windows)'.dependencies]
 winfsp = { version = "0.13", features = ["system", "windows-62"] }
 windows = { version = "0.62", features = [

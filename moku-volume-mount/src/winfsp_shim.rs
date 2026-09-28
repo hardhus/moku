@@ -558,7 +558,7 @@ impl FileSystemContext for VolumeFsContext {
 /// every filesystem operation — an unexplained quirk worth investigating
 /// before that form is exposed as a supported option.
 pub fn mount_and_wait(
-    engine: VolumeEngine,
+    engine: Arc<VolumeEngine>,
     mountpoint: &str,
     stop_rx: Receiver<()>,
     on_mounted: impl FnOnce(),
@@ -576,9 +576,8 @@ pub fn mount_and_wait(
         .read_only_volume(false)
         .flush_and_purge_on_cleanup(true);
 
-    let engine = Arc::new(engine);
     let context = VolumeFsContext {
-        engine: Arc::clone(&engine),
+        engine,
         pending_notify: Mutex::new(VecDeque::new()),
     };
     let params = FileSystemParams::default_params(volume_params);
@@ -605,10 +604,10 @@ pub fn mount_and_wait(
 
     host.stop();
     host.unmount();
-    // `context` (and its Arc<VolumeEngine> clone) drops with `host` above;
-    // this outer clone is still valid, so the final usage count — which
-    // only updates in memory as writes happen — actually reaches disk.
-    let _ = engine.flush_usage();
+    // Persisting the in-memory usage counter is the caller's job
+    // (`moku-volume-daemon::worker::run` keeps its own Arc clone and
+    // flushes after this returns, on every exit path, and reports a
+    // failure instead of swallowing it).
     Ok(())
 }
 
@@ -645,7 +644,7 @@ mod tests {
         let (mounted_tx, mounted_rx) = std::sync::mpsc::channel();
         let mount_mountpoint = mountpoint.clone();
         let mount_thread = std::thread::spawn(move || {
-            mount_and_wait(engine, &mount_mountpoint, stop_rx, move || {
+            mount_and_wait(Arc::new(engine), &mount_mountpoint, stop_rx, move || {
                 let _ = mounted_tx.send(());
             })
         });

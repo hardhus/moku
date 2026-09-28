@@ -72,12 +72,12 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
         None => false,
     };
 
-    let engine = VolumeEngine::open_volume(
+    let engine = std::sync::Arc::new(VolumeEngine::open_volume(
         volume_dir.join(registry::DATA_DIR),
         keys,
         volume_dir.join(registry::USAGE_FILE),
         cfg.size_limit_bytes,
-    )?;
+    )?);
 
     if previous_session_unclean {
         engine
@@ -126,11 +126,20 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     // This process exists solely to run one mount, so running it via
     // spawn_blocking just keeps the (otherwise idle) tokio worker threads
     // free rather than changing behavior.
+    let mount_engine = std::sync::Arc::clone(&engine);
     let result: Result<()> = tokio::task::spawn_blocking(move || {
-        moku_volume_mount::mount_and_wait(engine, &mountpoint, stop_rx, on_mounted)
+        moku_volume_mount::mount_and_wait(mount_engine, &mountpoint, stop_rx, on_mounted)
     })
     .await
     .context("mount worker task panicked")?;
+
+    // Persist the in-memory usage counter however the mount ended (clean
+    // stop, mount failure, dispatcher error). A failure here is reported,
+    // not swallowed: a stale usage.json means wrong quota numbers until the
+    // next unclean-session reconcile.
+    if let Err(e) = engine.flush_usage() {
+        eprintln!("failed to persist volume usage: {e:#}");
+    }
 
     crate::pid::remove(volume_id);
     result

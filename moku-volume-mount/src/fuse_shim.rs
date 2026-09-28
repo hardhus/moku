@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -118,7 +118,7 @@ fn to_file_attr(ino: u64, attr: &Attr, uid: u32, gid: u32) -> FileAttr {
 }
 
 struct VolumeFsFilesystem {
-    engine: VolumeEngine,
+    engine: Arc<VolumeEngine>,
     inodes: Mutex<InodeTable>,
 }
 
@@ -435,11 +435,17 @@ impl Filesystem for VolumeFsFilesystem {
     }
 }
 
-/// Mounts `engine` at `mountpoint`, blocks until `stop_rx` receives a
-/// signal, then unmounts cleanly. Same signature as the WinFsp shim's
-/// `mount_and_wait`, so `moku-volume-daemon::worker::run` needs no
-/// platform-specific code at all.
-pub fn mount_and_wait(engine: VolumeEngine, mountpoint: &str, stop_rx: Receiver<()>) -> Result<()> {
+/// Mounts `engine` at `mountpoint`, calls `on_mounted` once the mount is
+/// live, blocks until `stop_rx` receives a signal, then unmounts cleanly.
+/// Same signature as the WinFsp shim's `mount_and_wait`, so
+/// `moku-volume-daemon::worker::run` needs no platform-specific code.
+/// Flushing the usage counter is the caller's job (it keeps its own Arc).
+pub fn mount_and_wait(
+    engine: Arc<VolumeEngine>,
+    mountpoint: &str,
+    stop_rx: Receiver<()>,
+    on_mounted: impl FnOnce(),
+) -> Result<()> {
     let fs = VolumeFsFilesystem { engine, inodes: Mutex::new(InodeTable::new()) };
     // `Config` is `#[non_exhaustive]`, so it can't be built with a struct
     // literal outside fuser's own crate — start from its `Default` and
@@ -448,6 +454,9 @@ pub fn mount_and_wait(engine: VolumeEngine, mountpoint: &str, stop_rx: Receiver<
     options.mount_options = vec![MountOption::FSName("mokuvolume".to_string()), MountOption::DefaultPermissions];
 
     let session = fuser::spawn_mount(fs, mountpoint, &options).map_err(|e| anyhow!("failed to mount at '{mountpoint}': {e}"))?;
+    // `spawn_mount` only returns once the kernel mount has succeeded (the
+    // session thread then serves requests), so the mount is live here.
+    on_mounted();
 
     let _ = stop_rx.recv();
 

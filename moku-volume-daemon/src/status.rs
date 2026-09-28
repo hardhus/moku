@@ -15,11 +15,9 @@ pub fn pid_is_alive(pid: u32) -> bool {
     refresh_single(pid).process(Pid::from_u32(pid)).is_some()
 }
 
-/// Whether this volume currently has a live mount worker process. Mount
-/// itself lands in a later phase, so today this only ever reports `false`
-/// (no pid file is ever written yet) — kept here now so `volume list`/
-/// `status` display code doesn't need to change shape once mounting
-/// exists.
+/// Whether this volume currently has a live mount worker process: its
+/// `mount.pid` (written by the worker once the mount is live) names a
+/// process that is still running.
 pub fn is_mounted(volume_id: &str) -> bool {
     match crate::pid::read(volume_id) {
         None => false,

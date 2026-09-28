@@ -3,9 +3,10 @@
 //! one OS filesystem-driver callback API into calls on the shared engine —
 //! all crypto/path/quota logic lives in `moku-volume-fs` (plan §2).
 //!
-//! Windows-first: WinFsp is what's actually installed and testable in
-//! this project's own dev environment. The FUSE/Unix shim is a later
-//! pass and is not implemented yet.
+//! Windows-first: WinFsp is what's actually installed and runtime-tested
+//! in this project's own dev environment. The FUSE/Unix shim
+//! (`fuse_shim.rs`) is implemented and cross-compile-checked for Linux,
+//! but not runtime-tested yet.
 
 #[cfg(windows)]
 mod winfsp_shim;
