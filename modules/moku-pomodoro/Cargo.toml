@@ -9,7 +9,7 @@ tui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
 moku-core.workspace = true
-moku-pomodoro-daemon = { path = "../../moku-pomodoro-daemon" }
+moku-pomodoro-daemon.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true

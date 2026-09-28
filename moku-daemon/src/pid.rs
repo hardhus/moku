@@ -12,6 +12,7 @@ pub fn write() -> Result<()> {
 
 pub fn remove() {
     if let Ok(data_dir) = moku_core::dirs::get_data_dir() {
+        // Best-effort: a missing pid file already means "not running".
         let _ = std::fs::remove_file(data_dir.join("moku_daemon.pid"));
     }
 }

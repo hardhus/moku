@@ -12,7 +12,8 @@ use std::sync::mpsc::Receiver;
 
 use anyhow::{Result, anyhow};
 use windows::Win32::Foundation::{
-    STATUS_DIRECTORY_NOT_EMPTY, STATUS_DISK_FULL, STATUS_END_OF_FILE, STATUS_INVALID_HANDLE,
+    STATUS_DIRECTORY_NOT_EMPTY, STATUS_DISK_FULL, STATUS_END_OF_FILE, STATUS_FILE_IS_A_DIRECTORY,
+    STATUS_INVALID_HANDLE,
     STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_INVALID,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_UNSUCCESSFUL,
 };
@@ -52,7 +53,7 @@ fn map_err(e: VolumeFsError) -> winfsp::FspError {
         VolumeFsError::NotFound => STATUS_OBJECT_NAME_NOT_FOUND.into(),
         VolumeFsError::AlreadyExists => STATUS_OBJECT_NAME_COLLISION.into(),
         VolumeFsError::NotADirectory => STATUS_NOT_A_DIRECTORY.into(),
-        VolumeFsError::IsADirectory => STATUS_NOT_A_DIRECTORY.into(),
+        VolumeFsError::IsADirectory => STATUS_FILE_IS_A_DIRECTORY.into(),
         VolumeFsError::NotEmpty => STATUS_DIRECTORY_NOT_EMPTY.into(),
         VolumeFsError::NameTooLong => STATUS_OBJECT_NAME_INVALID.into(),
         VolumeFsError::QuotaExceeded => STATUS_DISK_FULL.into(),
@@ -247,6 +248,8 @@ impl FileSystemContext for VolumeFsContext {
 
     fn close(&self, context: Self::FileContext) {
         if let Some(fh) = context.fh {
+            // Releasing only drops an in-memory handle entry; an unknown
+            // handle (already released) is harmless on close.
             let _ = self.engine.release(fh);
         }
     }
@@ -602,6 +605,7 @@ pub fn mount_and_wait(
 
     on_mounted();
 
+    // Err = every sender dropped, which also means "stop".
     let _ = stop_rx.recv();
 
     host.stop();

@@ -117,6 +117,9 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     {
         let tx = stop_tx.clone();
         tokio::spawn(async move {
+            // Err only if the handler can't be installed: then Ctrl+C just
+            // isn't a stop source (the control channel still is). Either
+            // way, a closed receiver means we're already stopping.
             let _ = tokio::signal::ctrl_c().await;
             let _ = tx.send(());
         });
@@ -150,6 +153,7 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
             eprintln!("failed to write pid file: {e}");
         }
         println!("{MOUNT_READY_SENTINEL}");
+        // Best-effort: if stdout is gone, so is the parent waiting on it.
         let _ = std::io::Write::flush(&mut std::io::stdout());
     };
 
@@ -250,17 +254,24 @@ fn spawn_mount_process_inner(
         .map_err(|e| anyhow!("failed to spawn mount worker: {e}"))?;
     let pid = child.id();
 
-    {
-        let mut stdin = child.stdin.take().expect("stdin was requested as piped");
-        stdin
-            .write_all(&stdin_payload)
-            .map_err(|e| anyhow!("failed to send secret to mount worker: {e}"))?;
-        // `stdin` drops here, closing the pipe so the worker's blocking
-        // `read_to_end` on its end sees EOF and returns.
+    // All three were requested as `Stdio::piped()` above, so they are
+    // present. If that ever breaks, fail cleanly rather than panic, and
+    // never leave a half-started worker behind.
+    let (Some(mut stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        // Best-effort cleanup of a worker we can't drive; the error below
+        // is what the caller needs to see.
+        let _ = child.kill();
+        bail!("mount worker started without its stdio pipes");
+    };
+    if let Err(e) = stdin.write_all(&stdin_payload) {
+        // Best-effort: don't leak a worker that never got its secret.
+        let _ = child.kill();
+        bail!("failed to send secret to mount worker: {e}");
     }
-
-    let stdout = child.stdout.take().expect("stdout was requested as piped");
-    let stderr = child.stderr.take().expect("stderr was requested as piped");
+    // Closing the pipe lets the worker's blocking `read_to_end` see EOF.
+    drop(stdin);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<WorkerEvent>();
 
     for (reader, wrap) in [
@@ -285,6 +296,7 @@ fn spawn_mount_process_inner(
     }
     std::thread::spawn(move || {
         let status = child.wait();
+        // Receiver dropped = nobody is waiting for the outcome any more.
         let _ = tx.send(WorkerEvent::Exited(status));
     });
 
@@ -418,16 +430,27 @@ pub async fn stop_mount_process(volume_id: &str) -> Result<StopOutcome> {
         }
     }
 
+    // Graceful stop didn't work: force it. The kill command's own result
+    // is only diagnostic; whether the worker is really gone is checked
+    // right after, and that's what decides the outcome.
     #[cfg(windows)]
-    let _ = std::process::Command::new("taskkill")
+    let kill = std::process::Command::new("taskkill")
         .args(["/PID", &worker_pid.to_string(), "/F"])
         .output();
     #[cfg(not(windows))]
-    let _ = std::process::Command::new("kill")
+    let kill = std::process::Command::new("kill")
         .arg(worker_pid.to_string())
         .output();
 
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    // Async sleep: this runs on the tokio runtime (TUI/CLI unmount).
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    if status::pid_is_alive(worker_pid) {
+        let detail = match kill {
+            Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            Err(e) => e.to_string(),
+        };
+        bail!("could not stop the mount worker (pid {worker_pid}): {detail}");
+    }
     crate::pid::remove(volume_id);
     Ok(StopOutcome::Forced)
 }

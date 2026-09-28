@@ -364,8 +364,9 @@ fn render_line(source: &str, ctx: &LineStyleCtx, r: ByteRange, cursor_offset: Op
                     match run_style {
                         Some(s) if s == style => run.push(ch),
                         _ => {
-                            if !run.is_empty() {
-                                spans.push(Span::styled(std::mem::take(&mut run), run_style.unwrap()));
+                            // A non-empty run always has a style (set when its first char was pushed).
+                            if let Some(s) = run_style.filter(|_| !run.is_empty()) {
+                                spans.push(Span::styled(std::mem::take(&mut run), s));
                             }
                             run.push(ch);
                             run_style = Some(style);
@@ -373,8 +374,8 @@ fn render_line(source: &str, ctx: &LineStyleCtx, r: ByteRange, cursor_offset: Op
                     }
                     visual_col += 1;
                 }
-                if !run.is_empty() {
-                    spans.push(Span::styled(run, run_style.unwrap()));
+                if let Some(s) = run_style.filter(|_| !run.is_empty()) {
+                    spans.push(Span::styled(run, s));
                 }
             }
             LineSeg::Concealed { text, style } => {
@@ -432,16 +433,17 @@ fn overlay_cursor(line: Line<'static>, col: usize) -> Line<'static> {
         match run_style {
             Some(s) if s == style => run.push(c),
             _ => {
-                if !run.is_empty() {
-                    spans.push(Span::styled(std::mem::take(&mut run), run_style.unwrap()));
+                // A non-empty run always has a style (set when its first char was pushed).
+                if let Some(s) = run_style.filter(|_| !run.is_empty()) {
+                    spans.push(Span::styled(std::mem::take(&mut run), s));
                 }
                 run.push(c);
                 run_style = Some(style);
             }
         }
     }
-    if !run.is_empty() {
-        spans.push(Span::styled(run, run_style.unwrap()));
+    if let Some(s) = run_style.filter(|_| !run.is_empty()) {
+        spans.push(Span::styled(run, s));
     }
     Line::from(spans)
 }

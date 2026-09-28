@@ -28,7 +28,10 @@ pub async fn listen_for_stop(volume_id: &str, stop_tx: Sender<()>) -> Result<()>
 
     let mut buf = [0u8; 1];
     let mut server = server;
+    // Protocol: a connection IS the stop request; the byte (or an EOF) is
+    // just a courtesy, so a read error changes nothing.
     let _ = server.read(&mut buf).await;
+    // Receiver gone = the worker is already shutting down.
     let _ = stop_tx.send(());
     Ok(())
 }
@@ -70,8 +73,11 @@ pub async fn listen_for_stop(volume_id: &str, stop_tx: Sender<()>) -> Result<()>
     let (mut stream, _) = listener.accept().await.context("failed accepting control socket connection")?;
 
     let mut buf = [0u8; 1];
+    // Same protocol as Windows: connecting is the stop request.
     let _ = stream.read(&mut buf).await;
+    // Receiver gone = the worker is already shutting down.
     let _ = stop_tx.send(());
+    // Best-effort: a leftover socket is detected as stale on the next bind.
     let _ = std::fs::remove_file(&path);
     Ok(())
 }

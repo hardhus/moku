@@ -115,7 +115,7 @@ impl TuiModule for SettingsModule {
                             .contains(crossterm::event::KeyModifiers::CONTROL) =>
                     {
                         if let Err(e) = ConfigManager::save(&*ctx.config.load()).await {
-                            ctx.show_error(format!("Save Failed: {}", e));
+                            ctx.show_error(format!("Save Failed: {e:#}"));
                         } else {
                             ctx.show_info("Settings Saved! 💾");
                         }
@@ -172,7 +172,11 @@ impl TuiModule for SettingsModule {
         frame.render_widget(tabs_widget, chunks[0]);
 
         if let Some(tab) = self.tabs.get_mut(self.selected_tab) {
-            let _ = tab.draw(frame, chunks[1], &config);
+            // `draw` has no ctx for a toast; a tab that fails to render
+            // is logged rather than silently dropped.
+            if let Err(e) = tab.draw(frame, chunks[1], &config) {
+                tracing::warn!("settings tab failed to draw: {e:#}");
+            }
         }
 
         let footer =

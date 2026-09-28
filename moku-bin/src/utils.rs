@@ -20,12 +20,15 @@ pub fn init_errors() -> Result<()> {
     let panic_hook = panic_hook.into_panic_hook();
 
     std::panic::set_hook(Box::new(move |panic_info| {
+        // Best-effort: we're already panicking; restoring the terminal is
+        // all we can try, and its failure must not mask the real panic.
         let _ = tui::restore();
         panic_hook(panic_info);
     }));
 
     let eyre_hook = eyre_hook.into_eyre_hook();
     color_eyre::eyre::set_hook(Box::new(move |error| {
+        // Best-effort, same reason as the panic hook above.
         let _ = tui::restore();
         eyre_hook(error)
     }))?;
@@ -52,6 +55,8 @@ pub fn init_logging() -> Result<WorkerGuard> {
         .with_file(true)
         .with_line_number(true);
 
+    // `try_init` only fails if a global subscriber is already installed
+    // (e.g. a second init in tests); that subscriber keeps working.
     let _ = tracing_subscriber::registry()
         .with(file_layer)
         .with(ErrorLayer::default())

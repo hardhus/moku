@@ -80,8 +80,10 @@ impl Default for ThemeColors {
 pub fn parse_color(s: &str) -> Color {
     let s = s.trim();
 
-    // 1. Hex Code Handling (#RRGGBB or #RGB)
-    if s.starts_with('#') {
+    // 1. Hex Code Handling (#RRGGBB or #RGB). ASCII only: the byte-index
+    // slicing below would panic mid-codepoint on e.g. "#é12" (4 bytes, 3
+    // chars), and no valid hex color contains a non-ASCII byte anyway.
+    if s.starts_with('#') && s.is_ascii() {
         match s.len() {
             7 => {
                 // #RRGGBB
@@ -183,5 +185,14 @@ mod tests {
             Color::White,
             "Empty value -> Should fallback to White"
         );
+    }
+
+    #[test]
+    fn test_parse_color_non_ascii_hex_does_not_panic() {
+        // 4 bytes (a hex-shorthand length) but 3 chars, so byte slicing
+        // would split the 2-byte 'é'.
+        assert_eq!(parse_color("#é12"), parse_color("definitely-not-a-color"));
+        assert_eq!(parse_color("#aé"), parse_color("definitely-not-a-color"));
+        assert_eq!(parse_color("#ff0000"), Color::Rgb(255, 0, 0));
     }
 }

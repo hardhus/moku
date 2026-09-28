@@ -53,6 +53,8 @@ pub fn init() -> Result<WorkerGuard> {
         .with_writer(non_blocking)
         .with_ansi(false);
 
+    // `try_init` only fails if a global subscriber is already installed;
+    // that one keeps working.
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(file_layer)

@@ -25,6 +25,7 @@ pub fn write(volume_id: &str, pid: u32) -> Result<()> {
 
 pub fn remove(volume_id: &str) {
     if let Ok(path) = pid_file_path(volume_id) {
+        // Best-effort: a missing pid file already means "not mounted".
         let _ = std::fs::remove_file(path);
     }
 }

@@ -257,14 +257,16 @@ impl VolumeManagerModule {
         self.busy = true;
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
-            // Always attempt an unmount first — a harmless no-op
-            // (StopOutcome::NotMounted) if it wasn't mounted, and the
-            // required first step if it was: deleting a live-mounted
-            // volume's backing files out from under WinFsp is unsafe.
-            let _ = worker::stop_mount_process(&volume_id).await;
-            let msg = match registry::delete_volume(&volume_id).await {
-                Ok(()) => format!("Deleted '{display_name}'."),
-                Err(e) => format!("Delete failed: {e}"),
+            // Always unmount first: a no-op (StopOutcome::NotMounted) if it
+            // wasn't mounted, and required if it was, since deleting a
+            // live-mounted volume's backing files out from under WinFsp is
+            // unsafe. If the worker can't be stopped, don't delete.
+            let msg = match worker::stop_mount_process(&volume_id).await {
+                Err(e) => format!("Delete aborted: couldn't unmount '{display_name}' first: {e:#}"),
+                Ok(_) => match registry::delete_volume(&volume_id).await {
+                    Ok(()) => format!("Deleted '{display_name}'."),
+                    Err(e) => format!("Delete failed: {e:#}"),
+                },
             };
             *slot.lock().unwrap() = Some(msg);
         });

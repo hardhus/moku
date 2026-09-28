@@ -13,7 +13,7 @@ anyhow.workspace = true
 # because that's what's actually installable and testable here.
 [target.'cfg(windows)'.dependencies]
 winfsp = { version = "0.13", features = ["system", "windows-62"] }
-windows = { version = "0.62", features = [
+windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_Security",

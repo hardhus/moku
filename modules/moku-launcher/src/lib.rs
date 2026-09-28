@@ -314,7 +314,7 @@ impl LauncherModule {
                     .insert(ModuleId::LAUNCHER.as_str().to_string(), val);
             });
             if let Err(e) = ConfigManager::save(&ctx.config.load()).await {
-                ctx.show_error(format!("Failed to save module order: {e}"));
+                ctx.show_error(format!("Failed to save module order: {e:#}"));
             }
         }
     }

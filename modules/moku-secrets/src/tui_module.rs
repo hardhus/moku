@@ -118,7 +118,7 @@ impl SecretsModule {
         }
         if let Err(e) = engine::save_entries(&ctx.storage, &ctx.config.load(), &self.entries).await
         {
-            ctx.show_error(format!("Save error: {e}"));
+            ctx.show_error(format!("Save error: {e:#}"));
         }
     }
 

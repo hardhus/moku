@@ -125,6 +125,8 @@ impl Listener {
 impl Drop for Listener {
     fn drop(&mut self) {
         if let Ok(path) = socket_path() {
+            // Best-effort cleanup on shutdown; a leftover socket is detected
+            // as stale and replaced on the next bind.
             let _ = std::fs::remove_file(path);
         }
     }

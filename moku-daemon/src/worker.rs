@@ -98,7 +98,11 @@ pub async fn run_worker() -> Result<()> {
 
                 let mut lock = statuses.lock().await;
                 record_tick_result(&mut lock, &task_id, &result, now_secs);
-                let _ = write_statuses(&data_dir, &lock);
+                // The status file only feeds the Daemon Status screen; a
+                // failed write must not stop the task loop, but it is logged.
+                if let Err(e) = write_statuses(&data_dir, &lock) {
+                    tracing::warn!("failed to write daemon task statuses: {e:#}");
+                }
                 drop(lock);
 
                 if let Err(e) = result {

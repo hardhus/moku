@@ -86,7 +86,7 @@ impl TodoModule {
             .save(ModuleId::TODO.as_str(), "items", &self.items, encrypt)
             .await
         {
-            ctx.show_error(format!("Save error: {}", e));
+            ctx.show_error(format!("Save error: {e:#}"));
         }
     }
 

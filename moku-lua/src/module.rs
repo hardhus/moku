@@ -102,7 +102,7 @@ impl TuiModule for LuaModule {
             Ok(func) => match func.call::<bool>(key_str) {
                 Ok(changed) => changed,
                 Err(e) => {
-                    ctx.show_error(format!("Lua on_event error: {e}"));
+                    ctx.show_error(format!("Lua on_event error: {e:#}"));
                     false
                 }
             },

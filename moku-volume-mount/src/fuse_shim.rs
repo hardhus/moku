@@ -384,6 +384,8 @@ impl Filesystem for VolumeFsFilesystem {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        // Releasing only drops an in-memory handle entry; an unknown handle
+        // (already released) is harmless on close.
         let _ = self.engine.release(fh.0);
         reply.ok();
     }
@@ -459,6 +461,7 @@ pub fn mount_and_wait(
     // session thread then serves requests), so the mount is live here.
     on_mounted();
 
+    // Err = every sender dropped, which also means "stop".
     let _ = stop_rx.recv();
 
     session.umount_and_join().map_err(|e| anyhow!("failed to unmount: {e}"))

@@ -45,6 +45,8 @@ async fn main() -> Result<()> {
                 #[cfg(windows)]
                 if from_autostart {
                     unsafe {
+                        // Best-effort: this only hides the autostart console
+                        // window; if it fails, the daemon still runs fine.
                         let _ = windows::Win32::System::Console::FreeConsole();
                     }
                 }
@@ -123,7 +125,7 @@ async fn main() -> Result<()> {
         // handled before any of that is constructed, same early-exit
         // shape as Commands::Config below.
         if let Err(e) = volume_cmd::handle(sub).await {
-            eprintln!("{}", e);
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
         return Ok(());
@@ -161,7 +163,7 @@ async fn main() -> Result<()> {
         // panic/eyre-hook interaction (see tui::restore() in utils.rs)
         // when the terminal was never put into raw/alternate-screen mode.
         if let Err(e) = config_cmd::handle(sub, &config, &session, &security, &storage).await {
-            eprintln!("{}", e);
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
         return Ok(());
@@ -173,7 +175,7 @@ async fn main() -> Result<()> {
         // here anyway, symmetrically with Commands::Config above, rather
         // than restructuring the unconditional setup above it.
         if let Err(e) = pomodoro_cmd::handle(sub, &loaded_config).await {
-            eprintln!("{}", e);
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
         return Ok(());
@@ -206,7 +208,7 @@ async fn main() -> Result<()> {
         };
 
         if let Err(e) = module.run(&args, &cli_ctx).await {
-            eprintln!("{}", e);
+            eprintln!("{e:#}");
             std::process::exit(1);
         }
         return Ok(());

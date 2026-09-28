@@ -346,7 +346,7 @@ pub async fn run(
                 .status()
                 .await;
             if let Err(e) = status {
-                ctx.show_error(format!("Failed to launch '{}': {e}", req.command));
+                ctx.show_error(format!("Failed to launch '{}': {e:#}", req.command));
             }
             terminal = crate::tui::init()?;
             dirty = true;

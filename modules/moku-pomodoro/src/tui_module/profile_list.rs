@@ -235,7 +235,7 @@ async fn start_profile(state: &ProfileListState, idx: usize, ctx: &mut AppContex
             Outcome::Started
         }
         Err(e) => {
-            ctx.show_error(format!("Pomodoro: {e}"));
+            ctx.show_error(format!("Pomodoro: {e:#}"));
             Outcome::Redraw
         }
     }

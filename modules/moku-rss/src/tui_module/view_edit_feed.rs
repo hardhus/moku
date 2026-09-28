@@ -185,7 +185,7 @@ pub(super) async fn handle_event(
                             if let Err(e) =
                                 RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await
                             {
-                                ctx.show_error(format!("Save failed: {}", e));
+                                ctx.show_error(format!("Save failed: {e:#}"));
                             } else {
                                 ctx.show_info("Feed added.");
                             }
@@ -194,7 +194,7 @@ pub(super) async fn handle_event(
                             if let Err(e) =
                                 RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await
                             {
-                                ctx.show_error(format!("Save failed: {}", e));
+                                ctx.show_error(format!("Save failed: {e:#}"));
                             } else {
                                 ctx.show_info("Feed updated.");
                             }

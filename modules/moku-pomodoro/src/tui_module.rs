@@ -131,7 +131,7 @@ async fn save_config(ctx: &mut AppContext, config: &PomodoroConfig) {
     let value = match toml::Value::try_from(config) {
         Ok(v) => v,
         Err(e) => {
-            ctx.show_error(format!("Pomodoro: failed to encode settings: {e}"));
+            ctx.show_error(format!("Pomodoro: failed to encode settings: {e:#}"));
             return;
         }
     };
@@ -140,7 +140,7 @@ async fn save_config(ctx: &mut AppContext, config: &PomodoroConfig) {
     });
     let snapshot = (**ctx.config.load()).clone();
     if let Err(e) = moku_core::ConfigManager::save(&snapshot).await {
-        ctx.show_error(format!("Pomodoro: failed to save settings: {e}"));
+        ctx.show_error(format!("Pomodoro: failed to save settings: {e:#}"));
     }
 }
 
@@ -166,7 +166,7 @@ async fn refresh_status(ctx: &mut AppContext) -> Option<StatusSnapshot> {
     match daemon_client::query_status().await {
         Ok(status) => status,
         Err(e) => {
-            ctx.show_error(format!("Pomodoro: {e}"));
+            ctx.show_error(format!("Pomodoro: {e:#}"));
             None
         }
     }
@@ -186,9 +186,9 @@ async fn handle_action(
             match resolve_start_plan(&config, None) {
                 Ok((name, plan)) => match daemon_client::start(plan, config.notify).await {
                     Ok(()) => ctx.show_info(format!("Started '{name}'.")),
-                    Err(e) => ctx.show_error(format!("Pomodoro: {e}")),
+                    Err(e) => ctx.show_error(format!("Pomodoro: {e:#}")),
                 },
-                Err(e) => ctx.show_error(format!("Pomodoro: {e}")),
+                Err(e) => ctx.show_error(format!("Pomodoro: {e:#}")),
             }
             *last_status = refresh_status(ctx).await;
             true
@@ -201,14 +201,14 @@ async fn handle_action(
                 daemon_client::pause().await
             };
             if let Err(e) = result {
-                ctx.show_error(format!("Pomodoro: {e}"));
+                ctx.show_error(format!("Pomodoro: {e:#}"));
             }
             *last_status = refresh_status(ctx).await;
             true
         }
         PomodoroAction::Resume => {
             if let Err(e) = daemon_client::resume().await {
-                ctx.show_error(format!("Pomodoro: {e}"));
+                ctx.show_error(format!("Pomodoro: {e:#}"));
             }
             *last_status = refresh_status(ctx).await;
             true
@@ -219,7 +219,7 @@ async fn handle_action(
         }
         PomodoroAction::Skip => {
             if let Err(e) = daemon_client::skip().await {
-                ctx.show_error(format!("Pomodoro: {e}"));
+                ctx.show_error(format!("Pomodoro: {e:#}"));
             }
             *last_status = refresh_status(ctx).await;
             true
@@ -252,7 +252,7 @@ async fn handle_status_event(
             ConfirmDeleteKey::Confirm => {
                 *confirm_reset = false;
                 if let Err(e) = daemon_client::reset().await {
-                    ctx.show_error(format!("Pomodoro: {e}"));
+                    ctx.show_error(format!("Pomodoro: {e:#}"));
                 }
                 *last_status = refresh_status(ctx).await;
                 true

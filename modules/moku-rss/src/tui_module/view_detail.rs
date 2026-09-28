@@ -50,14 +50,14 @@ pub(super) async fn handle_detail_event(
                 KeyCode::Char('c') => {
                     match Clipboard::new().and_then(|mut c| c.set_text(item.link.clone())) {
                         Ok(_) => ctx.show_info(format!("Copied: {}", item.link)),
-                        Err(e) => ctx.show_error(format!("Clipboard error: {}", e)),
+                        Err(e) => ctx.show_error(format!("Clipboard error: {e:#}")),
                     }
                     changed = true;
                 }
                 KeyCode::Char('o') => {
                     match moku_core::util::open_url(&item.link) {
                         Ok(_) => ctx.show_info("Opening in browser..."),
-                        Err(e) => ctx.show_error(format!("Failed to open: {}", e)),
+                        Err(e) => ctx.show_error(format!("Failed to open: {e:#}")),
                     }
                     changed = true;
                 }

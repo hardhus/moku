@@ -261,7 +261,7 @@ pub(super) async fn handle_event(
                                     RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds)
                                         .await
                                 {
-                                    ctx.show_error(format!("Save error: {}", e));
+                                    ctx.show_error(format!("Save error: {e:#}"));
                                 } else if feeds[i - 1].favorite {
                                     ctx.show_info("Added to favorites.");
                                 } else {
@@ -293,7 +293,7 @@ pub(super) async fn handle_event(
                                     .and_then(|mut c| c.set_text(link.to_string()))
                                 {
                                     Ok(_) => ctx.show_info(format!("Copied: {}", link)),
-                                    Err(e) => ctx.show_error(format!("Clipboard error: {}", e)),
+                                    Err(e) => ctx.show_error(format!("Clipboard error: {e:#}")),
                                 }
                                 changed = true;
                             }
@@ -308,7 +308,7 @@ pub(super) async fn handle_event(
                             if i < filtered.len() {
                                 match moku_core::util::open_url(&filtered[i].link) {
                                     Ok(_) => ctx.show_info("Opening in browser..."),
-                                    Err(e) => ctx.show_error(format!("Failed to open: {}", e)),
+                                    Err(e) => ctx.show_error(format!("Failed to open: {e:#}")),
                                 }
                                 changed = true;
                             }

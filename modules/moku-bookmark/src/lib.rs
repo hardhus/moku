@@ -90,12 +90,12 @@ impl BookmarkModule {
             match Clipboard::new() {
                 Ok(mut clipboard) => {
                     if let Err(e) = clipboard.set_text(url.clone()) {
-                        ctx.show_error(format!("Clipboard copy error: {}", e));
+                        ctx.show_error(format!("Clipboard copy error: {e:#}"));
                     } else {
                         ctx.show_info(format!("Copied to clipboard: {}", url));
                     }
                 }
-                Err(e) => ctx.show_error(format!("No clipboard access: {}", e)),
+                Err(e) => ctx.show_error(format!("No clipboard access: {e:#}")),
             }
         }
     }
@@ -124,7 +124,7 @@ impl BookmarkModule {
                     }
                 }
             }
-            Err(e) => ctx.show_error(format!("Clipboard error: {}", e)),
+            Err(e) => ctx.show_error(format!("Clipboard error: {e:#}")),
         }
         Ok(false)
     }
@@ -397,7 +397,7 @@ impl TuiModule for BookmarkModule {
                                         changed = true;
                                     }
                                     Err(e) => {
-                                        ctx.show_error(format!("Export failed: {}", e));
+                                        ctx.show_error(format!("Export failed: {e:#}"));
                                     }
                                 }
                             }
@@ -431,7 +431,7 @@ impl TuiModule for BookmarkModule {
                                         }
                                     }
                                     Err(e) => {
-                                        ctx.show_error(format!("Import failed: {}", e));
+                                        ctx.show_error(format!("Import failed: {e:#}"));
                                     }
                                 }
                             }

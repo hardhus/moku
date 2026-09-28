@@ -55,7 +55,8 @@ zeroize = { version = "1", features = ["derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 aes-gcm = "0.10"
 
-# Mnemonic
+# Mnemonic: not used yet. Kept for the recovery-key work in P5, where the
+# BIP39 crate choice (tiny-bip39 vs bip39) is decided (audit KN-5.5).
 tiny-bip39 = "2.0"
 
 
@@ -70,7 +71,9 @@ image = { version = "0.25", default-features = false, features = ["png", "ico"] 
 # Windows AUMID kaydı (sadece moku-notify, sadece Windows hedefinde) +
 # FreeConsole (moku-bin, autostart'ta konsol penceresini gizlemek için)
 winreg = "0.52"
-windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Console"] }
+# Single `windows` version for the whole workspace (0.62, the one winfsp
+# and sysinfo already pull in). Crates add the features they need locally.
+windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Console"] }
 
 # Internal Crates
 moku-core = { path = "./moku-core" }

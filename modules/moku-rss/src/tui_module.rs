@@ -158,7 +158,7 @@ async fn delete_feed_at(
     }
     let removed = feeds.remove(index);
     if let Err(e) = RssEngine::save_feeds(&ctx.storage, &ctx.config.load(), feeds).await {
-        ctx.show_error(format!("Delete error: {}", e));
+        ctx.show_error(format!("Delete error: {e:#}"));
     } else {
         ctx.show_info(format!("Removed: {}", feed_label(&removed)));
         feed_state.select(Some(index));
@@ -250,7 +250,7 @@ impl TuiModule for RssTuiModule {
                     ctx.show_info("Feeds refreshed successfully.");
                 }
                 Err(e) => {
-                    ctx.show_error(format!("Refresh error: {}", e));
+                    ctx.show_error(format!("Refresh error: {e:#}"));
                 }
             }
             changed = true;
