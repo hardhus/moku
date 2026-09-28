@@ -21,11 +21,22 @@ pub struct Quota {
 
 impl Quota {
     pub fn load(usage_path: PathBuf, limit_bytes: u64) -> Self {
-        let used = std::fs::read_to_string(&usage_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<UsageFile>(&s).ok())
-            .map(|u| u.used_bytes)
-            .unwrap_or(0);
+        // Missing is normal (a fresh volume); unreadable/corrupt is worth a
+        // warning: usage then restarts from 0 until the next reconcile.
+        let used = match std::fs::read_to_string(&usage_path) {
+            Ok(s) => match serde_json::from_str::<UsageFile>(&s) {
+                Ok(u) => u.used_bytes,
+                Err(e) => {
+                    tracing::warn!(path = %usage_path.display(), "corrupt usage file, counting from 0: {e}");
+                    0
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => {
+                tracing::warn!(path = %usage_path.display(), "unreadable usage file, counting from 0: {e}");
+                0
+            }
+        };
         Self {
             usage_path,
             used: AtomicU64::new(used),
@@ -53,7 +64,9 @@ impl Quota {
         }
         loop {
             let current = self.used.load(Ordering::SeqCst);
-            let projected = current + delta;
+            let Some(projected) = current.checked_add(delta) else {
+                return false;
+            };
             if projected > self.limit.load(Ordering::SeqCst) {
                 return false;
             }
@@ -170,5 +183,14 @@ mod tests {
         let q = Quota::load(dir.path().join("usage.json"), 1000);
         q.reconcile_from_scan(&data_root).unwrap();
         assert_eq!(q.used_bytes(), 30);
+    }
+
+    #[test]
+    fn test_try_grow_overflow_is_refused_not_wrapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = Quota::load(dir.path().join("usage.json"), u64::MAX);
+        assert!(q.try_grow(u64::MAX - 1));
+        assert!(!q.try_grow(10), "an overflowing reservation must fail");
+        assert_eq!(q.used_bytes(), u64::MAX - 1);
     }
 }

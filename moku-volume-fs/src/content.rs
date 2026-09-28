@@ -11,6 +11,15 @@ use crate::keys::ContentKey;
 pub const MAGIC: &[u8; 4] = b"MKV1";
 pub const HEADER_SIZE: u64 = 4 + 1 + 16;
 
+/// Encrypted tail blocks are flushed to disk in batches of about this many
+/// bytes, so a huge append or a far-past-EOF extend never has to build the
+/// whole range in memory.
+const WRITE_BATCH_BYTES: usize = 1 << 20;
+
+/// `set_len` extends a file in logical chunks of this size (each one a
+/// bounded `write_range` call) for the same reason.
+const EXTEND_CHUNK_BYTES: u64 = 1 << 20;
+
 /// Creates a new, empty volume-format file: just the header, zero blocks.
 pub fn create_empty_file(path: &Path, file_id: &[u8; 16]) -> Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
@@ -188,7 +197,15 @@ pub fn write_range(
     let new_logical_size = logical_size.max(write_end);
     let new_last_block = (new_logical_size - 1) / BLOCK_SIZE as u64;
 
-    let mut appended = Vec::new();
+    // No truncation first: the new tail always covers at least the old
+    // tail's extent (the logical size never shrinks here), so the blocks
+    // are simply overwritten in place and then appended. A crash can
+    // therefore tear at most the one block being written; data already on
+    // disk is never cut off ahead of its replacement.
+    // Old blocks are read inside the loop (moving the file cursor), so
+    // every batch write seeks to its own tracked position explicitly.
+    let mut write_pos = block_offset(tail_start);
+    let mut batch: Vec<u8> = Vec::new();
     for block_idx in tail_start..=new_last_block {
         let block_logical_start = block_idx * BLOCK_SIZE as u64;
         let this_block_len = (new_logical_size - block_logical_start).min(BLOCK_SIZE as u64) as usize;
@@ -202,14 +219,19 @@ pub fn write_range(
         plain.resize(this_block_len, 0);
         patch_block(&mut plain, block_idx, offset, data);
         let encrypted = cipher.encrypt_block(file_id, block_idx, &plain)?;
-        appended.extend_from_slice(&encrypted);
+        batch.extend_from_slice(&encrypted);
+        if batch.len() >= WRITE_BATCH_BYTES {
+            file.seek(SeekFrom::Start(write_pos))?;
+            file.write_all(&batch)?;
+            write_pos += batch.len() as u64;
+            batch.clear();
+        }
     }
+    file.seek(SeekFrom::Start(write_pos))?;
+    file.write_all(&batch)?;
+    write_pos += batch.len() as u64;
 
-    file.set_len(block_offset(tail_start))?;
-    file.seek(SeekFrom::Start(block_offset(tail_start)))?;
-    file.write_all(&appended)?;
-
-    let physical_after = block_offset(tail_start) + appended.len() as u64;
+    let physical_after = write_pos;
     Ok((data.len(), physical_before, physical_after))
 }
 
@@ -236,9 +258,16 @@ pub fn set_len(
     if new_size > logical_size {
         // Extend with zero bytes via the same tail-rewrite path as a write
         // of empty-ish data past the current end.
-        let filler_offset = logical_size;
-        let filler = vec![0u8; (new_size - logical_size) as usize];
-        let (_, _, physical_after) = write_range(file, content_key, file_id, filler_offset, &filler)?;
+        // Zero-fill in bounded chunks rather than one `vec!` of the whole
+        // gap (a single `seteof` far past EOF used to allocate it all).
+        let mut pos = logical_size;
+        let mut physical_after = physical_before;
+        while pos < new_size {
+            let len = (new_size - pos).min(EXTEND_CHUNK_BYTES) as usize;
+            let (_, _, after) = write_range(file, content_key, file_id, pos, &vec![0u8; len])?;
+            physical_after = after;
+            pos += len as u64;
+        }
         return Ok((physical_before, physical_after));
     }
 
@@ -254,11 +283,13 @@ pub fn set_len(
     plain.truncate(remainder);
     let encrypted = cipher.encrypt_block(file_id, last_kept, &plain)?;
 
-    file.set_len(block_offset(last_kept))?;
+    // Write the new last block first, then cut the file after it: a crash
+    // in between leaves a longer file (stale trailing blocks), never a
+    // file whose last block is already gone.
     file.seek(SeekFrom::Start(block_offset(last_kept)))?;
     file.write_all(&encrypted)?;
-
     let physical_after = block_offset(last_kept) + encrypted.len() as u64;
+    file.set_len(physical_after)?;
     Ok((physical_before, physical_after))
 }
 
@@ -420,5 +451,59 @@ mod tests {
         let mut buf = vec![0u8; size as usize];
         read_range(&mut file, &k, &file_id, 0, &mut buf).unwrap();
         assert_eq!(&buf[BLOCK_SIZE..], b"tail-extend-data");
+    }
+
+    #[test]
+    fn test_tail_write_never_shrinks_the_physical_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f");
+        let file_id = [8u8; 16];
+        create_empty_file(&path, &file_id).unwrap();
+        let k = key();
+        let mut file = open_rw(&path);
+        write_range(&mut file, &k, &file_id, 0, &vec![1u8; BLOCK_SIZE * 3 + 100]).unwrap();
+        let before = file.metadata().unwrap().len();
+        // Overwrite inside the last (partial) block without extending it.
+        let (_, b, a) = write_range(&mut file, &k, &file_id, (BLOCK_SIZE * 3) as u64, b"xy").unwrap();
+        assert_eq!(b, before);
+        assert!(a >= b, "the tail path must never shrink the file");
+        assert_eq!(file.metadata().unwrap().len(), before);
+    }
+
+    #[test]
+    fn test_multi_batch_append_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f");
+        let file_id = [9u8; 16];
+        create_empty_file(&path, &file_id).unwrap();
+        let k = key();
+        let mut file = open_rw(&path);
+        // > WRITE_BATCH_BYTES of ciphertext, so several batches are flushed.
+        let data: Vec<u8> = (0..(WRITE_BATCH_BYTES * 2 + 12_345)).map(|i| (i % 253) as u8).collect();
+        write_range(&mut file, &k, &file_id, 0, &data).unwrap();
+        let (size, _) = logical_layout(file.metadata().unwrap().len());
+        assert_eq!(size, data.len() as u64);
+        let mut buf = vec![0u8; data.len()];
+        read_range(&mut file, &k, &file_id, 0, &mut buf).unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[test]
+    fn test_large_extend_is_chunked_and_zero_filled() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("f");
+        let file_id = [10u8; 16];
+        create_empty_file(&path, &file_id).unwrap();
+        let k = key();
+        let mut file = open_rw(&path);
+        write_range(&mut file, &k, &file_id, 0, b"head").unwrap();
+        let new_size = EXTEND_CHUNK_BYTES * 3 + 7;
+        set_len(&mut file, &k, &file_id, new_size).unwrap();
+        let (size, _) = logical_layout(file.metadata().unwrap().len());
+        assert_eq!(size, new_size);
+        let mut buf = vec![0xAAu8; new_size as usize];
+        read_range(&mut file, &k, &file_id, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..4], b"head");
+        assert!(buf[4..].iter().all(|&b| b == 0));
     }
 }

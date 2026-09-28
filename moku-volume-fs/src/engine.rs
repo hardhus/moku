@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
@@ -34,6 +34,11 @@ pub struct VolumeEngine {
     open_files: Mutex<HashMap<u64, OpenFile>>,
     next_fh: AtomicU64,
     file_id_cache: Mutex<HashMap<PathBuf, [u8; 16]>>,
+    /// One reader/writer lock per file, keyed by its stable `file_id`
+    /// (unchanged by rename): reads share, writes and resizes are
+    /// exclusive, so two concurrent writes to one file can't interleave
+    /// their read-modify-write of the same blocks.
+    file_locks: Mutex<HashMap<[u8; 16], Arc<RwLock<()>>>>,
     /// Held for the engine's whole lifetime; see `VolumeLock`.
     _lock: VolumeLock,
 }
@@ -60,6 +65,7 @@ impl VolumeEngine {
             open_files: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             file_id_cache: Mutex::new(HashMap::new()),
+            file_locks: Mutex::new(HashMap::new()),
             _lock: lock,
         })
     }
@@ -244,14 +250,23 @@ impl VolumeEngine {
         Ok((f.backing.clone(), f.file_id))
     }
 
+    fn file_lock(&self, file_id: &[u8; 16]) -> Arc<RwLock<()>> {
+        let mut locks = self.file_locks.lock().unwrap_or_else(|p| p.into_inner());
+        Arc::clone(locks.entry(*file_id).or_default())
+    }
+
     pub fn read(&self, fh: u64, offset: u64, buf: &mut [u8]) -> VResult<usize> {
         let (backing, file_id) = self.lookup_open(fh)?;
+        let lock = self.file_lock(&file_id);
+        let _shared = lock.read().unwrap_or_else(|p| p.into_inner());
         let mut file = OpenOptions::new().read(true).open(&backing)?;
         content::read_range(&mut file, &self.content_key, &file_id, offset, buf).map_err(VolumeFsError::from)
     }
 
     pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> VResult<usize> {
         let (backing, file_id) = self.lookup_open(fh)?;
+        let lock = self.file_lock(&file_id);
+        let _exclusive = lock.write().unwrap_or_else(|p| p.into_inner());
         let mut file = OpenOptions::new().read(true).write(true).open(&backing)?;
         let physical_before = file.metadata()?.len();
         let write_end = offset
@@ -262,7 +277,16 @@ impl VolumeEngine {
             return Err(VolumeFsError::QuotaExceeded);
         }
         let (written, before, after) =
-            content::write_range(&mut file, &self.content_key, &file_id, offset, data).map_err(VolumeFsError::from)?;
+            match content::write_range(&mut file, &self.content_key, &file_id, offset, data) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Settle the reservation against what actually reached
+                    // disk; a failed write must not leak quota forever.
+                    let now = file.metadata().map(|m| m.len()).unwrap_or(physical_before);
+                    self.reconcile_reservation(projected_growth, now.saturating_sub(physical_before));
+                    return Err(VolumeFsError::from(e));
+                }
+            };
         // try_grow reserved a conservative upper bound; true physical
         // growth from block alignment is usually smaller, so reconcile.
         self.reconcile_reservation(projected_growth, after.saturating_sub(before));
@@ -273,12 +297,25 @@ impl VolumeEngine {
         let backing = self.pathmap.resolve(&self.name_key, path)?;
         let mut file = OpenOptions::new().read(true).write(true).open(&backing)?;
         let file_id = content::read_file_id(&mut file).map_err(VolumeFsError::from)?;
+        let lock = self.file_lock(&file_id);
+        let _exclusive = lock.write().unwrap_or_else(|p| p.into_inner());
         let physical_before = file.metadata()?.len();
         let projected_growth = size.saturating_sub(physical_before);
         if projected_growth > 0 && !self.quota.try_grow(projected_growth) {
             return Err(VolumeFsError::QuotaExceeded);
         }
-        let (before, after) = content::set_len(&mut file, &self.content_key, &file_id, size).map_err(VolumeFsError::from)?;
+        let (before, after) = match content::set_len(&mut file, &self.content_key, &file_id, size) {
+            Ok(v) => v,
+            Err(e) => {
+                let now = file.metadata().map(|m| m.len()).unwrap_or(physical_before);
+                if now < physical_before {
+                    self.quota.shrink(projected_growth + (physical_before - now));
+                } else {
+                    self.reconcile_reservation(projected_growth, now - physical_before);
+                }
+                return Err(VolumeFsError::from(e));
+            }
+        };
         if after < before {
             self.quota.shrink(before - after);
         } else {
@@ -723,5 +760,56 @@ mod tests {
         let id1 = eng.file_id(&VirtualPath::root()).unwrap();
         let id2 = eng.file_id(&VirtualPath::root()).unwrap();
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_failed_write_does_not_leak_quota() {
+        let dir = tempdir().unwrap();
+        let e = engine(dir.path(), 10_000_000);
+        let root = VirtualPath::root();
+        let (fh, _) = e.create(&root, "f.bin").unwrap();
+        e.write(fh, 0, &vec![3u8; 5000]).unwrap();
+        let used_before = e.usage_bytes();
+
+        // Corrupt the last on-disk block so the next tail write fails while
+        // decrypting it (after the quota reservation was taken).
+        let backing = e.pathmap.resolve(&e.name_key, &VirtualPath::parse("/f.bin")).unwrap();
+        let mut bytes = std::fs::read(&backing).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        std::fs::write(&backing, &bytes).unwrap();
+
+        assert!(e.write(fh, 5000, &vec![4u8; 100_000]).is_err());
+        assert_eq!(e.usage_bytes(), used_before, "the reservation must be given back");
+    }
+
+    #[test]
+    fn test_concurrent_writes_to_one_file_do_not_interleave() {
+        let dir = tempdir().unwrap();
+        let e = std::sync::Arc::new(engine(dir.path(), 100_000_000));
+        let (fh, _) = e.create(&VirtualPath::root(), "c.bin").unwrap();
+        e.write(fh, 0, &vec![0u8; 64 * 1024]).unwrap();
+        let handles: Vec<_> = (0..4u8)
+            .map(|t| {
+                let e = std::sync::Arc::clone(&e);
+                std::thread::spawn(move || {
+                    for i in 0..16u64 {
+                        let off = (t as u64) * 16 * 1024 + i * 1024;
+                        e.write(fh, off, &vec![t + 1; 1024]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut done = 0;
+        while done < buf.len() {
+            done += e.read(fh, done as u64, &mut buf[done..]).unwrap();
+        }
+        for t in 0..4usize {
+            assert!(buf[t * 16 * 1024..(t + 1) * 16 * 1024].iter().all(|&b| b == t as u8 + 1));
+        }
     }
 }
