@@ -161,7 +161,7 @@ impl VolumeManagerModule {
                     format!("Mounted '{display_name}' at {mountpoint} (worker PID: {pid}).")
                 }
                 Ok(worker::MountOutcome::Failed { message }) => format!("Mount failed: {message}"),
-                Err(e) => format!("Mount failed: {e}"),
+                Err(e) => format!("Mount failed: {e:#}"),
             };
             *slot.lock().unwrap() = Some(msg);
         });
@@ -194,7 +194,7 @@ impl VolumeManagerModule {
                     Ok(worker::MountOutcome::Failed { message }) => {
                         format!("Mount failed: {message}")
                     }
-                    Err(e) => format!("Mount failed: {e}"),
+                    Err(e) => format!("Mount failed: {e:#}"),
                 };
             *slot.lock().unwrap() = Some(msg);
         });
@@ -210,7 +210,7 @@ impl VolumeManagerModule {
         tokio::spawn(async move {
             let msg = match registry::create_volume(&name, size_bytes, secret, None).await {
                 Ok(cfg) => format!("Created '{}' (id: {}).", cfg.display_name, cfg.id),
-                Err(e) => format!("Create failed: {e}"),
+                Err(e) => format!("Create failed: {e:#}"),
             };
             *slot.lock().unwrap() = Some(msg);
         });
@@ -231,7 +231,7 @@ impl VolumeManagerModule {
                 }
                 Ok(StopOutcome::Graceful) => format!("Unmounted '{display_name}'."),
                 Ok(StopOutcome::Forced) => format!("Unmounted '{display_name}' (forced)."),
-                Err(e) => format!("Unmount failed: {e}"),
+                Err(e) => format!("Unmount failed: {e:#}"),
             };
             *slot.lock().unwrap() = Some(msg);
         });

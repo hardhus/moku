@@ -72,7 +72,7 @@ pub async fn handle(sub: &VolumeCommands) -> Result<()> {
                 // must actually be verified against it (not just typed
                 // twice and assumed to match, which is what silently
                 // failed before this).
-                let app_security = SecurityManager::new().map_err(|e| anyhow!("{e}"))?;
+                let app_security = SecurityManager::new()?;
                 if !app_security.is_vault_initialized() {
                     bail!(
                         "moku's vault isn't set up yet — initialize it first from the Vault Security screen in the TUI, or create this volume with --custom-password instead."

@@ -2,14 +2,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result, anyhow};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use secrecy::SecretBox;
 
 use crate::keys::NameKey;
 use crate::names::NameCipher;
-use crate::types::{VResult, VolumeFsError, VirtualPath};
+use crate::types::{VResult, VResult as Result, VolumeFsError, VirtualPath};
 
 const DIR_IV_FILE: &str = ".moku_dir_iv";
 
@@ -58,14 +57,13 @@ impl PathMapper {
                 // unreadable, so that is an error the user must see (restore
                 // `.moku_dir_iv` from a backup), never a silent reset.
                 if has_encrypted_entries(backing_dir)? {
-                    return Err(anyhow!(
-                        "{} is missing its {DIR_IV_FILE}: the names in this directory can't be decrypted without it (restore it from a backup)",
-                        backing_dir.display()
-                    ));
+                    return Err(VolumeFsError::MissingDirIv {
+                        dir: backing_dir.clone(),
+                    });
                 }
                 create_dir_iv_no_replace(backing_dir)?
             }
-            Err(e) => return Err(e).context("failed to read directory IV"),
+            Err(e) => return Err(VolumeFsError::io_at("read a directory IV")(e)),
         };
         self.dir_iv_cache.lock().unwrap().insert(backing_dir.clone(), iv);
         Ok(iv)
@@ -80,8 +78,8 @@ impl PathMapper {
         let mut backing = self.data_root.clone();
         let comps = path.components();
         for (i, comp) in comps.iter().enumerate() {
-            let dir_iv = self.dir_iv_for_backing(&backing).map_err(VolumeFsError::from)?;
-            let encrypted = cipher.encrypt_name(&dir_iv, comp).map_err(|_| VolumeFsError::NameTooLong)?;
+            let dir_iv = self.dir_iv_for_backing(&backing)?;
+            let encrypted = cipher.encrypt_name(&dir_iv, comp)?;
             backing.push(encrypted);
             let is_last = i == comps.len() - 1;
             if !is_last && !backing.is_dir() {
@@ -138,12 +136,12 @@ impl PathMapper {
 fn parse_dir_iv(bytes: &[u8]) -> Result<[u8; 16]> {
     bytes
         .try_into()
-        .map_err(|_| anyhow!("corrupt {DIR_IV_FILE} (wrong length)"))
+        .map_err(|_| VolumeFsError::Corrupt(format!("{DIR_IV_FILE} has the wrong length")))
 }
 
 /// Whether `dir` holds anything besides IV bookkeeping files.
 fn has_encrypted_entries(dir: &Path) -> Result<bool> {
-    for entry in std::fs::read_dir(dir).context("failed to list directory")? {
+    for entry in std::fs::read_dir(dir).map_err(VolumeFsError::io_at("list a directory"))? {
         let name = entry?.file_name();
         if !name.to_string_lossy().starts_with(DIR_IV_FILE) {
             return Ok(true);
@@ -187,9 +185,9 @@ fn create_dir_iv_no_replace(dir: &Path) -> Result<[u8; 16]> {
     let _ = std::fs::remove_file(&tmp_path);
     match linked {
         Ok(()) => Ok(iv),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            parse_dir_iv(&std::fs::read(&iv_path).context("failed to read directory IV")?)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => parse_dir_iv(
+            &std::fs::read(&iv_path).map_err(VolumeFsError::io_at("read a directory IV"))?,
+        ),
         Err(_) => {
             // No hard-link support: create_new directly (still never replaces).
             match std::fs::OpenOptions::new()
@@ -198,14 +196,16 @@ fn create_dir_iv_no_replace(dir: &Path) -> Result<[u8; 16]> {
                 .open(&iv_path)
             {
                 Ok(mut f) => {
-                    f.write_all(&iv).context("failed to write directory IV")?;
-                    f.sync_all().context("failed to write directory IV")?;
+                    f.write_all(&iv)
+                        .map_err(VolumeFsError::io_at("write a directory IV"))?;
+                    f.sync_all()
+                        .map_err(VolumeFsError::io_at("write a directory IV"))?;
                     Ok(iv)
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    parse_dir_iv(&std::fs::read(&iv_path).context("failed to read directory IV")?)
-                }
-                Err(e) => Err(e).context("failed to write directory IV"),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => parse_dir_iv(
+                    &std::fs::read(&iv_path).map_err(VolumeFsError::io_at("read a directory IV"))?,
+                ),
+                Err(e) => Err(VolumeFsError::io_at("write a directory IV")(e)),
             }
         }
     }
@@ -285,7 +285,10 @@ mod tests {
         std::fs::remove_file(root.join(DIR_IV_FILE)).unwrap();
 
         let fresh = PathMapper::new(root.clone());
-        assert!(fresh.read_dir_plain(&k, &root).is_err());
+        assert!(matches!(
+            fresh.read_dir_plain(&k, &root),
+            Err(VolumeFsError::MissingDirIv { .. })
+        ));
         assert!(
             !root.join(DIR_IV_FILE).exists(),
             "a new IV must never be minted for a populated directory"

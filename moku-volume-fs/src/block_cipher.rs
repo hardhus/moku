@@ -2,12 +2,14 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
-use anyhow::{Result, anyhow};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use secrecy::{ExposeSecret, SecretBox};
 
+use moku_crypto::CryptoError;
+
 use crate::keys::ContentKey;
+use crate::types::{VResult as Result, VolumeFsError};
 
 pub const BLOCK_SIZE: usize = 4096;
 pub const NONCE_LEN: usize = 12;
@@ -37,7 +39,7 @@ impl<'a> BlockCipher<'a> {
     pub fn encrypt_block(&self, file_id: &[u8; 16], block_idx: u64, plaintext: &[u8]) -> Result<Vec<u8>> {
         debug_assert!(plaintext.len() <= BLOCK_SIZE);
         let cipher = Aes256Gcm::new_from_slice(&self.key.expose_secret().0)
-            .map_err(|_| anyhow!("invalid content key length"))?;
+            .map_err(|_| CryptoError::InvalidKeyLength)?;
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce_bytes);
@@ -46,7 +48,7 @@ impl<'a> BlockCipher<'a> {
 
         let ciphertext = cipher
             .encrypt(nonce, Payload { msg: plaintext, aad: &aad })
-            .map_err(|e| anyhow!("block encryption failed: {e}"))?;
+            .map_err(|_| CryptoError::EncryptFailed)?;
 
         let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
         out.extend_from_slice(&nonce_bytes);
@@ -57,10 +59,10 @@ impl<'a> BlockCipher<'a> {
     /// Decrypts one on-disk block back into plaintext.
     pub fn decrypt_block(&self, file_id: &[u8; 16], block_idx: u64, disk_bytes: &[u8]) -> Result<Vec<u8>> {
         if disk_bytes.len() < NONCE_LEN + TAG_LEN {
-            return Err(anyhow!("corrupt block: too short"));
+            return Err(VolumeFsError::Corrupt("content block shorter than nonce + tag".into()));
         }
         let cipher = Aes256Gcm::new_from_slice(&self.key.expose_secret().0)
-            .map_err(|_| anyhow!("invalid content key length"))?;
+            .map_err(|_| CryptoError::InvalidKeyLength)?;
 
         let (nonce_bytes, ciphertext) = disk_bytes.split_at(NONCE_LEN);
         let nonce = Nonce::from_slice(nonce_bytes);
@@ -68,7 +70,7 @@ impl<'a> BlockCipher<'a> {
 
         cipher
             .decrypt(nonce, Payload { msg: ciphertext, aad: &aad })
-            .map_err(|_| anyhow!("block decryption failed (corrupt data or wrong key)"))
+            .map_err(|_| VolumeFsError::Integrity("file content block"))
     }
 }
 
@@ -100,7 +102,10 @@ mod tests {
         let cipher = BlockCipher::new(&k);
         let file_id = [1u8; 16];
         let disk = cipher.encrypt_block(&file_id, 3, b"data").unwrap();
-        assert!(cipher.decrypt_block(&file_id, 4, &disk).is_err());
+        assert!(matches!(
+            cipher.decrypt_block(&file_id, 4, &disk),
+            Err(VolumeFsError::Integrity(_))
+        ));
     }
 
     #[test]
@@ -108,7 +113,10 @@ mod tests {
         let k = key();
         let cipher = BlockCipher::new(&k);
         let disk = cipher.encrypt_block(&[1u8; 16], 0, b"data").unwrap();
-        assert!(cipher.decrypt_block(&[2u8; 16], 0, &disk).is_err());
+        assert!(matches!(
+            cipher.decrypt_block(&[2u8; 16], 0, &disk),
+            Err(VolumeFsError::Integrity(_))
+        ));
     }
 
     #[test]

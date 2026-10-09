@@ -53,7 +53,7 @@ impl VolumeEngine {
         usage_path: PathBuf,
         size_limit_bytes: u64,
         lock: VolumeLock,
-    ) -> anyhow::Result<Self> {
+    ) -> VResult<Self> {
         let pathmap = PathMapper::new(data_root);
         pathmap.ensure_root()?;
         let quota = Quota::load(usage_path, size_limit_bytes);
@@ -82,11 +82,11 @@ impl VolumeEngine {
         self.quota.set_limit(new_limit)
     }
 
-    pub fn flush_usage(&self) -> anyhow::Result<()> {
+    pub fn flush_usage(&self) -> VResult<()> {
         self.quota.flush()
     }
 
-    pub fn reconcile_usage(&self) -> anyhow::Result<()> {
+    pub fn reconcile_usage(&self) -> VResult<()> {
         self.quota.reconcile_from_scan(self.pathmap.data_root())
     }
 
@@ -271,7 +271,7 @@ impl VolumeEngine {
         let physical_before = file.metadata()?.len();
         let write_end = offset
             .checked_add(data.len() as u64)
-            .ok_or_else(|| VolumeFsError::Other(anyhow::anyhow!("write offset overflow")))?;
+            .ok_or(VolumeFsError::FileTooLarge)?;
         let projected_growth = write_end.saturating_sub(physical_before);
         if !self.quota.try_grow(projected_growth) {
             return Err(VolumeFsError::QuotaExceeded);
@@ -779,7 +779,10 @@ mod tests {
         bytes[last] ^= 0xFF;
         std::fs::write(&backing, &bytes).unwrap();
 
-        assert!(e.write(fh, 5000, &vec![4u8; 100_000]).is_err());
+        assert!(matches!(
+            e.write(fh, 5000, &vec![4u8; 100_000]),
+            Err(VolumeFsError::Integrity(_))
+        ));
         assert_eq!(e.usage_bytes(), used_before, "the reservation must be given back");
     }
 

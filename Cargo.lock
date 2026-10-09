@@ -2928,7 +2928,6 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "aes-siv",
- "anyhow",
  "base64",
  "hkdf",
  "moku-crypto",

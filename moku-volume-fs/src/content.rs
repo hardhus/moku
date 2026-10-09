@@ -2,11 +2,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use anyhow::{Result, anyhow};
 use secrecy::SecretBox;
 
 use crate::block_cipher::{BLOCK_SIZE, BlockCipher, FULL_BLOCK_DISK_SIZE, NONCE_LEN, TAG_LEN};
 use crate::keys::ContentKey;
+use crate::types::{VResult as Result, VolumeFsError};
 
 pub const MAGIC: &[u8; 4] = b"MKV1";
 pub const HEADER_SIZE: u64 = 4 + 1 + 16;
@@ -34,9 +34,14 @@ pub fn create_empty_file(path: &Path, file_id: &[u8; 16]) -> Result<()> {
 pub fn read_file_id(file: &mut File) -> Result<[u8; 16]> {
     file.seek(SeekFrom::Start(0))?;
     let mut buf = [0u8; HEADER_SIZE as usize];
-    file.read_exact(&mut buf).map_err(|_| anyhow!("corrupt volume file: header unreadable"))?;
+    file.read_exact(&mut buf).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => {
+            VolumeFsError::Corrupt("volume file header is truncated".into())
+        }
+        _ => VolumeFsError::io_at("read a volume file header")(e),
+    })?;
     if &buf[0..4] != MAGIC {
-        return Err(anyhow!("corrupt volume file: bad magic"));
+        return Err(VolumeFsError::Corrupt("volume file has a bad magic number".into()));
     }
     let mut id = [0u8; 16];
     id.copy_from_slice(&buf[5..21]);
@@ -160,7 +165,7 @@ pub fn write_range(
 
     let write_end = offset
         .checked_add(data.len() as u64)
-        .ok_or_else(|| anyhow!("write offset overflow"))?;
+        .ok_or(VolumeFsError::FileTooLarge)?;
     let start_block = offset / BLOCK_SIZE as u64;
     let end_block = (write_end - 1) / BLOCK_SIZE as u64;
     let last_existing_block = if num_blocks == 0 { None } else { Some(num_blocks - 1) };
@@ -305,6 +310,19 @@ mod tests {
 
     fn open_rw(path: &Path) -> File {
         OpenOptions::new().read(true).write(true).open(path).unwrap()
+    }
+
+    #[test]
+    fn test_bad_header_is_corrupt_not_an_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        std::fs::write(&path, b"MK").unwrap();
+        let mut f = File::open(&path).unwrap();
+        assert!(matches!(read_file_id(&mut f), Err(VolumeFsError::Corrupt(_))));
+
+        std::fs::write(&path, [0u8; HEADER_SIZE as usize]).unwrap();
+        let mut f = File::open(&path).unwrap();
+        assert!(matches!(read_file_id(&mut f), Err(VolumeFsError::Corrupt(_))));
     }
 
     #[test]

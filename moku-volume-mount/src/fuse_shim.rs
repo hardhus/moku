@@ -86,7 +86,16 @@ fn map_err(e: VolumeFsError) -> Errno {
         VolumeFsError::QuotaExceeded => Errno::ENOSPC,
         VolumeFsError::BadFileHandle => Errno::EBADF,
         VolumeFsError::Locked => Errno::EBUSY,
-        VolumeFsError::Other(_) => Errno::EIO,
+        VolumeFsError::FileTooLarge => Errno::EFBIG,
+        // Corrupt or unauthenticated on-disk data reads as an I/O error,
+        // as in other encrypted filesystems (gocryptfs).
+        VolumeFsError::Corrupt(_)
+        | VolumeFsError::MissingDirIv { .. }
+        | VolumeFsError::Integrity(_)
+        | VolumeFsError::Crypto(_) => Errno::EIO,
+        // A real OS error keeps its own errno.
+        VolumeFsError::Io(e) | VolumeFsError::IoAt { source: e, .. } => Errno::from(e),
+        VolumeFsError::Write(e) => Errno::from(e.source),
     }
 }
 

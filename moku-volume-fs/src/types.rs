@@ -109,13 +109,42 @@ pub enum VolumeFsError {
     /// already holds this volume's `VolumeLock`.
     #[error("volume is already open (mounted or in use by another moku process)")]
     Locked,
+    /// An offset/length past what a u64 file size can address.
+    #[error("file too large")]
+    FileTooLarge,
+    /// On-disk bytes that aren't in the volume format (bad header magic, a
+    /// truncated block, a malformed name or `.moku_dir_iv`, ...).
+    #[error("corrupt volume data: {0}")]
+    Corrupt(String),
+    /// A directory with encrypted entries lost its `.moku_dir_iv`: its
+    /// names can't be decrypted until the file is restored. Never
+    /// "repaired" by minting a new IV (that would orphan every entry).
+    #[error(
+        "{} is missing its .moku_dir_iv: the names in this directory can't be decrypted without it (restore it from a backup)",
+        dir.display()
+    )]
+    MissingDirIv { dir: std::path::PathBuf },
+    /// AEAD authentication failed for a content block or a file name:
+    /// wrong key, or the bytes were modified/rolled back on disk.
+    #[error("integrity check failed for a {0} (wrong key, or it was modified on disk)")]
+    Integrity(&'static str),
+    #[error("failed to {what}")]
+    IoAt {
+        what: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
     #[error(transparent)]
-    Other(anyhow::Error),
+    Io(std::io::Error),
+    #[error(transparent)]
+    Write(#[from] moku_sys::util::AtomicWriteError),
+    #[error(transparent)]
+    Crypto(#[from] moku_crypto::CryptoError),
 }
 
-impl From<anyhow::Error> for VolumeFsError {
-    fn from(e: anyhow::Error) -> Self {
-        Self::Other(e)
+impl VolumeFsError {
+    pub(crate) fn io_at(what: &'static str) -> impl FnOnce(std::io::Error) -> Self {
+        move |source| VolumeFsError::IoAt { what, source }
     }
 }
 
@@ -124,7 +153,7 @@ impl From<std::io::Error> for VolumeFsError {
         match e.kind() {
             std::io::ErrorKind::NotFound => Self::NotFound,
             std::io::ErrorKind::AlreadyExists => Self::AlreadyExists,
-            _ => Self::Other(e.into()),
+            _ => Self::Io(e),
         }
     }
 }

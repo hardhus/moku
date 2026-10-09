@@ -81,7 +81,8 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
             "volume '{}' is already mounted (or in use by another moku process)",
             cfg.display_name
         ),
-        other => anyhow!("failed to lock volume '{}': {other}", cfg.display_name),
+        other => anyhow::Error::new(other)
+            .context(format!("failed to lock volume '{}'", cfg.display_name)),
     })?;
 
     let master_key = registry::resolve_volume_master_key(&volume_dir, &cfg, secret).await?;
@@ -173,7 +174,10 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     // not swallowed: a stale usage.json means wrong quota numbers until the
     // next unclean-session reconcile.
     if let Err(e) = engine.flush_usage() {
-        eprintln!("failed to persist volume usage: {e:#}");
+        eprintln!(
+            "failed to persist volume usage: {}",
+            moku_sys::util::error_chain(&e)
+        );
     }
 
     crate::pid::remove(volume_id);

@@ -12,7 +12,8 @@ use std::sync::mpsc::Receiver;
 
 use anyhow::{Result, anyhow};
 use windows::Win32::Foundation::{
-    STATUS_DIRECTORY_NOT_EMPTY, STATUS_DISK_FULL, STATUS_END_OF_FILE, STATUS_FILE_IS_A_DIRECTORY,
+    STATUS_DATA_ERROR, STATUS_DIRECTORY_NOT_EMPTY, STATUS_DISK_FULL, STATUS_END_OF_FILE,
+    STATUS_FILE_CORRUPT_ERROR, STATUS_FILE_IS_A_DIRECTORY, STATUS_FILE_TOO_LARGE,
     STATUS_INVALID_HANDLE,
     STATUS_NOT_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_INVALID,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_UNSUCCESSFUL,
@@ -60,7 +61,15 @@ fn map_err(e: VolumeFsError) -> winfsp::FspError {
         VolumeFsError::BadFileHandle => STATUS_INVALID_HANDLE.into(),
         // `Locked` only comes from `VolumeLock::acquire`, before a mount
         // exists; no filesystem callback can produce it.
-        VolumeFsError::Locked | VolumeFsError::Other(_) => STATUS_UNSUCCESSFUL.into(),
+        VolumeFsError::FileTooLarge => STATUS_FILE_TOO_LARGE.into(),
+        VolumeFsError::Corrupt(_) | VolumeFsError::MissingDirIv { .. } => {
+            STATUS_FILE_CORRUPT_ERROR.into()
+        }
+        VolumeFsError::Integrity(_) => STATUS_DATA_ERROR.into(),
+        // A real OS error keeps its own code (access denied, disk full, ...).
+        VolumeFsError::Io(e) | VolumeFsError::IoAt { source: e, .. } => e.into(),
+        VolumeFsError::Write(e) => e.source.into(),
+        VolumeFsError::Locked | VolumeFsError::Crypto(_) => STATUS_UNSUCCESSFUL.into(),
     }
 }
 

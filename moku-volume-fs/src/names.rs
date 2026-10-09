@@ -1,10 +1,12 @@
 use aes_siv::KeyInit;
 use aes_siv::siv::Aes256Siv;
-use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use secrecy::{ExposeSecret, SecretBox};
 
+use moku_crypto::CryptoError;
+
 use crate::keys::NameKey;
+use crate::types::{VResult as Result, VolumeFsError};
 
 /// Cap on the *virtual* (plaintext) file/directory name length. AES-SIV +
 /// base64url inflates by roughly 1.33x on top of a fixed 16-byte SIV tag,
@@ -25,7 +27,7 @@ impl<'a> NameCipher<'a> {
 
     fn cipher(&self) -> Result<Aes256Siv> {
         Aes256Siv::new_from_slice(&self.key.expose_secret().0)
-            .map_err(|_| anyhow!("invalid name key length"))
+            .map_err(|_| CryptoError::InvalidKeyLength.into())
     }
 
     /// Encrypts one path segment name, deterministically, scoped to its
@@ -34,24 +36,25 @@ impl<'a> NameCipher<'a> {
     /// never requires re-encrypting its children (plan §1).
     pub fn encrypt_name(&self, dir_iv: &[u8; 16], name: &str) -> Result<String> {
         if name.len() > MAX_VIRTUAL_NAME_LEN {
-            return Err(anyhow!("name too long"));
+            return Err(VolumeFsError::NameTooLong);
         }
         let mut cipher = self.cipher()?;
         let ciphertext = cipher
             .encrypt([dir_iv.as_slice()], name.as_bytes())
-            .map_err(|e| anyhow!("name encryption failed: {e}"))?;
+            .map_err(|_| CryptoError::EncryptFailed)?;
         Ok(URL_SAFE_NO_PAD.encode(ciphertext))
     }
 
     pub fn decrypt_name(&self, dir_iv: &[u8; 16], encoded: &str) -> Result<String> {
         let ciphertext = URL_SAFE_NO_PAD
             .decode(encoded)
-            .map_err(|e| anyhow!("corrupt backing name (base64): {e}"))?;
+            .map_err(|e| VolumeFsError::Corrupt(format!("backing name is not base64: {e}")))?;
         let mut cipher = self.cipher()?;
         let plaintext = cipher
             .decrypt([dir_iv.as_slice()], &ciphertext)
-            .map_err(|_| anyhow!("name decryption failed (corrupt data or wrong key)"))?;
-        String::from_utf8(plaintext).map_err(|_| anyhow!("decrypted name is not valid UTF-8"))
+            .map_err(|_| VolumeFsError::Integrity("file name"))?;
+        String::from_utf8(plaintext)
+            .map_err(|_| VolumeFsError::Corrupt("decrypted name is not valid UTF-8".into()))
     }
 }
 
@@ -97,7 +100,10 @@ mod tests {
         let k = key();
         let cipher = NameCipher::new(&k);
         let long_name = "a".repeat(MAX_VIRTUAL_NAME_LEN + 1);
-        assert!(cipher.encrypt_name(&[0u8; 16], &long_name).is_err());
+        assert!(matches!(
+            cipher.encrypt_name(&[0u8; 16], &long_name),
+            Err(VolumeFsError::NameTooLong)
+        ));
     }
 
     #[test]
@@ -105,7 +111,10 @@ mod tests {
         let k = key();
         let cipher = NameCipher::new(&k);
         let encrypted = cipher.encrypt_name(&[1u8; 16], "secret.txt").unwrap();
-        assert!(cipher.decrypt_name(&[2u8; 16], &encrypted).is_err());
+        assert!(matches!(
+            cipher.decrypt_name(&[2u8; 16], &encrypted),
+            Err(VolumeFsError::Integrity(_))
+        ));
     }
 
     #[test]

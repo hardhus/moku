@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::Result;
+use crate::types::{VResult as Result, VolumeFsError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Default)]
@@ -102,7 +102,9 @@ impl Quota {
         if let Some(parent) = self.usage_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        moku_sys::util::atomic_write(&self.usage_path, serde_json::to_string(&data)?.as_bytes())?;
+        let json = serde_json::to_string(&data)
+            .map_err(|e| VolumeFsError::io_at("encode usage.json")(e.into()))?;
+        moku_sys::util::atomic_write(&self.usage_path, json.as_bytes())?;
         Ok(())
     }
 
