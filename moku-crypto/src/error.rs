@@ -14,4 +14,11 @@ pub enum CryptoError {
     EncryptFailed,
     #[error("key derivation failed: {0}")]
     Kdf(String),
+    /// The key isn't available: the vault is locked (`KeyCell` wiped).
+    #[error("the key is locked")]
+    Locked,
+    /// A self-describing ciphertext names an algorithm this build doesn't
+    /// know.
+    #[error("unsupported algorithm id {0}")]
+    Unsupported(u8),
 }

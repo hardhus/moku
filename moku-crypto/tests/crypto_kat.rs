@@ -31,6 +31,14 @@ fn k1_argon2id_vault_key() {
 }
 const K1_EXPECTED: &str = "4471256fa58cf203c9c30f88acf8284cb765abf5fdb02f0e300f6bade11793d1";
 
+/// K1 through the P3 API: `password_key` with the default parameters.
+#[test]
+fn k1_argon2id_vault_key_via_password_key() {
+    let pw = moku_crypto::SecretString::from("correct horse".to_string());
+    let key = moku_crypto::password_key(&pw, &[0x01; 16], moku_crypto::kdf::DEFAULT_KDF).unwrap();
+    assert_eq!(hex(key.expose()), K1_EXPECTED);
+}
+
 /// K7a — the storage/canary ciphertext format: `nonce(12) || ct || tag(16)`,
 /// AES-256-GCM, no AAD. Built here with a fixed nonce so the exact bytes can
 /// be pinned, then opened with the production `decrypt`.

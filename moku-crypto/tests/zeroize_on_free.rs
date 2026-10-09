@@ -161,3 +161,40 @@ mod library_facts {
         assert_eq!(frees, Frees { checked: 1, dirty: 0 });
     }
 }
+
+mod moku_types {
+    use super::*;
+    use moku_crypto::kdf::DEFAULT_KDF;
+    use moku_crypto::{Key, RootKey, SecretString, password_key};
+
+    #[test]
+    fn password_key_wipes_its_argon2_memory() {
+        let pw = SecretString::from("correct horse".to_string());
+        let frees = track(MIB, usize::MAX, || {
+            let key = password_key(&pw, &[1u8; 16], DEFAULT_KDF).unwrap();
+            drop(key);
+        });
+        assert!(frees.checked >= 1, "the 64 MiB block buffer should be seen");
+        assert_eq!(frees.dirty, 0);
+    }
+
+    #[test]
+    fn key_wipes_its_bytes_on_drop() {
+        let frees = track(32, 32, || drop(Key::<RootKey>::from_slice(&[0xaa; 32]).unwrap()));
+        assert_eq!(frees, Frees { checked: 1, dirty: 0 });
+    }
+
+    #[test]
+    fn secret_string_never_leaves_a_copy_when_it_grows() {
+        let frees = track(1, usize::MAX, || {
+            let mut s = SecretString::new();
+            for _ in 0..1000 {
+                s.push('x');
+            }
+            s.pop();
+            drop(s);
+        });
+        assert!(frees.checked >= 2, "growth should have moved the buffer");
+        assert_eq!(frees.dirty, 0);
+    }
+}
