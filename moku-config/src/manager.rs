@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use tokio::fs;
 
-use crate::dirs;
+use moku_sys::dirs;
 
-use super::schema::MokuConfig;
+use crate::MokuConfig;
 
 pub struct ConfigManager;
 

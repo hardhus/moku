@@ -1,0 +1,17 @@
+[package]
+name = "moku-config"
+version = "0.1.0"
+edition = "2024"
+
+# config.toml: the schema (general/keys/storage/themes/modules/plugins),
+# loading and saving it, and the per-module encryption policy that is
+# resolved from it. No UI dependency — moku-core turns `ThemeColors`
+# into ratatui colors.
+
+[dependencies]
+moku-sys.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true

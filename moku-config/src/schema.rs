@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::ThemeColors;
+use crate::ThemeColors;
 
 /// Main configuration structure holding all settings.
 #[derive(Debug, Serialize, Deserialize, Clone)]

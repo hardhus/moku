@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::config::MokuConfig;
+use crate::MokuConfig;
 
 #[derive(Deserialize, Default)]
 #[serde(default)]

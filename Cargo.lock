@@ -2501,6 +2501,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "moku-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "moku-sys",
+ "serde",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "moku-context"
 version = "0.1.1"
 dependencies = [
@@ -2523,6 +2535,7 @@ dependencies = [
  "async-trait",
  "crossterm",
  "futures",
+ "moku-config",
  "moku-crypto",
  "moku-sys",
  "moku-vault",
