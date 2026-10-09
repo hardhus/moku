@@ -15,7 +15,12 @@ pub struct ConfigIssue {
 
 impl fmt::Display for ConfigIssue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "config.toml [{}]: {}", self.path, self.message)
+        if self.path == "config.toml" {
+            // A whole-file problem: no section to point at.
+            write!(f, "config.toml: {}", self.message)
+        } else {
+            write!(f, "config.toml [{}]: {}", self.path, self.message)
+        }
     }
 }
 

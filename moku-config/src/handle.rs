@@ -159,7 +159,7 @@ impl ConfigHandle {
                 let parse_error = parse_error.trim().replace('\n', " ");
                 return read_only(
                     format!(
-                        "config.toml isn't valid TOML ({parse_error}); using the defaults, and changes won't be saved this session{copy}"
+                        "not valid TOML ({parse_error}); using the defaults, and changes won't be saved this session{copy}"
                     ),
                     issues,
                 );
@@ -444,7 +444,7 @@ fn config_from_table(
     take(table, "config_version", &mut invalid, &mut config.config_version);
     if config.config_version > CURRENT_CONFIG_VERSION {
         newer_version = Some(format!(
-            "config.toml is version {}, written by a newer moku (this one understands up to {}); using it read-only",
+            "version {} was written by a newer moku (this one understands up to {}); using it read-only",
             config.config_version, CURRENT_CONFIG_VERSION
         ));
     }

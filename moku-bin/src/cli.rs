@@ -57,8 +57,8 @@ pub enum Commands {
         #[command(subcommand)]
         sub: ConfigCommands,
     },
-    /// Manage encrypted, mountable volumes (create/list/status/resize).
-    /// Mount/unmount are added in a later phase.
+    /// Manage encrypted, mountable volumes (create, list, status, resize,
+    /// mount, unmount, delete, import).
     Volume {
         #[command(subcommand)]
         sub: VolumeCommands,

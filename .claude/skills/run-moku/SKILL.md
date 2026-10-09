@@ -129,6 +129,6 @@ The suite includes real WinFsp mount tests in `moku-volume-mount`.
 - `!! ...\target\debug\moku.exe not found`: run `cargo build -p
   moku-bin` first, or set `MOKU_EXE` to another build.
 - `!! TIMEOUT waiting for 'Todo List'` right after the password: wrong
-  `MOKU_DEV_PASSWORD`. The lock screen then shows "Incorrect password
-  or initialization error!"; run the stdin example above with
-  `outline` to see it.
+  `MOKU_DEV_PASSWORD`. The lock screen then shows "Incorrect password."
+  (a damaged or unreadable `meta.json` says so instead); run the stdin
+  example above with `outline` to see it.
