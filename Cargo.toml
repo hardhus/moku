@@ -57,6 +57,21 @@ argon2 = "0.5"
 zeroize = { version = "1", features = ["derive"] }
 secrecy = { version = "0.10", features = ["serde"] }
 aes-gcm = "0.10"
+# Only moku-crypto may depend on the crates below (and on argon2/aes-gcm
+# above); moku-crypto/tests/crypto_crate_ban.rs enforces it.
+aes-siv = "0.7"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+# Listed directly only to switch on their `zeroize` feature: features don't
+# propagate from aes-gcm, so without these the AES round keys and GHASH
+# state are dropped unwiped (see moku-crypto/tests/zeroize_on_free.rs).
+aes = "0.8"
+ghash = "0.5"
+polyval = "0.6"
+chacha20 = "0.9"
+poly1305 = "0.8"
+base64 = "0.22"
 
 # Mnemonic: not used yet. Kept for the recovery-key work in P5, where the
 # BIP39 crate choice (tiny-bip39 vs bip39) is decided (audit KN-5.5).
