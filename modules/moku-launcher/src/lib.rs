@@ -12,7 +12,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use moku_config::{ConfigManager, MokuConfig};
+use moku_config::{ConfigHandle, MokuConfig};
 use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
 
 mod fuzzy;
@@ -104,9 +104,8 @@ impl LauncherModule {
     /// modules to be shown in the launcher (e.g. successfully loaded Lua plugins).
     /// The combined list is then reordered according to any saved
     /// `[modules.launcher] order` in `config` (see `merge_order`).
-    pub fn new(extra_visible: Vec<ModuleId>, config: &MokuConfig) -> Self {
-        let settings: LauncherModuleConfig =
-            config.resolve_module_config(ModuleId::LAUNCHER.as_str());
+    pub fn new(extra_visible: Vec<ModuleId>, config: &ConfigHandle) -> Self {
+        let settings: LauncherModuleConfig = config.module_config(ModuleId::LAUNCHER.as_str());
         let registered_modules =
             merge_order(ModuleId::all_visible(), extra_visible, &settings.order);
         let max_visible = settings.max_visible;
@@ -292,29 +291,18 @@ impl LauncherModule {
     }
 
     /// Writes the current `registered_modules` order to
-    /// `[modules.launcher].order` — in memory immediately (so it takes
-    /// effect right away) and to disk (so it survives a restart). Mirrors
-    /// `modules/moku-settings/src/tabs/commit.rs`'s `CommitTab::save` /
-    /// `modules/moku-settings/src/lib.rs`'s Ctrl+S error-toast shape.
+    /// `[modules.launcher].order` (saved right away; only that key is
+    /// written, so nothing else in config.toml is touched). A failure is
+    /// shown as an error toast by `update_module_config`.
     async fn persist_order(&mut self, ctx: &mut AppContext) {
-        let mut settings: LauncherModuleConfig = ctx
-            .config
-            .load()
-            .resolve_module_config(ModuleId::LAUNCHER.as_str());
-        settings.order = self
+        let order: Vec<String> = self
             .registered_modules
             .iter()
             .map(|id| id.as_str().to_string())
             .collect();
-        if let Ok(val) = toml::Value::try_from(settings) {
-            ctx.update_config(|cfg| {
-                cfg.modules
-                    .insert(ModuleId::LAUNCHER.as_str().to_string(), val);
-            });
-            if let Err(e) = ConfigManager::save(&ctx.config.load()).await {
-                ctx.show_error(format!("Failed to save module order: {e:#}"));
-            }
-        }
+        ctx.update_module_config::<LauncherModuleConfig>(ModuleId::LAUNCHER.as_str(), |s| {
+            s.order = order
+        });
     }
 }
 
@@ -343,7 +331,7 @@ fn merge_order(
 
 impl Default for LauncherModule {
     fn default() -> Self {
-        Self::new(Vec::new(), &MokuConfig::default())
+        Self::new(Vec::new(), &ConfigHandle::detached(MokuConfig::default()))
     }
 }
 
@@ -424,10 +412,7 @@ impl TuiModule for LauncherModule {
             return Ok(moved);
         }
 
-        let module_config: LauncherModuleConfig = ctx
-            .config
-            .load()
-            .resolve_module_config(ModuleId::LAUNCHER.as_str());
+        let module_config: LauncherModuleConfig = ctx.config.module_config(ModuleId::LAUNCHER.as_str());
         let command = resolve_event(event, &ctx.config.load().keys, Some(&module_config.keys));
 
         let changed = match command {
@@ -674,7 +659,7 @@ mod tests {
     use super::*;
 
     fn launcher() -> LauncherModule {
-        LauncherModule::new(Vec::new(), &MokuConfig::default())
+        LauncherModule::new(Vec::new(), &ConfigHandle::detached(MokuConfig::default()))
     }
 
     fn launcher_with_max_visible(max_visible: usize) -> LauncherModule {
@@ -687,7 +672,7 @@ mod tests {
         config
             .modules
             .insert("launcher".to_string(), toml::Value::Table(table));
-        LauncherModule::new(Vec::new(), &config)
+        LauncherModule::new(Vec::new(), &ConfigHandle::detached(config))
     }
 
     #[test]

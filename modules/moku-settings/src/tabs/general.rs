@@ -44,7 +44,13 @@ impl GeneralTab {
         let mut state = ListState::default();
         state.select(Some(0));
 
-        let keys = config.get_module_keys("settings").unwrap_or_default();
+        let keys = config
+            .get_module_keys("settings")
+            // A broken `[modules.settings.keys]` is reported by the settings
+            // module's own event path (`ConfigHandle::module_keys`).
+            .ok()
+            .flatten()
+            .unwrap_or_default();
 
         Self {
             state,

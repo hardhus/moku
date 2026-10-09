@@ -51,7 +51,7 @@ impl CliModule for ContextModule {
             root.canonicalize()?.display()
         );
 
-        let settings: ContextSettings = ctx.config.resolve_module_config("context");
+        let settings: ContextSettings = ctx.config.resolve_module_config("context")?;
 
         let engine = ContextEngine::new(settings);
         let files = engine.scan_files(root);

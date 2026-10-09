@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use arc_swap::ArcSwap;
 
-use moku_config::{ConfigManager, MokuConfig};
+use moku_config::ConfigHandle;
 use moku_store::StorageManager;
 use moku_vault::{SecurityManager, VaultSession};
 
@@ -25,7 +24,7 @@ pub(crate) const ENCRYPTABLE_MODULES: &[(&str, bool)] =
 
 pub async fn handle(
     sub: &ConfigCommands,
-    config: &Arc<ArcSwap<MokuConfig>>,
+    config: &ConfigHandle,
     session: &Arc<VaultSession>,
     security: &Arc<SecurityManager>,
     storage: &Arc<StorageManager>,
@@ -34,43 +33,46 @@ pub async fn handle(
         ConfigCommands::ShowEncrypt => {
             let cfg = config.load();
             for (module, module_default) in ENCRYPTABLE_MODULES {
-                let encrypted = moku_config::resolve_encryption(&cfg, module, *module_default);
-                println!("{module}: {}", if encrypted { "encrypted" } else { "plaintext" });
+                match moku_config::resolve_encryption(&cfg, module, *module_default) {
+                    Ok(true) => println!("{module}: encrypted"),
+                    Ok(false) => println!("{module}: plaintext"),
+                    Err(issue) => println!("{module}: invalid ({issue})"),
+                }
             }
             Ok(())
         }
         ConfigCommands::SetEncrypt { module, value } => {
             let (_, module_default) = lookup_module(module)?;
 
-            let mut new_config = (**config.load()).clone();
-            let table = new_config
-                .modules
-                .entry(module.clone())
-                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-            if let toml::Value::Table(t) = table {
-                t.insert("encrypt".to_string(), toml::Value::Boolean(*value));
-            }
-            ConfigManager::save(&new_config).await?;
-            config.store(Arc::new(new_config.clone()));
+            config.update(|cfg| {
+                let table = cfg
+                    .modules
+                    .entry(module.clone())
+                    .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+                if let toml::Value::Table(t) = table {
+                    t.insert("encrypt".to_string(), toml::Value::Boolean(*value));
+                }
+            })?;
             println!(
                 "✅ [modules.{module}].encrypt = {value} written to config.toml"
             );
 
             ensure_unlocked_if_needed(session, security, *value).await?;
 
-            run_migration(storage, module, moku_config::resolve_encryption(&new_config, module, module_default)).await
+            let target = moku_config::resolve_encryption(&config.load(), module, module_default)?;
+            run_migration(storage, module, target).await
         }
         ConfigCommands::Migrate { module: Some(module) } => {
             let (_, module_default) = lookup_module(module)?;
             let cfg = config.load();
-            let target = moku_config::resolve_encryption(&cfg, module, module_default);
+            let target = moku_config::resolve_encryption(&cfg, module, module_default)?;
             ensure_unlocked_if_needed(session, security, target).await?;
             run_migration(storage, module, target).await
         }
         ConfigCommands::Migrate { module: None } => {
             let cfg = config.load();
             for (module, module_default) in ENCRYPTABLE_MODULES {
-                let target = moku_config::resolve_encryption(&cfg, module, *module_default);
+                let target = moku_config::resolve_encryption(&cfg, module, *module_default)?;
                 ensure_unlocked_if_needed(session, security, target).await?;
                 run_migration(storage, module, target).await?;
             }

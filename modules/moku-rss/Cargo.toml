@@ -30,4 +30,3 @@ arboard = { workspace = true, optional = true }
 [dev-dependencies]
 moku-vault.workspace = true
 tempfile.workspace = true
-arc-swap.workspace = true

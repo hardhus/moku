@@ -2,8 +2,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use arc_swap::ArcSwap;
-use moku_config::ConfigManager;
+use moku_config::ConfigHandle;
 use moku_core::{DaemonContext, DaemonTask};
 use moku_store::StorageManager;
 use moku_vault::VaultSession;
@@ -57,8 +56,13 @@ pub async fn run_worker() -> Result<()> {
     moku_notify::ensure_registered();
 
     let data_dir = moku_sys::dirs::get_data_dir()?;
-    let loaded_config = ConfigManager::load().await.unwrap_or_default();
-    let config = Arc::new(ArcSwap::from_pointee(loaded_config));
+    // The daemon only reads config. Problems with it (a read-only or
+    // partly invalid config.toml) go to its log; the TUI shows the same
+    // issues to the user.
+    let config = Arc::new(ConfigHandle::open_default());
+    for issue in config.take_issues() {
+        tracing::warn!("{issue}");
+    }
 
     // Daemon runs unencrypted: vault always remains locked. Tasks like RSS
     // must therefore call storage.save/load with is_encryption_enabled=false.

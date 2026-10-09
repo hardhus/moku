@@ -23,7 +23,7 @@ impl BookmarkEngine {
     /// overridden — see moku_config::resolve_encryption).
     pub async fn save_all(ctx: &AppContext, items: &[Bookmark]) -> Result<()> {
         let encrypt =
-            moku_config::resolve_encryption(&ctx.config.load(), ModuleId::BOOKMARK.as_str(), true);
+            moku_config::resolve_encryption(&ctx.config.load(), ModuleId::BOOKMARK.as_str(), true)?;
         ctx.storage
             .save(
                 ModuleId::BOOKMARK.as_str(),

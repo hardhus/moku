@@ -30,7 +30,6 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 directories.workspace = true
 async-trait.workspace = true
-arc-swap.workspace = true
 futures.workspace = true
 sysinfo.workspace = true
 auto-launch.workspace = true

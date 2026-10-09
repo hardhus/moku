@@ -2421,7 +2421,6 @@ name = "moku-bin"
 version = "0.2.9"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "auto-launch",
  "clap",
@@ -2477,7 +2476,6 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
- "arc-swap",
  "async-trait",
  "crossterm",
  "moku-config",
@@ -2513,11 +2511,14 @@ dependencies = [
 name = "moku-config"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "arc-swap",
  "moku-sys",
  "serde",
- "tokio",
+ "serde_path_to_error",
+ "tempfile",
+ "thiserror 2.0.20",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit",
  "tracing",
 ]
 
@@ -2540,12 +2541,12 @@ name = "moku-core"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "crossterm",
  "futures",
  "moku-config",
  "moku-store",
+ "moku-sys",
  "moku-vault",
  "ratatui",
  "serde",
@@ -2573,7 +2574,6 @@ name = "moku-daemon"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "auto-launch",
  "crossterm",
@@ -2650,7 +2650,6 @@ name = "moku-lock-screen"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "crossterm",
  "moku-config",
@@ -2669,7 +2668,6 @@ name = "moku-lua"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "crossterm",
  "mlua",
@@ -2699,7 +2697,6 @@ name = "moku-pomodoro"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "clap",
  "crossterm",
@@ -2737,7 +2734,6 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
- "arc-swap",
  "async-trait",
  "clap",
  "crossterm",
@@ -2762,7 +2758,6 @@ name = "moku-satz"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "chrono",
  "clap",
@@ -2784,7 +2779,6 @@ name = "moku-secrets"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "clap",
  "crossterm",
@@ -2809,7 +2803,6 @@ name = "moku-settings"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "crossterm",
  "moku-config",
@@ -2862,7 +2855,6 @@ name = "moku-todo"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "crossterm",
  "moku-config",
@@ -2899,7 +2891,6 @@ name = "moku-volume-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "crossterm",
  "hkdf",
@@ -2965,7 +2956,6 @@ name = "moku-zk-view"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "crossterm",
  "moku-config",
@@ -4335,6 +4325,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_repr"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4971,6 +4972,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

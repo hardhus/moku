@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
@@ -11,7 +10,7 @@ use ratatui::style::Style;
 use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use moku_config::MokuConfig;
+use moku_config::{ConfigHandle, MokuConfig};
 use moku_core::{AppContext, ModuleId, MokuTheme, Router, ToastManager, TuiRegistry, keys_match};
 use moku_store::StorageManager;
 use moku_vault::{SecurityManager, VaultSession};
@@ -112,7 +111,7 @@ async fn run_key_scheme_migration(ctx: &AppContext, module_ids: &[&str]) -> anyh
 }
 
 pub async fn run(
-    config: Arc<ArcSwap<MokuConfig>>,
+    config: Arc<ConfigHandle>,
     session: Arc<VaultSession>,
     security: Arc<SecurityManager>,
     storage: Arc<StorageManager>,
@@ -330,6 +329,13 @@ pub async fn run(
             }
         }
 
+        // Config problems found at startup or while a module read its
+        // settings (an invalid section, a read-only config.toml): each one
+        // is shown once, as a warning, instead of being swallowed.
+        for issue in ctx.config.take_issues() {
+            ctx.show_warning(issue.to_string());
+        }
+
         for (msg, kind) in ctx.drain_toasts() {
             toasts.add(msg, kind);
             dirty = true;
@@ -406,8 +412,11 @@ async fn enter_module(
         .get_mut(target)
         .map(|m| m.encrypt_by_default())
         .unwrap_or(true);
+    // An invalid `encrypt` override counts as encrypted (fail closed); the
+    // module's save path reports it.
     let needs_vault =
-        moku_config::resolve_encryption(&ctx.config.load(), target.as_str(), module_default_encrypt);
+        moku_config::resolve_encryption(&ctx.config.load(), target.as_str(), module_default_encrypt)
+            .unwrap_or(true);
 
     if needs_vault && !ctx.session.is_unlocked() {
         if let Some(m) = registry.get_mut(ModuleId::LOCK_SCREEN) {
@@ -456,7 +465,6 @@ async fn enter_module(
 mod tests {
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use moku_core::TuiModule;
     use moku_store::StorageManager;
     use moku_vault::{SecurityManager, VaultSession};
@@ -469,7 +477,7 @@ mod tests {
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
 
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(
@@ -486,7 +494,7 @@ mod tests {
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
 
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let key = SecurityManager::derive_key("test_pass", &[1u8; 16])
             .await

@@ -80,7 +80,13 @@ impl TodoModule {
             return;
         }
         let encrypt =
-            moku_config::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true);
+            match moku_config::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true) {
+                Ok(encrypt) => encrypt,
+                Err(issue) => {
+                    ctx.show_error(format!("Not saved: {issue}"));
+                    return;
+                }
+            };
         if let Err(e) = ctx
             .storage
             .save(ModuleId::TODO.as_str(), "items", &self.items, encrypt)
@@ -401,10 +407,7 @@ impl TuiModule for TodoModule {
             return Ok(self.delete_selected_immediately(ctx).await);
         }
 
-        let module_config: TodoKeyConfig = ctx
-            .config
-            .load()
-            .resolve_module_config(ModuleId::TODO.as_str());
+        let module_config: TodoKeyConfig = ctx.config.module_config(ModuleId::TODO.as_str());
         let command = resolve_event(event, &ctx.config.load().keys, Some(&module_config.keys));
 
         let changed = match command {
@@ -546,8 +549,12 @@ impl TuiModule for TodoModule {
     }
 
     async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
+        // An invalid `encrypt` override counts as encrypted: never treat a
+        // module the user may have asked to encrypt as plaintext. (Saving
+        // it is refused and reported until config.toml is fixed.)
         let needs_vault =
-            moku_config::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true);
+            moku_config::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true)
+                .unwrap_or(true);
         if needs_vault && !ctx.session.is_unlocked() {
             return Some(ModuleStatus::locked());
         }
@@ -568,7 +575,6 @@ impl TuiModule for TodoModule {
 mod tests {
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use moku_config::MokuConfig;
     use moku_store::StorageManager;
@@ -584,7 +590,7 @@ mod tests {
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
 
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(

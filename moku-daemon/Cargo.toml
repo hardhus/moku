@@ -18,7 +18,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
-arc-swap.workspace = true
 futures.workspace = true
 auto-launch.workspace = true
 sysinfo.workspace = true

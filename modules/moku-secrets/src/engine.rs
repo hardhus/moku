@@ -18,7 +18,7 @@ pub async fn load_entries(storage: &StorageManager) -> Result<Vec<SecretEntry>> 
 }
 
 pub async fn save_entries(storage: &StorageManager, config: &MokuConfig, entries: &[SecretEntry]) -> Result<()> {
-    let encrypt = moku_config::resolve_encryption(config, ModuleId::SECRETS.as_str(), true);
+    let encrypt = moku_config::resolve_encryption(config, ModuleId::SECRETS.as_str(), true)?;
     storage.save(ModuleId::SECRETS.as_str(), STORAGE_KEY, &entries.to_vec(), encrypt).await?;
     Ok(())
 }

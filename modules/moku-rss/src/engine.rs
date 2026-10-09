@@ -46,7 +46,7 @@ impl RssEngine {
         config: &moku_config::MokuConfig,
         feeds: &[FeedSubscription],
     ) -> Result<()> {
-        let encrypt = moku_config::resolve_encryption(config, STORAGE_NS, false);
+        let encrypt = moku_config::resolve_encryption(config, STORAGE_NS, false)?;
         storage
             .save(STORAGE_NS, FEEDS_KEY, &feeds.to_vec(), encrypt)
             .await?;
@@ -76,7 +76,7 @@ impl RssEngine {
         config: &moku_config::MokuConfig,
         items: &[FeedItem],
     ) -> Result<()> {
-        let encrypt = moku_config::resolve_encryption(config, STORAGE_NS, false);
+        let encrypt = moku_config::resolve_encryption(config, STORAGE_NS, false)?;
         storage
             .save(STORAGE_NS, ITEMS_KEY, &items.to_vec(), encrypt)
             .await?;

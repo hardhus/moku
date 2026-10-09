@@ -341,7 +341,6 @@ fn error_line<'a>(err: &'a str, theme: &MokuTheme) -> Paragraph<'a> {
 mod tests {
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use moku_config::MokuConfig;
     use moku_store::StorageManager;
@@ -359,7 +358,7 @@ mod tests {
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
 
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(

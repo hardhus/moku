@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use clap::Parser;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
@@ -14,7 +13,7 @@ mod tui;
 mod utils;
 mod volume_cmd;
 
-use moku_config::{ConfigManager, MokuConfig};
+use moku_config::ConfigHandle;
 use moku_core::{CliContext, ModuleId};
 use moku_store::StorageManager;
 use moku_vault::{SecurityManager, VaultSession};
@@ -135,15 +134,10 @@ async fn main() -> Result<()> {
     init_errors()?;
     let _guard = init_logging()?;
 
-    let loaded_config = match ConfigManager::load().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Failed to load config: {}. Using default configuration.", e);
-            MokuConfig::default()
-        }
-    };
-    let config = Arc::new(ArcSwap::from_pointee(loaded_config.clone()));
-
+    // Never fails: an unreadable/invalid config.toml runs read-only on the
+    // defaults and is reported (stderr for CLI commands, a warning toast in
+    // the TUI), never silently replaced.
+    let config = Arc::new(ConfigHandle::open_default());
 
     // session, security, and storage are now initialized once and shared
     // across both CLI and TUI execution paths. This allows CLI modules
@@ -163,6 +157,7 @@ async fn main() -> Result<()> {
         // returns an Err this way, and doing so here triggered a runaway
         // panic/eyre-hook interaction (see tui::restore() in utils.rs)
         // when the terminal was never put into raw/alternate-screen mode.
+        print_config_issues(&config);
         if let Err(e) = config_cmd::handle(sub, &config, &session, &security, &storage).await {
             eprintln!("{e:#}");
             std::process::exit(1);
@@ -175,7 +170,8 @@ async fn main() -> Result<()> {
         // in plaintext config.toml, not the encrypted vault) — positioned
         // here anyway, symmetrically with Commands::Config above, rather
         // than restructuring the unconditional setup above it.
-        if let Err(e) = pomodoro_cmd::handle(sub, &loaded_config).await {
+        print_config_issues(&config);
+        if let Err(e) = pomodoro_cmd::handle(sub, &config.load()).await {
             eprintln!("{e:#}");
             std::process::exit(1);
         }
@@ -201,8 +197,9 @@ async fn main() -> Result<()> {
             _ => vec![],
         };
 
+        print_config_issues(&config);
         let cli_ctx = CliContext {
-            config: loaded_config,
+            config: (*config.snapshot()).clone(),
             storage: Some(Arc::clone(&storage)),
             session: Some(Arc::clone(&session)),
             security: Some(Arc::clone(&security)),
@@ -216,7 +213,7 @@ async fn main() -> Result<()> {
     }
     let target: ModuleId = cli.target_module();
 
-    let registry = build_tui_registry(&*config.load());
+    let registry = build_tui_registry(&config);
 
     // No unlock needed — this just reads the data directory's own
     // version marker (see StorageManager::data_dir_key_scheme_version)
@@ -236,4 +233,12 @@ async fn main() -> Result<()> {
         schema_versions_behind,
     )
     .await
+}
+
+/// CLI commands have no toast area: config problems (an invalid section,
+/// a read-only config.toml) go to stderr before the command runs.
+fn print_config_issues(config: &ConfigHandle) {
+    for issue in config.take_issues() {
+        eprintln!("warning: {issue}");
+    }
 }

@@ -69,10 +69,7 @@ impl ModuleMeta for DashboardModule {
 #[async_trait]
 impl TuiModule for DashboardModule {
     async fn handle_event(&mut self, event: &Event, ctx: &mut AppContext) -> Result<bool> {
-        let module_config: DashboardKeyConfig = ctx
-            .config
-            .load()
-            .resolve_module_config(ModuleId::DASHBOARD.as_str());
+        let module_config: DashboardKeyConfig = ctx.config.module_config(ModuleId::DASHBOARD.as_str());
         let command = resolve_event(event, &ctx.config.load().keys, Some(&module_config.keys));
 
         match command {

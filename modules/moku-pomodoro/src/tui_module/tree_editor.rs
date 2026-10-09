@@ -81,7 +81,7 @@ pub(super) enum Outcome {
 /// profile in config and saves — called after every structural or value
 /// change, never batched.
 async fn persist(state: &TreeEditorState, ctx: &mut AppContext) {
-    let mut config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+    let mut config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
     if let Some(p) = config.profiles.iter_mut().find(|p| p.name == state.profile_name) {
         p.plan = unflatten_nodes(&state.nodes);
     }
@@ -587,7 +587,6 @@ mod tests {
     use moku_pomodoro_daemon::Block;
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use moku_config::MokuConfig;
     use moku_store::StorageManager;
     use moku_vault::{SecurityManager, VaultSession};
@@ -597,7 +596,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(StorageManager::new_with_root(Arc::clone(&session), root).await.unwrap());
@@ -664,7 +663,7 @@ mod tests {
         assert_eq!(state.nodes.len(), 2, "a new phase node was added");
         assert!(state.editing.is_some(), "adding a phase opens its editor immediately");
 
-        let saved: PomodoroConfig = ctx.config.load().resolve_module_config("pomodoro");
+        let saved: PomodoroConfig = ctx.config.module_config("pomodoro");
         assert_eq!(
             saved.profiles[0].plan.len(),
             2,

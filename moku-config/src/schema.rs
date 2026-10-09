@@ -2,12 +2,19 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ThemeColors;
+use crate::{ConfigIssue, ThemeColors};
+
+/// The config.toml format version this binary reads and writes. A file
+/// without the field is version 1 (every config written before it existed
+/// has this format). Format changes add a hop to the P4 migration chain
+/// (a separate counter from the data-directory version, same mechanism).
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
 
 /// Main configuration structure holding all settings.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct MokuConfig {
+    pub config_version: u32,
     pub general: GeneralSettings,
     pub keys: KeyBindings,
     pub storage: StorageSettings,
@@ -57,24 +64,53 @@ pub struct StorageSettings {
 }
 
 impl MokuConfig {
-    pub fn resolve_module_config<T>(&self, module_id: &str) -> T
+    /// Reads `[modules.<module_id>]` as `T`. A missing table is `T`'s
+    /// defaults (missing fields are filled by `#[serde(default)]`); a table
+    /// that exists but doesn't match `T` is an error naming the offending
+    /// field, never a silent fallback. Callers that can't fail (rendering,
+    /// a module's normal reads) use `ConfigHandle::module_config`, which
+    /// falls back to the defaults *and* reports the issue to the user.
+    pub fn resolve_module_config<T>(&self, module_id: &str) -> Result<T, ConfigIssue>
     where
         T: serde::de::DeserializeOwned + Default,
     {
-        self.modules
-            .get(module_id)
-            .cloned()
-            .and_then(|value| value.try_into().ok())
-            .unwrap_or_default()
+        match self.modules.get(module_id) {
+            None => Ok(T::default()),
+            Some(value) => deserialize_at(value.clone(), &format!("modules.{module_id}")),
+        }
     }
 
-    pub fn get_module_keys(&self, module_id: &str) -> Option<HashMap<String, String>> {
-        self.modules
-            .get(module_id)
-            .and_then(|v| v.get("keys"))
-            .cloned()
-            .and_then(|k| k.try_into().ok())
+    /// `[modules.<module_id>.keys]` as a key-name -> binding map, or `None`
+    /// if the module has no such table.
+    pub fn get_module_keys(
+        &self,
+        module_id: &str,
+    ) -> Result<Option<HashMap<String, String>>, ConfigIssue> {
+        match self.modules.get(module_id).and_then(|v| v.get("keys")) {
+            None => Ok(None),
+            Some(keys) => deserialize_at(keys.clone(), &format!("modules.{module_id}.keys")).map(Some),
+        }
     }
+}
+
+/// Deserializes `value` as `T`, reporting the exact failing field as a
+/// dotted path under `base` (e.g. `modules.pomodoro.profiles[0].plan`).
+pub(crate) fn deserialize_at<T: serde::de::DeserializeOwned>(
+    value: toml::Value,
+    base: &str,
+) -> Result<T, ConfigIssue> {
+    serde_path_to_error::deserialize(value).map_err(|e| {
+        let inner = e.path().to_string();
+        let path = if inner.is_empty() || inner == "." {
+            base.to_string()
+        } else {
+            format!("{base}.{inner}")
+        };
+        ConfigIssue {
+            path,
+            message: e.into_inner().to_string(),
+        }
+    })
 }
 
 // --- Default Implementations (Pastel, Hacker, Light, System) ---
@@ -99,6 +135,7 @@ impl Default for MokuConfig {
         );
 
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             general: GeneralSettings::default(),
             keys: KeyBindings::default(),
             storage: StorageSettings::default(),
@@ -173,7 +210,7 @@ mod tests {
             .modules
             .insert("todo".to_string(), toml::Value::Table(todo_toml));
 
-        let todo_conf: TodoConfig = config.resolve_module_config("todo");
+        let todo_conf: TodoConfig = config.resolve_module_config("todo").unwrap();
         assert_eq!(todo_conf.show_completed, true);
         assert_eq!(todo_conf.max_items, 50);
     }
@@ -188,9 +225,12 @@ mod tests {
         config
             .modules
             .insert("todo".to_string(), toml::Value::Table(todo_toml));
-        let todo_conf: TodoConfig = config.resolve_module_config("todo");
+        let issue = config
+            .resolve_module_config::<TodoConfig>("todo")
+            .unwrap_err();
 
-        // Should silently return Default on error
-        assert_eq!(todo_conf.max_items, 10);
+        // A wrong-typed field is an error naming the field, never a
+        // silent fallback to the defaults.
+        assert_eq!(issue.path, "modules.todo.max_items");
     }
 }

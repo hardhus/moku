@@ -125,23 +125,14 @@ impl PomodoroModule {
     }
 }
 
-/// Writes `config` back into `[modules.pomodoro]` and saves — shared by
-/// every sub-view (`super::save_config`).
+/// Writes `config` back into `[modules.pomodoro]` and saves it — shared by
+/// every sub-view (`super::save_config`). Only the fields that changed are
+/// written, and a `[modules.pomodoro]` table that doesn't parse (e.g. a
+/// hand-edited profile with a typo) is never overwritten: the error toast
+/// says so and the user's profiles stay on disk as written.
 async fn save_config(ctx: &mut AppContext, config: &PomodoroConfig) {
-    let value = match toml::Value::try_from(config) {
-        Ok(v) => v,
-        Err(e) => {
-            ctx.show_error(format!("Pomodoro: failed to encode settings: {e:#}"));
-            return;
-        }
-    };
-    ctx.update_config(|cfg| {
-        cfg.modules.insert(ModuleId::POMODORO.as_str().to_string(), value);
-    });
-    let snapshot = (**ctx.config.load()).clone();
-    if let Err(e) = moku_config::ConfigManager::save(&snapshot).await {
-        ctx.show_error(format!("Pomodoro: failed to save settings: {e:#}"));
-    }
+    let config = config.clone();
+    ctx.update_module_config::<PomodoroConfig>(ModuleId::POMODORO.as_str(), |pc| *pc = config);
 }
 
 /// A short, always-accurate one-line description of a plan for the
@@ -182,7 +173,7 @@ async fn handle_action(
 ) -> bool {
     match action {
         PomodoroAction::Start => {
-            let config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+            let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
             match resolve_start_plan(&config, None) {
                 Ok((name, plan)) => match daemon_client::start(plan, config.notify).await {
                     Ok(()) => ctx.show_info(format!("Started '{name}'.")),
@@ -225,14 +216,14 @@ async fn handle_action(
             true
         }
         PomodoroAction::ToggleDetail => {
-            let mut config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+            let mut config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
             config.detail = config.detail.next();
             *detail = config.detail;
             save_config(ctx, &config).await;
             true
         }
         PomodoroAction::Profiles => {
-            let config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+            let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
             *view = PomodoroView::ProfileList(profile_list::ProfileListState::new(&config));
             true
         }
@@ -265,7 +256,7 @@ async fn handle_status_event(
         });
     }
 
-    let module_config: PomodoroKeyConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+    let module_config: PomodoroKeyConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
     if let Some(action) = resolve_pomodoro_action(event, &module_config.keys) {
         return Ok(handle_action(action, last_status, confirm_reset, detail, view, ctx).await);
     }
@@ -359,7 +350,7 @@ impl ModuleMeta for PomodoroModule {
 #[async_trait]
 impl TuiModule for PomodoroModule {
     async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
-        let config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+        let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
         self.detail = config.detail;
         self.last_status = refresh_status(ctx).await;
         Ok(())
@@ -390,7 +381,7 @@ impl TuiModule for PomodoroModule {
                         true
                     }
                     profile_list::Outcome::OpenTreeEditor(name) => {
-                        let config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+                        let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
                         if let Some(p) = config.profiles.iter().find(|p| p.name == name) {
                             *view = PomodoroView::TreeEditor(tree_editor::TreeEditorState::new(p.name.clone(), flatten_plan(&p.plan)));
                         }
@@ -404,7 +395,7 @@ impl TuiModule for PomodoroModule {
                 })
             }
             PomodoroView::QuickCreateName(state) => {
-                let config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+                let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
                 let existing: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
                 let outcome = quick_create::handle_name_event(state, event, &existing);
                 Ok(match outcome {
@@ -426,12 +417,12 @@ impl TuiModule for PomodoroModule {
                     quick_create::FormOutcome::None => Ok(false),
                     quick_create::FormOutcome::Redraw => Ok(true),
                     quick_create::FormOutcome::Cancel => {
-                        let config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+                        let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
                         *view = PomodoroView::ProfileList(profile_list::ProfileListState::new(&config));
                         Ok(true)
                     }
                     quick_create::FormOutcome::Created { name, plan } => {
-                        let mut config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+                        let mut config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
                         config.profiles.push(Profile {
                             name: name.clone(),
                             plan: plan.clone(),
@@ -449,7 +440,7 @@ impl TuiModule for PomodoroModule {
                     tree_editor::Outcome::None => false,
                     tree_editor::Outcome::Redraw => true,
                     tree_editor::Outcome::Back => {
-                        let config: PomodoroConfig = ctx.config.load().resolve_module_config(ModuleId::POMODORO.as_str());
+                        let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
                         *view = PomodoroView::ProfileList(profile_list::ProfileListState::new(&config));
                         true
                     }

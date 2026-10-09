@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
-
-use moku_config::MokuConfig;
-use crate::module::ModuleId;
+use moku_config::{ConfigHandle, MokuConfig};
 use moku_store::StorageManager;
 use moku_vault::{SecurityManager, VaultSession};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use crate::module::ModuleId;
 use crate::toast::ToastType;
 
 /// A request to suspend the TUI, run an external command with inherited
@@ -20,9 +21,11 @@ pub struct SuspendRequest {
 
 /// Shared state passed to every TUI module.
 /// Uses lock-free config reads (`ctx.config.load()`). Call `.load()` inline
-/// instead of storing it to avoid borrow-checker conflicts.
+/// instead of storing it to avoid borrow-checker conflicts. Config changes
+/// go through `update_config`/`update_module_config` (saved immediately);
+/// a module's own settings are read with `module_config`.
 pub struct AppContext {
-    pub config: Arc<ArcSwap<MokuConfig>>,
+    pub config: Arc<ConfigHandle>,
     pub session: Arc<VaultSession>,
     pub security: Arc<SecurityManager>,
     pub storage: Arc<StorageManager>,
@@ -35,7 +38,7 @@ pub struct AppContext {
 
 impl AppContext {
     pub fn new(
-        config: Arc<ArcSwap<MokuConfig>>,
+        config: Arc<ConfigHandle>,
         session: Arc<VaultSession>,
         security: Arc<SecurityManager>,
         storage: Arc<StorageManager>,
@@ -56,13 +59,51 @@ impl AppContext {
         self.should_quit = true;
     }
 
-    pub fn update_config<F>(&self, mutate: F)
+    /// Changes the config and saves it to config.toml right away (only the
+    /// changed keys; comments are kept). Returns whether it was saved; if
+    /// not (read-only config, a write-locked section, a disk error), the
+    /// change is not applied in memory either and the reason is shown as an
+    /// error toast.
+    pub fn update_config<F>(&mut self, mutate: F) -> bool
     where
         F: FnOnce(&mut MokuConfig),
     {
-        let mut new_config = (**self.config.load()).clone();
-        mutate(&mut new_config);
-        self.config.store(Arc::new(new_config));
+        let result = self.config.update(mutate);
+        self.report_config_write(result)
+    }
+
+    /// Like `update_config`, for `[modules.<module_id>]` read as `T`: only
+    /// the fields `mutate` changed are written, unknown keys in the table
+    /// are kept, and a table that doesn't currently match `T` is never
+    /// overwritten (see `ConfigHandle::update_module`).
+    pub fn update_module_config<T>(&mut self, module_id: &str, mutate: impl FnOnce(&mut T)) -> bool
+    where
+        T: Serialize + DeserializeOwned + Default + Clone,
+    {
+        let result = self.config.update_module(module_id, mutate);
+        self.report_config_write(result)
+    }
+
+    /// `[modules.<module_id>]` as `T`; on a type mismatch, `T`'s defaults
+    /// (the problem is reported to the user once, as a warning).
+    pub fn module_config<T>(&self, module_id: &str) -> T
+    where
+        T: DeserializeOwned + Default,
+    {
+        self.config.module_config(module_id)
+    }
+
+    fn report_config_write(&mut self, result: Result<(), moku_config::ConfigError>) -> bool {
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                self.show_error(format!(
+                    "Setting not saved: {}",
+                    moku_sys::util::error_chain(&e)
+                ));
+                false
+            }
+        }
     }
 
     pub fn navigate_to(&mut self, id: ModuleId) {
@@ -126,7 +167,7 @@ pub struct CliContext {
 
 /// Context for periodic tasks in the moku-daemon.
 pub struct DaemonContext {
-    pub config: Arc<ArcSwap<MokuConfig>>,
+    pub config: Arc<ConfigHandle>,
     pub storage: Arc<StorageManager>,
 }
 
@@ -137,7 +178,7 @@ mod tests {
     use tempfile::tempdir;
 
     async fn test_ctx() -> AppContext {
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let temp = tempdir().unwrap();
         let security = Arc::new(SecurityManager::new_with_root(temp.path().to_path_buf()));

@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn test_default_config_when_module_section_missing() {
         let config = MokuConfig::default();
-        let pomodoro: PomodoroConfig = config.resolve_module_config("pomodoro");
+        let pomodoro: PomodoroConfig = config.resolve_module_config("pomodoro").unwrap();
         assert_eq!(pomodoro, PomodoroConfig::default());
         assert!(pomodoro.notify);
         assert_eq!(pomodoro.detail, DetailLevel::Seconds);

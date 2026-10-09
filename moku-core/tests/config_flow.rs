@@ -41,7 +41,7 @@ fn test_complex_config_and_theme_integration() {
     assert_eq!(theme.base_bg, ratatui::style::Color::Black);
 
     // 2. MODULARITY TEST
-    let conf: TestModuleConfig = config.resolve_module_config("plugin_a");
+    let conf: TestModuleConfig = config.resolve_module_config("plugin_a").unwrap();
     assert!(conf.enable_feature_x);
 }
 
@@ -64,7 +64,7 @@ fn test_nested_key_priority_flow() {
     struct KeyMap {
         keys: HashMap<String, String>,
     }
-    let todo_keys: KeyMap = config.resolve_module_config("todo");
+    let todo_keys: KeyMap = config.resolve_module_config("todo").unwrap();
 
     // Scenario A: Inside the module, pressed 'u' -> should be UP (Override)
     let event_u =

@@ -206,7 +206,6 @@ mod tests {
     async fn build_test_context() -> AppContext {
         use std::sync::Arc;
 
-        use arc_swap::ArcSwap;
         use moku_config::MokuConfig;
         use moku_store::StorageManager;
         use moku_vault::{SecurityManager, VaultSession};
@@ -215,7 +214,7 @@ mod tests {
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
 
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(

@@ -99,7 +99,7 @@ impl NotesModule {
     // `SecurityManager::derive_key`); `resolve_vault_root` itself is cheap
     // (no I/O), so only the walk needs offloading.
     async fn load(&mut self, ctx: &AppContext) {
-        let config: NotesConfig = ctx.config.load().resolve_module_config("notes");
+        let config: NotesConfig = ctx.config.module_config("notes");
         let result = match resolve_vault_root(&config, None) {
             Ok(root) => {
                 let root_for_index = root.clone();
@@ -420,7 +420,7 @@ impl TuiModule for NotesModule {
     // works even if the module was never opened this session (unlike
     // `self.index`, which is only populated by `load()`/`init()`).
     async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
-        let config: NotesConfig = ctx.config.load().resolve_module_config("notes");
+        let config: NotesConfig = ctx.config.module_config("notes");
         match resolve_vault_root(&config, None).and_then(|root| build_index(&root)) {
             Ok(index) => Some(ModuleStatus::normal(format!(
                 "{} notes",
@@ -435,7 +435,6 @@ impl TuiModule for NotesModule {
 mod dashboard_summary_tests {
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use moku_config::MokuConfig;
     use moku_store::StorageManager;
     use moku_vault::{SecurityManager, VaultSession};
@@ -460,7 +459,7 @@ mod dashboard_summary_tests {
                 .insert("notes".to_string(), toml::Value::Table(table));
         }
 
-        let config = Arc::new(ArcSwap::from_pointee(config));
+        let config = Arc::new(moku_config::ConfigHandle::detached(config));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(
@@ -502,7 +501,6 @@ mod dashboard_summary_tests {
 mod state_tests {
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use moku_config::MokuConfig;
     use moku_store::StorageManager;
     use moku_vault::{SecurityManager, VaultSession};
@@ -523,7 +521,7 @@ mod state_tests {
         );
         config.modules.insert("notes".to_string(), toml::Value::Table(table));
 
-        let config = Arc::new(ArcSwap::from_pointee(config));
+        let config = Arc::new(moku_config::ConfigHandle::detached(config));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(

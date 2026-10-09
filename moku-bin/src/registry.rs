@@ -1,9 +1,11 @@
-use moku_config::MokuConfig;
+use moku_config::{ConfigHandle, MokuConfig};
 use moku_core::{CliRegistry, ModuleId, TuiModule, TuiRegistry};
 use moku_daemon::DaemonStatusModule;
 
-pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
+pub fn build_tui_registry(config_handle: &ConfigHandle) -> TuiRegistry {
     let mut r = TuiRegistry::new();
+    let config_guard = config_handle.load();
+    let config: &MokuConfig = &config_guard;
 
     #[cfg(feature = "lua-plugins")]
     let loaded_plugins = load_lua_plugins(config);
@@ -13,7 +15,8 @@ pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
     let plugin_ids: Vec<ModuleId> = loaded_plugins.iter().map(|m| m.id()).collect();
 
     r.insert(Box::new(moku_launcher::LauncherModule::new(
-        plugin_ids, config,
+        plugin_ids,
+        config_handle,
     )));
     r.insert(Box::new(moku_lock_screen::LockScreenModule::new()));
     r.insert(Box::new(moku_todo::TodoModule::new()));

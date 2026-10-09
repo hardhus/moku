@@ -12,7 +12,7 @@ use ratatui::{
 
 mod tabs;
 
-use moku_config::{ConfigManager, MokuConfig};
+use moku_config::{ConfigHandle, MokuConfig};
 use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
 
 use crate::tabs::{
@@ -23,7 +23,7 @@ use crate::tabs::{
 pub struct SettingsModule {
     tabs: Vec<Box<dyn SettingsTab + Send + Sync>>,
     selected_tab: usize,
-    config: Option<Arc<arc_swap::ArcSwap<MokuConfig>>>,
+    config: Option<Arc<ConfigHandle>>,
 }
 
 impl SettingsModule {
@@ -75,10 +75,7 @@ impl TuiModule for SettingsModule {
 
     async fn handle_event(&mut self, event: &Event, ctx: &mut AppContext) -> Result<bool> {
         let mut changed = false;
-        let overrides = ctx
-            .config
-            .load()
-            .get_module_keys(ModuleId::SETTINGS.as_str());
+        let overrides = ctx.config.module_keys(ModuleId::SETTINGS.as_str());
 
         let command = resolve_event(event, &ctx.config.load().keys, overrides.as_ref());
 
@@ -104,19 +101,6 @@ impl TuiModule for SettingsModule {
                     // SHIFT+TAB -> Previous Tab
                     KeyCode::BackTab => {
                         self.previous_tab();
-                        return Ok(true);
-                    }
-                    // Ctrl+S -> Save (Global Shortcut)
-                    KeyCode::Char('s')
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                    {
-                        if let Err(e) = ConfigManager::save(&*ctx.config.load()).await {
-                            ctx.show_error(format!("Save Failed: {e:#}"));
-                        } else {
-                            ctx.show_info("Settings Saved! 💾");
-                        }
                         return Ok(true);
                     }
                     _ => {}
@@ -178,7 +162,7 @@ impl TuiModule for SettingsModule {
         }
 
         let footer =
-            Paragraph::new("Tab: [TAB] | Change: [Arrows/Enter] | Save: [Ctrl+S] | Exit: [ESC]")
+            Paragraph::new("Tab: [TAB] | Change: [Arrows/Enter] (saved immediately) | Exit: [ESC]")
                 .style(Style::default().fg(theme.base_fg))
                 .alignment(ratatui::layout::Alignment::Center)
                 .block(

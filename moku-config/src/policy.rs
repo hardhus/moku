@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::MokuConfig;
+use crate::{ConfigIssue, MokuConfig};
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -20,16 +20,26 @@ struct EncryptOverride {
 /// both `StorageManager::save()` call sites and the TUI's vault-unlock
 /// gate (`enter_module()` in moku-bin) should go through it, so a
 /// module's effective encryption state can never disagree with itself.
-pub fn resolve_encryption(config: &MokuConfig, module_id: &str, module_default: bool) -> bool {
+///
+/// An override that isn't a boolean (`encrypt = "true"`) is an error, not
+/// "no override": falling back would silently store a module the user
+/// asked to encrypt as plaintext. Save paths propagate it (the write is
+/// refused until config.toml is fixed); gates that only decide whether
+/// the vault must be unlocked treat it as encrypted.
+pub fn resolve_encryption(
+    config: &MokuConfig,
+    module_id: &str,
+    module_default: bool,
+) -> Result<bool, ConfigIssue> {
     let override_value = config
-        .resolve_module_config::<EncryptOverride>(module_id)
+        .resolve_module_config::<EncryptOverride>(module_id)?
         .encrypt;
 
-    override_value.unwrap_or(if module_default {
+    Ok(override_value.unwrap_or(if module_default {
         config.storage.default_encrypt
     } else {
         false
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -40,10 +50,10 @@ mod tests {
     fn test_no_override_uses_module_default_true_and_global_default() {
         let mut config = MokuConfig::default();
         config.storage.default_encrypt = true;
-        assert!(resolve_encryption(&config, "todo", true));
+        assert!(resolve_encryption(&config, "todo", true).unwrap());
 
         config.storage.default_encrypt = false;
-        assert!(!resolve_encryption(&config, "todo", true));
+        assert!(!resolve_encryption(&config, "todo", true).unwrap());
     }
 
     #[test]
@@ -52,7 +62,7 @@ mod tests {
         config.storage.default_encrypt = true;
         // A daemon-driven module (module_default = false) stays
         // unencrypted regardless of the global default, unless overridden.
-        assert!(!resolve_encryption(&config, "rss", false));
+        assert!(!resolve_encryption(&config, "rss", false).unwrap());
     }
 
     #[test]
@@ -68,7 +78,7 @@ mod tests {
 
         // module_default = false, global default = false, but the
         // explicit per-module override still forces true.
-        assert!(resolve_encryption(&config, "rss", false));
+        assert!(resolve_encryption(&config, "rss", false).unwrap());
     }
 
     #[test]
@@ -82,6 +92,19 @@ mod tests {
             .modules
             .insert("todo".to_string(), toml::Value::Table(table));
 
-        assert!(!resolve_encryption(&config, "todo", true));
+        assert!(!resolve_encryption(&config, "todo", true).unwrap());
+    }
+
+    #[test]
+    fn test_non_boolean_override_is_an_error_not_plaintext() {
+        let mut config = MokuConfig::default();
+        let mut table = toml::map::Map::new();
+        table.insert("encrypt".to_string(), toml::Value::String("true".to_string()));
+        config
+            .modules
+            .insert("rss".to_string(), toml::Value::Table(table));
+
+        let issue = resolve_encryption(&config, "rss", false).unwrap_err();
+        assert_eq!(issue.path, "modules.rss.encrypt");
     }
 }

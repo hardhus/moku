@@ -115,9 +115,7 @@ impl ZkViewModule {
     }
 
     fn module_config(ctx: &AppContext) -> ZkViewConfig {
-        ctx.config
-            .load()
-            .resolve_module_config(ModuleId::ZK_VIEW.as_str())
+        ctx.config.module_config(ModuleId::ZK_VIEW.as_str())
     }
 
     // `walk_vault` (inside `build_index`) walks the whole notes directory on
@@ -780,7 +778,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use moku_config::MokuConfig;
     use moku_store::StorageManager;
     use moku_vault::{SecurityManager, VaultSession};
@@ -801,7 +798,7 @@ mod tests {
             config.modules.insert("zk_view".to_string(), toml::Value::Table(table));
         }
 
-        let config = Arc::new(ArcSwap::from_pointee(config));
+        let config = Arc::new(moku_config::ConfigHandle::detached(config));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(StorageManager::new_with_root(Arc::clone(&session), root).await.unwrap());

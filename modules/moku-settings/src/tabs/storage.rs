@@ -72,7 +72,13 @@ impl StorageTab {
     pub fn new(config: &MokuConfig) -> Self {
         let mut state = ListState::default();
         state.select(Some(0));
-        let keys = config.get_module_keys("settings").unwrap_or_default();
+        let keys = config
+            .get_module_keys("settings")
+            // A broken `[modules.settings.keys]` is reported by the settings
+            // module's own event path (`ConfigHandle::module_keys`).
+            .ok()
+            .flatten()
+            .unwrap_or_default();
 
         Self {
             state,
@@ -247,18 +253,24 @@ impl SettingsTab for StorageTab {
                     KeyCode::Char('m') if key.modifiers.is_empty() => {
                         if let Some(StorageOption::Module(idx)) = self.state.selected().map(|i| self.options[i]) {
                             let (module, module_default) = ENCRYPTABLE_MODULES[idx];
-                            let target = moku_config::resolve_encryption(&ctx.config.load(), module, module_default);
-                            self.migrate(ctx, vec![(module, target)]);
+                            match moku_config::resolve_encryption(&ctx.config.load(), module, module_default) {
+                                Ok(target) => self.migrate(ctx, vec![(module, target)]),
+                                // Never migrate on a guess: fix the override first.
+                                Err(issue) => self.show_status(issue.to_string()),
+                            }
                         }
                     }
                     KeyCode::Char('M') if key.modifiers.contains(KeyModifiers::SHIFT) => {
                         let cfg = ctx.config.load();
-                        let modules: Vec<(&'static str, bool)> = ENCRYPTABLE_MODULES
+                        let modules: Result<Vec<(&'static str, bool)>, _> = ENCRYPTABLE_MODULES
                             .iter()
-                            .map(|(m, d)| (*m, moku_config::resolve_encryption(&cfg, m, *d)))
+                            .map(|(m, d)| moku_config::resolve_encryption(&cfg, m, *d).map(|t| (*m, t)))
                             .collect();
                         drop(cfg);
-                        self.migrate(ctx, modules);
+                        match modules {
+                            Ok(modules) => self.migrate(ctx, modules),
+                            Err(issue) => self.show_status(issue.to_string()),
+                        }
                     }
                     _ => {}
                 }
@@ -288,19 +300,16 @@ impl SettingsTab for StorageTab {
                         let override_value = config
                             .modules
                             .get(module)
-                            .and_then(|v| v.get("encrypt"))
-                            .and_then(|v| v.as_bool());
-                        match override_value {
-                            None => format!(
-                                "Inherit ({})",
-                                if moku_config::resolve_encryption(config, module, module_default) {
-                                    "encrypted"
-                                } else {
-                                    "plaintext"
-                                }
-                            ),
-                            Some(true) => "Encrypted (override)".to_string(),
-                            Some(false) => "Plaintext (override)".to_string(),
+                            .and_then(|v| v.get("encrypt"));
+                        match override_value.map(|v| v.as_bool()) {
+                            None => match moku_config::resolve_encryption(config, module, module_default) {
+                                Ok(true) => "Inherit (encrypted)".to_string(),
+                                Ok(false) => "Inherit (plaintext)".to_string(),
+                                Err(_) => "Invalid: fix config.toml".to_string(),
+                            },
+                            Some(Some(true)) => "Encrypted (override)".to_string(),
+                            Some(Some(false)) => "Plaintext (override)".to_string(),
+                            Some(None) => "Invalid override: fix config.toml".to_string(),
                         }
                     }
                     StorageOption::AutoLockTimeout => {
@@ -357,7 +366,6 @@ impl SettingsTab for StorageTab {
 mod tests {
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use moku_config::MokuConfig;
     use moku_store::StorageManager;
     use moku_vault::{SecurityManager, VaultSession};
@@ -370,7 +378,7 @@ mod tests {
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
 
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(
@@ -408,5 +416,38 @@ mod tests {
             !tab.busy,
             "picking up a finished migration's result must clear busy so the next one can start"
         );
+    }
+
+    #[tokio::test]
+    async fn test_an_encryption_override_is_saved_to_config_toml_immediately() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# mine
+[modules.rss]
+feeds_note = \"kept\"
+").unwrap();
+        let mut ctx = create_test_context().await;
+        ctx.config = Arc::new(moku_config::ConfigHandle::open(path.clone()));
+
+        let mut tab = StorageTab::new(&ctx.config.load());
+        let rss = tab
+            .options
+            .iter()
+            .position(|o| matches!(o, StorageOption::Module(i) if ENCRYPTABLE_MODULES[*i].0 == "rss"))
+            .unwrap();
+        tab.state.select(Some(rss));
+        tab.change_value(&mut ctx, 1); // inherit -> encrypted override
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "# mine
+[modules.rss]
+feeds_note = \"kept\"
+encrypt = true
+",
+            "no Ctrl+S needed, and the rest of the table is untouched"
+        );
+        assert_eq!(moku_config::resolve_encryption(&ctx.config.load(), "rss", false), Ok(true));
     }
 }

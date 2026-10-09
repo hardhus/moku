@@ -32,4 +32,3 @@ sha2 = "0.10"
 moku-store.workspace = true
 moku-config.workspace = true
 tempfile.workspace = true
-arc-swap.workspace = true

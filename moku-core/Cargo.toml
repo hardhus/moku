@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 moku-config.workspace = true
+moku-sys.workspace = true
 moku-vault.workspace = true
 moku-store.workspace = true
 ratatui.workspace = true
@@ -13,7 +14,6 @@ anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 tokio.workspace = true
-arc-swap.workspace = true
 futures.workspace = true
 
 [dev-dependencies]

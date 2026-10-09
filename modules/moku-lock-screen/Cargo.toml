@@ -18,4 +18,3 @@ moku-store.workspace = true
 moku-config.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
-arc-swap.workspace = true

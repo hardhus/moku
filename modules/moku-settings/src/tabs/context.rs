@@ -12,7 +12,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 
 use moku_config::MokuConfig;
-use moku_core::{AppContext, Command, MokuTheme, resolve_event};
+use moku_core::{AppContext, Command, ModuleId, MokuTheme, resolve_event};
 
 use super::SettingsTab;
 
@@ -59,7 +59,13 @@ impl ContextTab {
     pub fn new(config: &MokuConfig) -> Self {
         let mut state = ListState::default();
         state.select(Some(0));
-        let keys = config.get_module_keys("settings").unwrap_or_default();
+        let keys = config
+            .get_module_keys("settings")
+            // A broken `[modules.settings.keys]` is reported by the settings
+            // module's own event path (`ConfigHandle::module_keys`).
+            .ok()
+            .flatten()
+            .unwrap_or_default();
 
         Self {
             state,
@@ -84,12 +90,12 @@ impl ContextTab {
         self.state.select(Some(i));
     }
 
+    /// Saves only the fields this tab changed; keys moku-context owns that
+    /// this shadow struct doesn't list stay in `[modules.context]`.
     fn update_config_value(&self, ctx: &mut AppContext, settings: ContextModuleSettings) {
-        if let Ok(val) = toml::Value::try_from(settings) {
-            ctx.update_config(|cfg| {
-                cfg.modules.insert("context".to_string(), val);
-            });
-        }
+        ctx.update_module_config::<ContextModuleSettings>(ModuleId::CONTEXT.as_str(), |s| {
+            *s = settings
+        });
     }
 
     fn change_value(&mut self, ctx: &mut AppContext, direction: i32) {
@@ -97,7 +103,7 @@ impl ContextTab {
             let selected_option = self.options[i];
 
             let mut settings: ContextModuleSettings =
-                ctx.config.load().resolve_module_config("context");
+                ctx.config.module_config("context");
 
             match selected_option {
                 ContextOption::GitIgnore => {
@@ -143,7 +149,9 @@ impl SettingsTab for ContextTab {
     fn draw(&mut self, frame: &mut Frame, area: Rect, config: &MokuConfig) -> Result<()> {
         let theme = MokuTheme::from_config(config);
 
-        let settings: ContextModuleSettings = config.resolve_module_config("context");
+        // Rendering can't report; a broken table is reported (and shown
+        // with its defaults) via `ctx.module_config` on the event path.
+        let settings: ContextModuleSettings = config.resolve_module_config("context").unwrap_or_default();
 
         let items: Vec<ListItem> = self
             .options

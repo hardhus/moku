@@ -518,8 +518,12 @@ impl TuiModule for BookmarkModule {
     }
 
     async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
+        // An invalid `encrypt` override counts as encrypted: never treat a
+        // module the user may have asked to encrypt as plaintext. (Saving
+        // it is refused and reported until config.toml is fixed.)
         let needs_vault =
-            moku_config::resolve_encryption(&ctx.config.load(), ModuleId::BOOKMARK.as_str(), true);
+            moku_config::resolve_encryption(&ctx.config.load(), ModuleId::BOOKMARK.as_str(), true)
+                .unwrap_or(true);
         if needs_vault && !ctx.session.is_unlocked() {
             return Some(ModuleStatus::locked());
         }
@@ -534,7 +538,6 @@ impl TuiModule for BookmarkModule {
 mod confirm_delete_tests {
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use moku_config::MokuConfig;
     use moku_store::StorageManager;
@@ -548,7 +551,7 @@ mod confirm_delete_tests {
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
 
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(
@@ -666,7 +669,6 @@ mod confirm_delete_tests {
 mod dashboard_summary_tests {
     use std::sync::Arc;
 
-    use arc_swap::ArcSwap;
     use moku_config::MokuConfig;
     use moku_store::StorageManager;
     use moku_vault::{SecurityManager, VaultSession};
@@ -679,7 +681,7 @@ mod dashboard_summary_tests {
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
 
-        let config = Arc::new(ArcSwap::from_pointee(MokuConfig::default()));
+        let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(

@@ -29,6 +29,5 @@ moku-vault.workspace = true
 moku-store.workspace = true
 moku-config.workspace = true
 tempfile.workspace = true
-arc-swap.workspace = true
 tokio.workspace = true
 toml.workspace = true
