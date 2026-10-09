@@ -15,7 +15,7 @@ use super::envelope::{
     CURRENT_KEY_SCHEME, CURRENT_SCHEMA_VERSION, EncryptionStatus, KeyScheme, StorageEnvelope,
     StorageType, data_transform_for_hop,
 };
-use super::keys::derive_module_storage_key;
+use moku_crypto::derive_module_storage_key;
 
 const EXTERNAL_STORAGE_THRESHOLD: usize = 50 * 1024;
 

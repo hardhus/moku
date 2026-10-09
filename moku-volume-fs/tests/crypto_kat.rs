@@ -5,7 +5,7 @@
 //! existing volumes. Never "update" the expected values to match a new
 //! implementation.
 
-use moku_core::SafeKey;
+use moku_crypto::SafeKey;
 use moku_volume_fs::derive_volume_keys;
 use moku_volume_fs::keys::NameKey;
 use moku_volume_fs::names::NameCipher;

@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moku-core.workspace = true
+moku-crypto.workspace = true
+moku-sys.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

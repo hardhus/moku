@@ -2518,16 +2518,13 @@ dependencies = [
 name = "moku-core"
 version = "0.1.1"
 dependencies = [
- "aes-gcm",
  "anyhow",
  "arc-swap",
- "argon2",
  "async-trait",
  "crossterm",
  "futures",
- "hkdf",
+ "moku-crypto",
  "moku-sys",
- "rand 0.8.8",
  "ratatui",
  "rpassword",
  "secrecy",
@@ -2539,6 +2536,20 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "moku-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "hkdf",
+ "rand 0.8.8",
+ "secrecy",
+ "sha2",
  "zeroize",
 ]
 
@@ -2829,7 +2840,8 @@ dependencies = [
  "anyhow",
  "base64",
  "hkdf",
- "moku-core",
+ "moku-crypto",
+ "moku-sys",
  "rand 0.8.8",
  "secrecy",
  "serde",

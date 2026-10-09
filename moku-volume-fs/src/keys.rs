@@ -1,5 +1,5 @@
 use hkdf::Hkdf;
-use moku_core::SafeKey;
+use moku_crypto::SafeKey;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};

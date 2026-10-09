@@ -102,7 +102,7 @@ impl Quota {
         if let Some(parent) = self.usage_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        moku_core::util::atomic_write(&self.usage_path, serde_json::to_string(&data)?.as_bytes())
+        moku_sys::util::atomic_write(&self.usage_path, serde_json::to_string(&data)?.as_bytes())
     }
 
     /// Recomputes `used_bytes` from an actual on-disk scan — the

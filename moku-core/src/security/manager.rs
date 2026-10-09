@@ -1,27 +1,17 @@
-use std::{fmt, path::PathBuf};
+use std::path::PathBuf;
 
-use aes_gcm::{
-    Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit},
-};
 use anyhow::{Context, Result, anyhow};
-use argon2::{Algorithm, Argon2, Params, Version, password_hash::rand_core::OsRng};
-use rand::RngCore;
-use secrecy::{ExposeSecret, SecretBox};
+use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::dirs;
 
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct SafeKey(pub [u8; 32]);
-
-impl fmt::Debug for SafeKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SafeKey(***REDACTED***)")
-    }
-}
+// Temporary facade while P2 splits moku-core: `SafeKey` and the AES-GCM /
+// Argon2 primitives now live in moku-crypto. Removed once every crate
+// imports moku_crypto directly.
+pub use moku_crypto::SafeKey;
 
 #[derive(Serialize, Deserialize)]
 pub struct StorageMetadata {
@@ -49,63 +39,23 @@ impl SecurityManager {
     }
 
     pub fn generate_salt(len: usize) -> Vec<u8> {
-        let mut salt = vec![0u8; len];
-        OsRng.fill_bytes(&mut salt);
-        salt
+        moku_crypto::generate_salt(len)
     }
 
     pub async fn derive_key(password: &str, salt_bytes: &[u8]) -> Result<SecretBox<SafeKey>> {
         let password = password.to_string();
         let salt = salt_bytes.to_vec();
 
-        tokio::task::spawn_blocking(move || {
-            let params = Params::new(65536, 3, 4, Some(32))
-                .map_err(|e| anyhow!("Invalid Argon2 parameters: {}", e))?;
-
-            let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-            let mut output_key = [0u8; 32];
-
-            argon2
-                .hash_password_into(password.as_bytes(), &salt, &mut output_key)
-                .map_err(|e| anyhow!("Key derivation failed: {}", e))?;
-
-            Ok(SecretBox::new(Box::new(SafeKey(output_key))))
-        })
-        .await?
+        tokio::task::spawn_blocking(move || moku_crypto::argon2id_key(password.as_bytes(), &salt))
+            .await?
     }
 
     pub fn encrypt(data: &[u8], key: &SecretBox<SafeKey>) -> Result<Vec<u8>> {
-        let raw_key = &key.expose_secret().0;
-        let cipher =
-            Aes256Gcm::new_from_slice(raw_key).map_err(|_| anyhow!("Invalid key length"))?;
-
-        let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        let ciphertext = cipher
-            .encrypt(nonce, data)
-            .map_err(|e| anyhow!("Encryption failed: {}", e))?;
-
-        let mut combined = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
-        combined.extend_from_slice(&nonce_bytes);
-        combined.extend(ciphertext);
-        Ok(combined)
+        moku_crypto::encrypt(data, key)
     }
 
     pub fn decrypt(combined_data: &[u8], key: &SecretBox<SafeKey>) -> Result<Vec<u8>> {
-        if combined_data.len() < 12 {
-            return Err(anyhow!("Payload too short"));
-        }
-        let raw_key = &key.expose_secret().0;
-        let cipher = Aes256Gcm::new_from_slice(raw_key).map_err(|_| anyhow!("Invalid key"))?;
-
-        let (nonce_bytes, ciphertext) = combined_data.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
-
-        cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| anyhow!("Decryption failed (Wrong password?)"))
+        moku_crypto::decrypt(combined_data, key)
     }
 
     pub fn is_vault_initialized(&self) -> bool {
@@ -176,16 +126,6 @@ mod tests {
     use secrecy::ExposeSecret;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_generate_salt_length() {
-        let salt = SecurityManager::generate_salt(16);
-        assert_eq!(salt.len(), 16);
-
-        let salt2 = SecurityManager::generate_salt(32);
-        assert_eq!(salt2.len(), 32);
-        assert_ne!(salt, SecurityManager::generate_salt(16));
-    }
-
     #[tokio::test]
     async fn test_key_derivation_consistency() {
         let password = "test_password";
@@ -195,30 +135,6 @@ mod tests {
         let key2 = SecurityManager::derive_key(password, &salt).await.unwrap();
 
         assert_eq!(key1.expose_secret().0, key2.expose_secret().0);
-    }
-
-    #[test]
-    fn test_encrypt_decrypt_cycle() {
-        let raw_key = [1u8; 32];
-        let key = SecretBox::new(Box::new(SafeKey(raw_key)));
-        let original_data = b"Moku Secret Message";
-
-        let encrypted = SecurityManager::encrypt(original_data, &key).expect("Encryption failed");
-        let decrypted = SecurityManager::decrypt(&encrypted, &key).expect("Decryption failed");
-
-        assert_eq!(original_data, &decrypted[..]);
-    }
-
-    #[test]
-    fn test_decrypt_with_wrong_key() {
-        let key1 = SecretBox::new(Box::new(SafeKey([1u8; 32])));
-        let key2 = SecretBox::new(Box::new(SafeKey([2u8; 32])));
-        let data = b"Sensitive Info";
-
-        let encrypted = SecurityManager::encrypt(data, &key1).unwrap();
-
-        let result = SecurityManager::decrypt(&encrypted, &key2);
-        assert!(result.is_err());
     }
 
     #[tokio::test]

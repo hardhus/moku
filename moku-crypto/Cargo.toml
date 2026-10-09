@@ -1,0 +1,23 @@
+[package]
+name = "moku-crypto"
+version = "0.1.0"
+edition = "2024"
+
+# Pure cryptographic primitives: key types, the password KDF, AEAD and
+# HKDF subkey derivation. No file IO and no tokio, by design (P2 decision
+# KN-2.3) — anything that reads/writes key material on disk or needs an
+# async runtime lives in moku-vault, which builds on this crate.
+
+[dependencies]
+anyhow.workspace = true
+zeroize.workspace = true
+secrecy.workspace = true
+argon2.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+
+# Per-module storage subkey derivation (subkey.rs) — same
+# scoped-not-workspace pinning as moku-volume-fs/moku-volume-daemon's own
+# HKDF usage.
+hkdf = "0.12"
+sha2 = "0.10"

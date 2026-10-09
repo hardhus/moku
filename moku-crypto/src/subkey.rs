@@ -2,7 +2,7 @@ use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretBox};
 use sha2::Sha256;
 
-use crate::security::SafeKey;
+use crate::SafeKey;
 
 const MODULE_KEY_INFO_PREFIX: &[u8] = b"moku-core/storage/";
 const MODULE_KEY_INFO_SUFFIX: &[u8] = b"/v1";

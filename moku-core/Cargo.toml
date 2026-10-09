@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 moku-sys.workspace = true
+moku-crypto.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 anyhow.workspace = true
@@ -19,20 +20,14 @@ futures.workspace = true
 
 sled.workspace = true
 zeroize.workspace = true
-argon2.workspace = true
-aes-gcm.workspace = true
-rand.workspace = true
 secrecy.workspace = true
 
 # security::cli: interactive, no-echo vault password prompts shared by CLI commands.
 rpassword.workspace = true
 
-# Per-module storage subkey derivation (storage/keys.rs) — same
-# scoped-not-workspace pinning as moku-volume-fs/moku-volume-daemon's own
-# HKDF usage.
-hkdf = "0.12"
-sha2 = "0.10"
 
 [dev-dependencies]
 tempfile.workspace = true
+# fixture_v0_2_7.rs checks the frozen fixtures against their SHA256SUMS.
+sha2 = "0.10"
 
