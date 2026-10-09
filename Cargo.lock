@@ -2685,6 +2685,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
 ]
@@ -2825,6 +2826,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.20",
  "tracing",
  "zeroize",
 ]

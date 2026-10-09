@@ -87,40 +87,31 @@ pub struct DirEntry {
 /// Engine-level error, kept as a small closed set so OS mount shims
 /// (`moku-volume-mount`) can map each variant to the right errno /
 /// NTSTATUS without string-sniffing (plan §2).
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum VolumeFsError {
+    #[error("no such file or directory")]
     NotFound,
+    #[error("file or directory already exists")]
     AlreadyExists,
+    #[error("not a directory")]
     NotADirectory,
+    #[error("is a directory")]
     IsADirectory,
+    #[error("directory not empty")]
     NotEmpty,
+    #[error("name too long")]
     NameTooLong,
+    #[error("volume is full (quota exceeded)")]
     QuotaExceeded,
+    #[error("invalid file handle")]
     BadFileHandle,
     /// Another engine (another process, or another handle in this one)
     /// already holds this volume's `VolumeLock`.
+    #[error("volume is already open (mounted or in use by another moku process)")]
     Locked,
+    #[error(transparent)]
     Other(anyhow::Error),
 }
-
-impl std::fmt::Display for VolumeFsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => write!(f, "no such file or directory"),
-            Self::AlreadyExists => write!(f, "file or directory already exists"),
-            Self::NotADirectory => write!(f, "not a directory"),
-            Self::IsADirectory => write!(f, "is a directory"),
-            Self::NotEmpty => write!(f, "directory not empty"),
-            Self::NameTooLong => write!(f, "name too long"),
-            Self::QuotaExceeded => write!(f, "volume is full (quota exceeded)"),
-            Self::BadFileHandle => write!(f, "invalid file handle"),
-            Self::Locked => write!(f, "volume is already open (mounted or in use by another moku process)"),
-            Self::Other(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for VolumeFsError {}
 
 impl From<anyhow::Error> for VolumeFsError {
     fn from(e: anyhow::Error) -> Self {

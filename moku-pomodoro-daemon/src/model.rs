@@ -115,27 +115,15 @@ pub enum Block {
 /// node, not by the `Plan` type itself).
 pub type Plan = Vec<Block>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
+    #[error("plan has no blocks")]
     Empty,
+    #[error("a phase has 0 minutes")]
     ZeroMinutePhase,
+    #[error("plan has no reachable phase (only empty/zero-count repeats)")]
     NoReachablePhase,
 }
-
-impl std::fmt::Display for PlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PlanError::Empty => write!(f, "plan has no blocks"),
-            PlanError::ZeroMinutePhase => write!(f, "a phase has 0 minutes"),
-            PlanError::NoReachablePhase => write!(
-                f,
-                "plan has no reachable phase (only empty/zero-count repeats)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PlanError {}
 
 /// Rejects a plan that could never produce a real running timer: no
 /// blocks at all, a phase with 0 minutes, or a plan whose every branch is
