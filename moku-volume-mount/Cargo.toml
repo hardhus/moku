@@ -36,4 +36,4 @@ libc = "0.2"
 moku-vault.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
-zeroize.workspace = true
+moku-crypto.workspace = true

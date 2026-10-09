@@ -1,28 +1,23 @@
-use aes_gcm::{
-    Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit, Payload},
-};
-use rand::RngCore;
-use rand::rngs::OsRng;
-use secrecy::{ExposeSecret, SecretBox};
+use moku_crypto::{BLOCK_NONCE_LEN, BlockAead, CryptoError};
+use zeroize::Zeroizing;
 
-use moku_crypto::CryptoError;
-
-use crate::keys::ContentKey;
 use crate::types::{VResult as Result, VolumeFsError};
 
 pub const BLOCK_SIZE: usize = 4096;
-pub const NONCE_LEN: usize = 12;
-pub const TAG_LEN: usize = 16;
+pub const NONCE_LEN: usize = BLOCK_NONCE_LEN;
+pub const TAG_LEN: usize = moku_crypto::TAG_LEN;
 pub const FULL_BLOCK_DISK_SIZE: u64 = (NONCE_LEN + BLOCK_SIZE + TAG_LEN) as u64;
 
+/// The MKV1 block layout on top of the volume's `BlockAead` (keyed once
+/// when the volume opens): a block on disk is `nonce(12) || ct || tag`,
+/// and its AAD is `file_id(16) || block_idx (u64 BE)`.
 pub struct BlockCipher<'a> {
-    key: &'a SecretBox<ContentKey>,
+    aead: &'a BlockAead,
 }
 
 impl<'a> BlockCipher<'a> {
-    pub fn new(key: &'a SecretBox<ContentKey>) -> Self {
-        Self { key }
+    pub fn new(aead: &'a BlockAead) -> Self {
+        Self { aead }
     }
 
     fn aad(file_id: &[u8; 16], block_idx: u64) -> [u8; 24] {
@@ -32,60 +27,46 @@ impl<'a> BlockCipher<'a> {
         aad
     }
 
-    /// Encrypts one block's plaintext (<=4096 bytes) into its on-disk form:
-    /// `nonce(12) || ciphertext+tag`. AAD binds the block to its owning
-    /// file and position, so a block can never be spliced into another
-    /// file or moved to a different offset undetected.
+    /// Encrypts one block's plaintext (<=4096 bytes) into its on-disk form.
+    /// AAD binds the block to its owning file and position, so a block can
+    /// never be spliced into another file or moved to a different offset
+    /// undetected.
     pub fn encrypt_block(&self, file_id: &[u8; 16], block_idx: u64, plaintext: &[u8]) -> Result<Vec<u8>> {
         debug_assert!(plaintext.len() <= BLOCK_SIZE);
-        let cipher = Aes256Gcm::new_from_slice(&self.key.expose_secret().0)
-            .map_err(|_| CryptoError::InvalidKeyLength)?;
-
-        let mut nonce_bytes = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let aad = Self::aad(file_id, block_idx);
-
-        let ciphertext = cipher
-            .encrypt(nonce, Payload { msg: plaintext, aad: &aad })
-            .map_err(|_| CryptoError::EncryptFailed)?;
-
-        let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-        out.extend_from_slice(&nonce_bytes);
-        out.extend(ciphertext);
-        Ok(out)
+        Ok(self.aead.seal_block(&Self::aad(file_id, block_idx), plaintext)?)
     }
 
     /// Decrypts one on-disk block back into plaintext.
-    pub fn decrypt_block(&self, file_id: &[u8; 16], block_idx: u64, disk_bytes: &[u8]) -> Result<Vec<u8>> {
-        if disk_bytes.len() < NONCE_LEN + TAG_LEN {
-            return Err(VolumeFsError::Corrupt("content block shorter than nonce + tag".into()));
+    pub fn decrypt_block(
+        &self,
+        file_id: &[u8; 16],
+        block_idx: u64,
+        disk_bytes: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        match self.aead.open_block(&Self::aad(file_id, block_idx), disk_bytes) {
+            Ok(plain) => Ok(plain),
+            Err(CryptoError::Malformed(_)) => {
+                Err(VolumeFsError::Corrupt("content block shorter than nonce + tag".into()))
+            }
+            Err(CryptoError::AuthFailed) => Err(VolumeFsError::Integrity("file content block")),
+            Err(e) => Err(e.into()),
         }
-        let cipher = Aes256Gcm::new_from_slice(&self.key.expose_secret().0)
-            .map_err(|_| CryptoError::InvalidKeyLength)?;
-
-        let (nonce_bytes, ciphertext) = disk_bytes.split_at(NONCE_LEN);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let aad = Self::aad(file_id, block_idx);
-
-        cipher
-            .decrypt(nonce, Payload { msg: ciphertext, aad: &aad })
-            .map_err(|_| VolumeFsError::Integrity("file content block"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use moku_crypto::{Key, VolumeContentKey};
 
-    fn key() -> SecretBox<ContentKey> {
-        SecretBox::new(Box::new(ContentKey([9u8; 32])))
+    fn aead() -> BlockAead {
+        BlockAead::new(&Key::<VolumeContentKey>::from_slice(&[9u8; 32]).unwrap())
     }
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let k = key();
-        let cipher = BlockCipher::new(&k);
+        let a = aead();
+        let cipher = BlockCipher::new(&a);
         let file_id = [1u8; 16];
         let plaintext = b"hello moku vault";
 
@@ -93,13 +74,13 @@ mod tests {
         assert_eq!(disk.len(), NONCE_LEN + plaintext.len() + TAG_LEN);
 
         let back = cipher.decrypt_block(&file_id, 0, &disk).unwrap();
-        assert_eq!(back, plaintext);
+        assert_eq!(&back[..], plaintext);
     }
 
     #[test]
     fn test_wrong_block_idx_fails_aad_check() {
-        let k = key();
-        let cipher = BlockCipher::new(&k);
+        let a = aead();
+        let cipher = BlockCipher::new(&a);
         let file_id = [1u8; 16];
         let disk = cipher.encrypt_block(&file_id, 3, b"data").unwrap();
         assert!(matches!(
@@ -110,8 +91,8 @@ mod tests {
 
     #[test]
     fn test_wrong_file_id_fails_aad_check() {
-        let k = key();
-        let cipher = BlockCipher::new(&k);
+        let a = aead();
+        let cipher = BlockCipher::new(&a);
         let disk = cipher.encrypt_block(&[1u8; 16], 0, b"data").unwrap();
         assert!(matches!(
             cipher.decrypt_block(&[2u8; 16], 0, &disk),
@@ -120,12 +101,22 @@ mod tests {
     }
 
     #[test]
+    fn test_short_block_is_corrupt() {
+        let a = aead();
+        let cipher = BlockCipher::new(&a);
+        assert!(matches!(
+            cipher.decrypt_block(&[1u8; 16], 0, &[0u8; 10]),
+            Err(VolumeFsError::Corrupt(_))
+        ));
+    }
+
+    #[test]
     fn test_two_encryptions_use_different_nonces() {
-        let k = key();
-        let cipher = BlockCipher::new(&k);
+        let a = aead();
+        let cipher = BlockCipher::new(&a);
         let file_id = [1u8; 16];
-        let a = cipher.encrypt_block(&file_id, 0, b"same plaintext!!").unwrap();
-        let b = cipher.encrypt_block(&file_id, 0, b"same plaintext!!").unwrap();
-        assert_ne!(a, b, "nonce reuse would make ciphertexts identical");
+        let x = cipher.encrypt_block(&file_id, 0, b"same plaintext!!").unwrap();
+        let y = cipher.encrypt_block(&file_id, 0, b"same plaintext!!").unwrap();
+        assert_ne!(x, y, "nonce reuse would make ciphertexts identical");
     }
 }

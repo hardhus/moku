@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use moku_vault::SecurityManager;
 use moku_volume_daemon::registry::{MountSecret, load_config, resolve_volume_master_key};
 use moku_volume_fs::{FileKind, VirtualPath, VolumeEngine, derive_volume_keys};
-use zeroize::Zeroizing;
 
 const VAULT_PASSWORD: &str = "foo-test-password";
 const CUSTOM_VOLUME_PASSWORD: &str = "bar-volume-password";
@@ -89,12 +88,12 @@ async fn v0_2_7_default_volume_opens_with_the_app_vault_key() {
     copy_dir(&fixture_root(), tmp.path());
 
     let app_key = SecurityManager::new_with_root(tmp.path().join("datadir"))
-        .unlock_vault(Zeroizing::new(VAULT_PASSWORD.into()))
+        .unlock_vault(moku_crypto::SecretString::from(VAULT_PASSWORD))
         .await
         .unwrap();
     let engine = open(
         &tmp.path().join("volumes/default-foo"),
-        MountSecret::Key(app_key),
+        MountSecret::AppKey(app_key),
     )
     .await;
     assert_expected_tree(&engine);
@@ -108,7 +107,7 @@ async fn v0_2_7_default_volume_opens_with_a_derived_volume_key() {
     copy_dir(&fixture_root(), tmp.path());
 
     let app_key = SecurityManager::new_with_root(tmp.path().join("datadir"))
-        .unlock_vault(Zeroizing::new(VAULT_PASSWORD.into()))
+        .unlock_vault(moku_crypto::SecretString::from(VAULT_PASSWORD))
         .await
         .unwrap();
     let volume_key = moku_volume_daemon::registry::derive_default_volume_master_key(

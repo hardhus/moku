@@ -1,37 +1,52 @@
 use std::sync::Arc;
 
-use arc_swap::ArcSwapOption;
+use moku_crypto::{CryptoError, Key, KeyCell, RootKey, SafeKey};
 use secrecy::SecretBox;
 
-use moku_crypto::SafeKey;
-
 /// Thread-safe, global source of truth for the vault's unlock state.
-/// Shares the key pointer via `Arc` without copying the underlying secret.
+///
+/// The root key lives in a `KeyCell`: it is borrowed for the length of a
+/// closure (`with`), never handed out, so `lock()` really wipes it.
 pub struct VaultSession {
-    key: ArcSwapOption<SecretBox<SafeKey>>,
+    key: KeyCell<RootKey>,
 }
 
 impl VaultSession {
     pub fn new() -> Self {
         Self {
-            key: ArcSwapOption::from(None),
+            key: KeyCell::new(),
         }
     }
 
     pub fn is_unlocked(&self) -> bool {
-        self.key.load().is_some()
+        self.key.is_set()
     }
 
-    pub fn unlock(&self, key: SecretBox<SafeKey>) {
-        self.key.store(Some(Arc::new(key)));
+    pub fn unlock(&self, key: Key<RootKey>) {
+        self.key.set(key);
     }
 
+    /// Zeroizes the root key in place; waits for running `with` calls.
     pub fn lock(&self) {
-        self.key.store(None);
+        self.key.wipe();
     }
 
+    /// Runs `f` with the root key, or `CryptoError::Locked`. Keep `f`
+    /// short: derive what you need (a module or volume key) and return it.
+    pub fn with<R>(&self, f: impl FnOnce(&Key<RootKey>) -> R) -> Result<R, CryptoError> {
+        self.key.with(f)
+    }
+
+    /// Changes on every unlock and lock.
+    pub fn generation(&self) -> u64 {
+        self.key.generation()
+    }
+
+    /// Transitional (removed later in P3, once moku-store and
+    /// moku-volume-daemon use `with`): a copy of the key in the old type.
     pub fn current(&self) -> Option<Arc<SecretBox<SafeKey>>> {
-        self.key.load_full()
+        self.with(|k| Arc::new(SecretBox::new(Box::new(SafeKey(*k.expose())))))
+            .ok()
     }
 }
 
@@ -50,17 +65,19 @@ mod tests {
     async fn test_vault_session_lifecycle() {
         let session = VaultSession::new();
         assert!(!session.is_unlocked());
-        assert!(session.current().is_none());
+        assert_eq!(session.with(|_| ()), Err(CryptoError::Locked));
 
-        let key = SecurityManager::derive_key("pass", &[0u8; 16])
+        let key = SecurityManager::derive_key(&"pass".into(), &[0u8; 16])
             .await
             .unwrap();
+        let expected = *key.expose();
         session.unlock(key);
 
         assert!(session.is_unlocked());
-        assert!(session.current().is_some());
+        assert_eq!(session.with(|k| *k.expose()), Ok(expected));
 
         session.lock();
         assert!(!session.is_unlocked());
+        assert_eq!(session.with(|_| ()), Err(CryptoError::Locked));
     }
 }

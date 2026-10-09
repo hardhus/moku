@@ -14,7 +14,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, Paragraph},
 };
-use zeroize::Zeroizing;
+use moku_crypto::SecretString;
 
 use moku_core::{AppContext, MokuTheme};
 
@@ -46,7 +46,7 @@ pub(super) struct PasswordPrompt {
     pub(super) focus: MountField,
     /// Zeroized on drop — the actual mount password while it's being
     /// typed, not just a display string.
-    pub(super) input: Zeroizing<String>,
+    pub(super) input: SecretString,
     /// true: a new-scheme Default-mode volume whose key derives from the
     /// app vault. No password field; on Enter the app key is read from
     /// the session AT THAT MOMENT, the volume key is derived, and the app
@@ -80,15 +80,18 @@ impl VolumeManagerModule {
                 let mountpoint = prompt.mountpoint.clone();
                 if prompt.use_app_key {
                     self.prompt = None;
-                    let Some(app_key) = ctx.session.current() else {
+                    // Borrow the app key only long enough to derive this
+                    // one volume's key; the worker never sees the app key.
+                    let Ok(volume_key) = ctx
+                        .session
+                        .with(|app_key| registry::derive_default_volume_master_key(app_key, &volume_id))
+                    else {
                         self.show_message("Main vault is locked, unlock it first.");
                         return Ok(true);
                     };
-                    let volume_key = registry::derive_default_volume_master_key(&app_key, &volume_id);
-                    drop(app_key);
                     self.start_mount_with_volume_key(volume_id, display_name, mountpoint, volume_key);
                 } else {
-                    let password = prompt.input.to_string();
+                    let password = prompt.input.take();
                     self.prompt = None;
                     self.start_mount(volume_id, display_name, mountpoint, password);
                 }
@@ -159,7 +162,7 @@ impl VolumeManagerModule {
             field_style(prompt.focus == MountField::Mountpoint),
         )];
         if !prompt.use_app_key {
-            let masked: String = prompt.input.chars().map(|_| '•').collect();
+            let masked: String = prompt.input.expose().chars().map(|_| '•').collect();
             lines.push(Line::styled(
                 format!(
                     "{} Password: {}",
@@ -236,7 +239,7 @@ mod tests {
             display_name: "vol-1".to_string(),
             mountpoint: "M:".to_string(),
             focus: MountField::Mountpoint,
-            input: Zeroizing::new(String::new()),
+            input: SecretString::with_capacity(128),
             use_app_key,
             error: None,
         }
@@ -285,7 +288,7 @@ mod tests {
         let mut module = VolumeManagerModule::new();
         module.prompt = Some(mount_prompt(true));
         let mut ctx = create_test_context().await;
-        let app_key = SecurityManager::derive_key("pw", &[2u8; 16]).await.unwrap();
+        let app_key = SecurityManager::derive_key(&"pw".into(), &[2u8; 16]).await.unwrap();
         ctx.session.unlock(app_key);
 
         module
@@ -303,7 +306,7 @@ mod tests {
     async fn test_mount_prompt_enter_after_the_vault_was_locked_does_not_mount() {
         let mut module = VolumeManagerModule::new();
         let mut ctx = create_test_context().await;
-        let app_key = SecurityManager::derive_key("pw", &[2u8; 16]).await.unwrap();
+        let app_key = SecurityManager::derive_key(&"pw".into(), &[2u8; 16]).await.unwrap();
         ctx.session.unlock(app_key);
         module.prompt = Some(mount_prompt(true));
 
@@ -321,7 +324,7 @@ mod tests {
         let mut module = VolumeManagerModule::new();
         let mut prompt = mount_prompt(false);
         prompt.focus = MountField::Password;
-        prompt.input = Zeroizing::new("hunter2".to_string());
+        prompt.input = SecretString::from("hunter2");
         module.prompt = Some(prompt);
         let mut ctx = create_test_context().await;
 

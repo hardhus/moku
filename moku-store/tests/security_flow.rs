@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tempfile::tempdir;
-use zeroize::Zeroizing;
+use moku_crypto::SecretString;
 
 use moku_store::StorageManager;
 use moku_vault::{SecurityManager, VaultSession};
@@ -11,14 +11,14 @@ async fn test_end_to_end_vault_lifecycle() {
     let temp = tempdir().unwrap();
     let root = temp.path().to_path_buf();
 
-    let password = Zeroizing::new("super_secret_password".to_string());
+    let password = SecretString::from("super_secret_password");
     let secret_content = "This data can only be read with the correct password.".to_string();
 
     let sm_init = SecurityManager::new_with_root(root.clone());
     assert!(!sm_init.is_vault_initialized());
 
     let master_key_box = sm_init
-        .initialize_vault(password.clone())
+        .initialize_vault(password.duplicate())
         .await
         .expect("Failed to initialize vault");
     assert!(sm_init.is_vault_initialized());
@@ -68,8 +68,8 @@ async fn test_rekeying_simulation_proval() {
     let temp = tempdir().unwrap();
     let root = temp.path().to_path_buf();
 
-    let old_pass = Zeroizing::new("old_123".to_string());
-    let new_pass = Zeroizing::new("new_456".to_string());
+    let old_pass = SecretString::from("old_123");
+    let new_pass = SecretString::from("new_456");
     let sensitive_data = vec![1, 2, 3, 4, 5];
 
     let sm = SecurityManager::new_with_root(root.clone());

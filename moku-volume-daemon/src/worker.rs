@@ -2,9 +2,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow, bail};
-use moku_crypto::SafeKey;
+use moku_crypto::{Key, SecretString, VolumeMasterKey};
 use moku_volume_fs::{VolumeEngine, derive_volume_keys};
-use secrecy::SecretBox;
 use zeroize::Zeroizing;
 
 use crate::registry;
@@ -61,25 +60,18 @@ fn read_mount_secret_from_stdin() -> Result<registry::MountSecret> {
 /// Decodes the tagged stdin payload; see `read_mount_secret_from_stdin`.
 fn parse_mount_secret(buf: &[u8]) -> Result<registry::MountSecret> {
     match buf.split_first() {
-        Some((0x01, rest)) if rest.len() == 32 => {
-            let mut key = [0u8; 32];
-            key.copy_from_slice(rest);
-            Ok(registry::MountSecret::Key(SecretBox::new(Box::new(
-                SafeKey(key),
-            ))))
-        }
-        Some((0x02, rest)) if rest.len() == 32 => {
-            let mut key = [0u8; 32];
-            key.copy_from_slice(rest);
-            Ok(registry::MountSecret::VolumeKey(SecretBox::new(Box::new(SafeKey(key)))))
-        }
+        // Keys go straight from the (zeroizing) stdin buffer into a `Key`.
+        Some((0x01, rest)) if rest.len() == 32 => Ok(registry::MountSecret::AppKey(
+            Key::from_slice(rest)?,
+        )),
+        Some((0x02, rest)) if rest.len() == 32 => Ok(registry::MountSecret::VolumeKey(
+            Key::from_slice(rest)?,
+        )),
         Some((0x00, rest)) => {
-            let password: Zeroizing<String> = Zeroizing::new(
-                String::from_utf8(rest.to_vec()).context("password payload was not valid UTF-8")?,
-            );
-            Ok(registry::MountSecret::Password(
-                password.trim_end_matches(['\n', '\r']).to_string(),
-            ))
+            let text = std::str::from_utf8(rest).context("password payload was not valid UTF-8")?;
+            let mut password = SecretString::from(text);
+            password.trim_line_ending();
+            Ok(registry::MountSecret::Password(password))
         }
         _ => bail!("malformed mount secret on stdin"),
     }
@@ -417,10 +409,11 @@ async fn run_and_wait_for_outcome(
 pub async fn spawn_mount_process(
     volume_id: &str,
     mountpoint: &str,
-    password: &str,
+    password: &SecretString,
 ) -> Result<MountOutcome> {
-    let mut payload: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0x00u8]);
-    payload.extend_from_slice(password.as_bytes());
+    let mut payload: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(1 + password.len()));
+    payload.push(0x00);
+    payload.extend_from_slice(password.expose().as_bytes());
     run_and_wait_for_outcome(volume_id, mountpoint, payload).await
 }
 
@@ -437,11 +430,11 @@ pub async fn spawn_mount_process(
 pub async fn spawn_mount_process_with_volume_key(
     volume_id: &str,
     mountpoint: &str,
-    volume_key: &SecretBox<SafeKey>,
+    volume_key: &Key<VolumeMasterKey>,
 ) -> Result<MountOutcome> {
-    use secrecy::ExposeSecret;
-    let mut payload: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0x02u8]);
-    payload.extend_from_slice(&volume_key.expose_secret().0);
+    let mut payload: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(33));
+    payload.push(0x02);
+    payload.extend_from_slice(volume_key.expose());
     run_and_wait_for_outcome(volume_id, mountpoint, payload).await
 }
 
@@ -541,18 +534,17 @@ mod tests {
 
     #[test]
     fn test_parse_mount_secret_tags() {
-        use secrecy::ExposeSecret;
         let mut vk = vec![0x02u8];
         vk.extend_from_slice(&[9u8; 32]);
         match parse_mount_secret(&vk).unwrap() {
-            registry::MountSecret::VolumeKey(k) => assert_eq!(k.expose_secret().0, [9u8; 32]),
+            registry::MountSecret::VolumeKey(k) => assert_eq!(k.expose(), &[9u8; 32]),
             _ => panic!("0x02 must decode to a derived volume key"),
         }
         let mut app = vec![0x01u8];
         app.extend_from_slice(&[7u8; 32]);
-        assert!(matches!(parse_mount_secret(&app).unwrap(), registry::MountSecret::Key(_)));
+        assert!(matches!(parse_mount_secret(&app).unwrap(), registry::MountSecret::AppKey(_)));
         match parse_mount_secret(b"\x00hunter2\n").unwrap() {
-            registry::MountSecret::Password(p) => assert_eq!(p, "hunter2"),
+            registry::MountSecret::Password(p) => assert_eq!(p.expose(), "hunter2"),
             _ => panic!("0x00 must decode to a password"),
         }
         assert!(parse_mount_secret(&[0x02, 1, 2, 3]).is_err(), "a short key is malformed");

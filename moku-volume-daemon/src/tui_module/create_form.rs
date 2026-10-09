@@ -11,11 +11,9 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, Paragraph},
 };
-use secrecy::{ExposeSecret, SecretBox};
-use zeroize::Zeroizing;
 
 use moku_core::{AppContext, MokuTheme};
-use moku_crypto::SafeKey;
+use moku_crypto::SecretString;
 
 use super::VolumeManagerModule;
 use crate::registry::{PasswordMode, VolumeSecret};
@@ -54,8 +52,8 @@ pub(super) struct CreateForm {
     mode: PasswordMode,
     /// Zeroized on drop — the actual new-volume password while it's being
     /// typed, not just a display string.
-    password: Zeroizing<String>,
-    confirm_password: Zeroizing<String>,
+    password: SecretString,
+    confirm_password: SecretString,
     error: Option<String>,
 }
 
@@ -66,8 +64,8 @@ impl CreateForm {
             name: String::new(),
             size: String::new(),
             mode: PasswordMode::Default,
-            password: Zeroizing::new(String::new()),
-            confirm_password: Zeroizing::new(String::new()),
+            password: SecretString::with_capacity(128),
+            confirm_password: SecretString::with_capacity(128),
             error: None,
         }
     }
@@ -124,18 +122,16 @@ impl VolumeManagerModule {
                                     if form.password.is_empty() {
                                         form.error = Some("Password cannot be empty.".to_string());
                                         None
-                                    } else if form.password != form.confirm_password {
+                                    } else if form.password.expose() != form.confirm_password.expose() {
                                         form.error = Some("Passwords didn't match.".to_string());
                                         None
                                     } else {
-                                        Some(VolumeSecret::Password(form.password.to_string()))
+                                        Some(VolumeSecret::Password(form.password.take()))
                                     }
                                 }
-                                PasswordMode::Default => match ctx.session.current() {
-                                    Some(key) => Some(VolumeSecret::FromAppVault(SecretBox::new(
-                                        Box::new(SafeKey(key.expose_secret().0)),
-                                    ))),
-                                    None => {
+                                PasswordMode::Default => match ctx.session.is_unlocked() {
+                                    true => Some(VolumeSecret::AppVault),
+                                    false => {
                                         form.error = Some(
                                                 "Main vault is locked — unlock it first, or switch to a custom password."
                                                     .to_string(),
@@ -255,8 +251,8 @@ impl VolumeManagerModule {
             ),
         ];
         if form.mode == PasswordMode::Custom {
-            let masked_password: String = form.password.chars().map(|_| '•').collect();
-            let masked_confirm: String = form.confirm_password.chars().map(|_| '•').collect();
+            let masked_password: String = form.password.expose().chars().map(|_| '•').collect();
+            let masked_confirm: String = form.confirm_password.expose().chars().map(|_| '•').collect();
             lines.push(Line::styled(
                 format!(
                     "{} Password: {}",
@@ -335,7 +331,7 @@ mod tests {
     async fn create_unlocked_test_context() -> AppContext {
         let ctx = create_test_context().await;
         ctx.session
-            .unlock(SecretBox::new(Box::new(SafeKey([7u8; 32]))));
+            .unlock(moku_crypto::Key::from_slice(&[7u8; 32]).unwrap());
         ctx
     }
 
@@ -489,7 +485,7 @@ mod tests {
         let mut form = CreateForm::new();
         form.name = "test".to_string();
         form.size = "not-a-size".to_string();
-        form.password = Zeroizing::new("hunter2".to_string());
+        form.password = SecretString::from("hunter2");
         module.create_form = Some(form);
         let mut ctx = create_test_context().await;
 
@@ -526,8 +522,8 @@ mod tests {
         form.name = "test".to_string();
         form.size = "10MiB".to_string();
         form.mode = PasswordMode::Custom;
-        form.password = Zeroizing::new("hunter2".to_string());
-        form.confirm_password = Zeroizing::new("hunter3".to_string());
+        form.password = SecretString::from("hunter2");
+        form.confirm_password = SecretString::from("hunter3");
         module.create_form = Some(form);
         let mut ctx = create_test_context().await;
 
@@ -546,8 +542,8 @@ mod tests {
         form.name = "test".to_string();
         form.size = "10MiB".to_string();
         form.mode = PasswordMode::Custom;
-        form.password = Zeroizing::new("hunter2".to_string());
-        form.confirm_password = Zeroizing::new("hunter2".to_string());
+        form.password = SecretString::from("hunter2");
+        form.confirm_password = SecretString::from("hunter2");
         module.create_form = Some(form);
         let mut ctx = create_test_context().await;
 

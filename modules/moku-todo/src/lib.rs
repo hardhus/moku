@@ -800,7 +800,7 @@ mod tests {
     async fn test_dashboard_summary_reports_counts_when_unlocked() {
         let module = TodoModule::new();
         let ctx = create_test_context().await;
-        let key = SecurityManager::derive_key("test-pass", &[7u8; 16])
+        let key = SecurityManager::derive_key(&"test-pass".into(), &[7u8; 16])
             .await
             .unwrap();
         ctx.session.unlock(key);
@@ -825,7 +825,7 @@ mod tests {
     /// "something is stored but can't be read" state.
     async fn ctx_with_unreadable_tasks(items: &[Task]) -> AppContext {
         let ctx = create_test_context().await;
-        let key_a = SecurityManager::derive_key("key-a", &[1u8; 16])
+        let key_a = SecurityManager::derive_key(&"key-a".into(), &[1u8; 16])
             .await
             .unwrap();
         ctx.session.unlock(key_a);
@@ -833,7 +833,7 @@ mod tests {
             .save(ModuleId::TODO.as_str(), "items", &items.to_vec(), true)
             .await
             .unwrap();
-        let key_b = SecurityManager::derive_key("key-b", &[1u8; 16])
+        let key_b = SecurityManager::derive_key(&"key-b".into(), &[1u8; 16])
             .await
             .unwrap();
         ctx.session.unlock(key_b);
@@ -848,7 +848,7 @@ mod tests {
     async fn test_init_with_nothing_stored_seeds_welcome_task() {
         let mut module = TodoModule::new();
         let mut ctx = create_test_context().await;
-        let key = SecurityManager::derive_key("k", &[1u8; 16]).await.unwrap();
+        let key = SecurityManager::derive_key(&"k".into(), &[1u8; 16]).await.unwrap();
         ctx.session.unlock(key);
         module.init(&mut ctx).await.unwrap();
         assert!(module.load_error.is_none());
@@ -887,7 +887,7 @@ mod tests {
         module.save(&mut ctx).await;
 
         // With the right key again, the original data is still intact.
-        let key_a = SecurityManager::derive_key("key-a", &[1u8; 16])
+        let key_a = SecurityManager::derive_key(&"key-a".into(), &[1u8; 16])
             .await
             .unwrap();
         ctx.session.unlock(key_a);

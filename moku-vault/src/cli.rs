@@ -2,17 +2,19 @@
 //! vault, so they all follow the same rules:
 //! - an existing password is asked once;
 //! - a new password is always asked twice;
-//! - passwords go straight into `Zeroizing`;
+//! - passwords go straight into a `SecretString`;
 //! - a CLI command never silently creates a vault.
 
-use zeroize::Zeroizing;
+use moku_crypto::SecretString;
 
 use crate::{SecurityManager, VaultError, VaultSession};
 
 type Result<T> = std::result::Result<T, VaultError>;
 
-fn read_password(label: &str) -> Result<Zeroizing<String>> {
-    Ok(Zeroizing::new(
+/// Reads one password without echo. `rpassword` returns a `String`; it is
+/// moved (not copied) into the `SecretString`.
+pub fn read_password(label: &str) -> Result<SecretString> {
+    Ok(SecretString::from(
         rpassword::prompt_password(label).map_err(VaultError::Prompt)?,
     ))
 }
@@ -45,17 +47,17 @@ pub async fn ensure_unlocked(
 /// Asks for a NEW password twice and returns it only if both entries
 /// match and it isn't empty. A fresh password has nothing else to check a
 /// typo against.
-pub fn prompt_new_password(label: &str, confirm_label: &str) -> Result<Zeroizing<String>> {
+pub fn prompt_new_password(label: &str, confirm_label: &str) -> Result<SecretString> {
     let first = read_password(label)?;
     let second = read_password(confirm_label)?;
     check_new_password(first, &second)
 }
 
-fn check_new_password(first: Zeroizing<String>, second: &str) -> Result<Zeroizing<String>> {
+fn check_new_password(first: SecretString, second: &SecretString) -> Result<SecretString> {
     if first.is_empty() {
         return Err(VaultError::EmptyPassword);
     }
-    if *first != *second {
+    if first.expose() != second.expose() {
         return Err(VaultError::PasswordMismatch);
     }
     Ok(first)
@@ -68,17 +70,17 @@ mod tests {
     #[test]
     fn test_check_new_password_rules() {
         assert!(matches!(
-            check_new_password(Zeroizing::new(String::new()), ""),
+            check_new_password(SecretString::new(), &SecretString::new()),
             Err(VaultError::EmptyPassword)
         ));
         assert!(matches!(
-            check_new_password(Zeroizing::new("a".into()), "b"),
+            check_new_password("a".into(), &"b".into()),
             Err(VaultError::PasswordMismatch)
         ));
         assert_eq!(
-            check_new_password(Zeroizing::new("same".into()), "same")
+            check_new_password("same".into(), &"same".into())
                 .unwrap()
-                .as_str(),
+                .expose(),
             "same"
         );
     }
@@ -100,7 +102,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let security = SecurityManager::new_with_root(dir.path().to_path_buf());
         let session = VaultSession::new();
-        let key = SecurityManager::derive_key("x", &[1u8; 16]).await.unwrap();
+        let key = SecurityManager::derive_key(&"x".into(), &[1u8; 16]).await.unwrap();
         session.unlock(key);
         ensure_unlocked(&session, &security, "pw: ").await.unwrap();
     }

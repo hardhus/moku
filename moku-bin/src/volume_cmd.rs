@@ -63,9 +63,7 @@ pub async fn handle(sub: &VolumeCommands) -> Result<()> {
                     "New volume password: ",
                     "Confirm volume password: ",
                 )?;
-                // `VolumeSecret::Password` still holds a plain String; it
-                // becomes a zeroizing secret type in P3.
-                VolumeSecret::Password(password.to_string())
+                VolumeSecret::Password(password)
             } else {
                 // Default mode: the volume gets no password of its own —
                 // its key is derived from moku's real app vault, so this
@@ -78,15 +76,14 @@ pub async fn handle(sub: &VolumeCommands) -> Result<()> {
                         "moku's vault isn't set up yet — initialize it first from the Vault Security screen in the TUI, or create this volume with --custom-password instead."
                     );
                 }
-                let password = zeroize::Zeroizing::new(
-                    rpassword::prompt_password("Moku vault password: ")
-                        .map_err(|e| anyhow!("Failed to read password: {e}"))?,
-                );
-                let key = app_security
+                let password = moku_vault::cli::read_password("Moku vault password: ")?;
+                // Only proves the password; the key itself isn't needed to
+                // create the volume and is dropped (wiped) right away.
+                app_security
                     .unlock_vault(password)
                     .await
                     .map_err(|e| anyhow::Error::new(e).context("failed to unlock moku vault"))?;
-                VolumeSecret::FromAppVault(key)
+                VolumeSecret::AppVault
             };
 
             let cfg = registry::create_volume(&name, size_bytes, secret, base_dir).await?;
@@ -206,10 +203,7 @@ async fn mount(name: &str, mountpoint: Option<&str>) -> Result<()> {
         PasswordMode::Default => "Moku vault password: ",
         PasswordMode::Custom => "Volume password: ",
     };
-    let password = zeroize::Zeroizing::new(
-        rpassword::prompt_password(prompt_label)
-            .map_err(|e| anyhow!("Failed to read password: {e}"))?,
-    );
+    let password = moku_vault::cli::read_password(prompt_label)?;
 
     match worker::spawn_mount_process(&cfg.id, &resolved_mountpoint, &password).await? {
         MountOutcome::Ready { pid } => {

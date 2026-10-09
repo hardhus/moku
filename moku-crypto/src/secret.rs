@@ -109,6 +109,16 @@ impl From<String> for SecretString {
     }
 }
 
+/// Copies the text into a new wiped-on-drop buffer (literals, test
+/// fixtures). The source `&str` itself is not wiped.
+impl From<&str> for SecretString {
+    fn from(s: &str) -> Self {
+        let mut out = Self::with_capacity(s.len());
+        out.0.push_str(s);
+        out
+    }
+}
+
 impl fmt::Debug for SecretString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "SecretString(***REDACTED***)")

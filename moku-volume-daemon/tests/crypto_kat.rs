@@ -4,11 +4,10 @@
 //! of these fails, the change broke compatibility with existing volumes.
 //! Never "update" the expected values to match a new implementation.
 
-use moku_crypto::SafeKey;
+use moku_crypto::{Key, RootKey};
 use moku_vault::SecurityManager;
 use moku_volume_daemon::registry::derive_default_volume_master_key;
 use moku_volume_fs::derive_volume_keys;
-use secrecy::{ExposeSecret, SecretBox};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -19,12 +18,12 @@ fn hex(bytes: &[u8]) -> String {
 /// string is intentionally permanent (see src/registry.rs).
 #[test]
 fn k3_default_volume_master_key_known_answers() {
-    let app_master = SecretBox::new(Box::new(SafeKey([0x07; 32])));
+    let app_master = Key::<RootKey>::from_slice(&[0x07; 32]).unwrap();
     let actual: Vec<(&str, String)> = ["notes", "a", "vol-a"]
         .into_iter()
         .map(|v| {
             let k = derive_default_volume_master_key(&app_master, v);
-            (v, hex(&k.expose_secret().0))
+            (v, hex(k.expose()))
         })
         .collect();
     let expected: Vec<(&str, String)> = K3_EXPECTED
@@ -53,13 +52,13 @@ const K3_EXPECTED: [(&str, &str); 3] = [
 /// content key + name key.
 #[tokio::test]
 async fn k5_full_default_volume_chain_known_answer() {
-    let app_master = SecurityManager::derive_key("correct horse", &[0x01; 16])
+    let app_master = SecurityManager::derive_key(&"correct horse".into(), &[0x01; 16])
         .await
         .unwrap();
     let volume_master = derive_default_volume_master_key(&app_master, "notes");
     let keys = derive_volume_keys(&volume_master);
-    assert_eq!(hex(&keys.content.expose_secret().0), K5_CONTENT_EXPECTED);
-    assert_eq!(hex(&keys.name.expose_secret().0), K5_NAME_EXPECTED);
+    assert_eq!(hex(keys.content.expose()), K5_CONTENT_EXPECTED);
+    assert_eq!(hex(keys.name.expose()), K5_NAME_EXPECTED);
 }
 const K5_CONTENT_EXPECTED: &str =
     "40373f037d7934d7708a946df9bab5cfe1ccd3031af05c36175d5dda57d8dbd0";

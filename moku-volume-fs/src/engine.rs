@@ -5,12 +5,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
-use rand::RngCore;
-use rand::rngs::OsRng;
-use secrecy::SecretBox;
+use moku_crypto::BlockAead;
 
 use crate::content;
-use crate::keys::{ContentKey, NameKey, VolumeKeys};
+use crate::keys::VolumeKeys;
+use crate::names::NameCipher;
 use crate::lock::VolumeLock;
 use crate::names::MAX_VIRTUAL_NAME_LEN;
 use crate::pathmap::PathMapper;
@@ -28,8 +27,9 @@ struct OpenFile {
 /// call straight into this with no runtime bridging.
 pub struct VolumeEngine {
     pathmap: PathMapper,
-    content_key: SecretBox<ContentKey>,
-    name_key: SecretBox<NameKey>,
+    /// Content cipher, keyed once for the whole time the volume is open.
+    blocks: BlockAead,
+    names: NameCipher,
     quota: Quota,
     open_files: Mutex<HashMap<u64, OpenFile>>,
     next_fh: AtomicU64,
@@ -59,8 +59,8 @@ impl VolumeEngine {
         let quota = Quota::load(usage_path, size_limit_bytes);
         Ok(Self {
             pathmap,
-            content_key: keys.content,
-            name_key: keys.name,
+            blocks: BlockAead::new(&keys.content),
+            names: NameCipher::new(keys.name),
             quota,
             open_files: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
@@ -114,7 +114,7 @@ impl VolumeEngine {
         let backing = if path.is_root() {
             self.pathmap.data_root().clone()
         } else {
-            self.pathmap.resolve(&self.name_key, path)?
+            self.pathmap.resolve(&self.names, path)?
         };
         if backing.is_dir() {
             self.pathmap.dir_iv(&backing)
@@ -144,7 +144,7 @@ impl VolumeEngine {
         if path.is_root() {
             return self.stat_backing(self.pathmap.data_root());
         }
-        let backing = self.pathmap.resolve(&self.name_key, path)?;
+        let backing = self.pathmap.resolve(&self.names, path)?;
         self.stat_backing(&backing)
     }
 
@@ -152,12 +152,12 @@ impl VolumeEngine {
         let backing = if path.is_root() {
             self.pathmap.data_root().clone()
         } else {
-            self.pathmap.resolve(&self.name_key, path)?
+            self.pathmap.resolve(&self.names, path)?
         };
         if !backing.is_dir() {
             return Err(VolumeFsError::NotADirectory);
         }
-        let entries = self.pathmap.read_dir_plain(&self.name_key, &backing)?;
+        let entries = self.pathmap.read_dir_plain(&self.names, &backing)?;
         let mut entries: Vec<DirEntry> = entries
             .into_iter()
             .map(|(name, _p, is_dir)| DirEntry {
@@ -178,7 +178,7 @@ impl VolumeEngine {
             return Err(VolumeFsError::NameTooLong);
         }
         let child = parent.join(name);
-        let backing = self.pathmap.resolve(&self.name_key, &child)?;
+        let backing = self.pathmap.resolve(&self.names, &child)?;
         if backing.exists() {
             return Err(VolumeFsError::AlreadyExists);
         }
@@ -189,7 +189,7 @@ impl VolumeEngine {
 
     pub fn rmdir(&self, parent: &VirtualPath, name: &str) -> VResult<()> {
         let child = parent.join(name);
-        let backing = self.pathmap.resolve(&self.name_key, &child)?;
+        let backing = self.pathmap.resolve(&self.names, &child)?;
         if !backing.is_dir() {
             return Err(VolumeFsError::NotADirectory);
         }
@@ -210,15 +210,14 @@ impl VolumeEngine {
             return Err(VolumeFsError::NameTooLong);
         }
         let child = parent.join(name);
-        let backing = self.pathmap.resolve(&self.name_key, &child)?;
+        let backing = self.pathmap.resolve(&self.names, &child)?;
         if backing.exists() {
             return Err(VolumeFsError::AlreadyExists);
         }
         if !self.quota.try_grow(content::HEADER_SIZE) {
             return Err(VolumeFsError::QuotaExceeded);
         }
-        let mut file_id = [0u8; 16];
-        OsRng.fill_bytes(&mut file_id);
+        let file_id = moku_crypto::random::random_id16();
         if let Err(e) = content::create_empty_file(&backing, &file_id) {
             self.quota.shrink(content::HEADER_SIZE);
             return Err(e);
@@ -233,7 +232,7 @@ impl VolumeEngine {
     }
 
     pub fn open(&self, path: &VirtualPath) -> VResult<u64> {
-        let backing = self.pathmap.resolve(&self.name_key, path)?;
+        let backing = self.pathmap.resolve(&self.names, path)?;
         if !backing.is_file() {
             return Err(VolumeFsError::NotFound);
         }
@@ -260,7 +259,7 @@ impl VolumeEngine {
         let lock = self.file_lock(&file_id);
         let _shared = lock.read().unwrap_or_else(|p| p.into_inner());
         let mut file = OpenOptions::new().read(true).open(&backing)?;
-        content::read_range(&mut file, &self.content_key, &file_id, offset, buf)
+        content::read_range(&mut file, &self.blocks, &file_id, offset, buf)
     }
 
     pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> VResult<usize> {
@@ -277,7 +276,7 @@ impl VolumeEngine {
             return Err(VolumeFsError::QuotaExceeded);
         }
         let (written, before, after) =
-            match content::write_range(&mut file, &self.content_key, &file_id, offset, data) {
+            match content::write_range(&mut file, &self.blocks, &file_id, offset, data) {
                 Ok(v) => v,
                 Err(e) => {
                     // Settle the reservation against what actually reached
@@ -294,7 +293,7 @@ impl VolumeEngine {
     }
 
     pub fn setattr_size(&self, path: &VirtualPath, size: u64) -> VResult<Attr> {
-        let backing = self.pathmap.resolve(&self.name_key, path)?;
+        let backing = self.pathmap.resolve(&self.names, path)?;
         let mut file = OpenOptions::new().read(true).write(true).open(&backing)?;
         let file_id = content::read_file_id(&mut file)?;
         let lock = self.file_lock(&file_id);
@@ -304,7 +303,7 @@ impl VolumeEngine {
         if projected_growth > 0 && !self.quota.try_grow(projected_growth) {
             return Err(VolumeFsError::QuotaExceeded);
         }
-        let (before, after) = match content::set_len(&mut file, &self.content_key, &file_id, size) {
+        let (before, after) = match content::set_len(&mut file, &self.blocks, &file_id, size) {
             Ok(v) => v,
             Err(e) => {
                 let now = file.metadata().map(|m| m.len()).unwrap_or(physical_before);
@@ -350,7 +349,7 @@ impl VolumeEngine {
 
     pub fn unlink(&self, parent: &VirtualPath, name: &str) -> VResult<()> {
         let child = parent.join(name);
-        let backing = self.pathmap.resolve(&self.name_key, &child)?;
+        let backing = self.pathmap.resolve(&self.names, &child)?;
         let meta = fs::metadata(&backing)?;
         if meta.is_dir() {
             return Err(VolumeFsError::IsADirectory);
@@ -377,8 +376,8 @@ impl VolumeEngine {
         }
         let old_child = old_parent.join(old_name);
         let new_child = new_parent.join(new_name);
-        let old_backing = self.pathmap.resolve(&self.name_key, &old_child)?;
-        let new_backing = self.pathmap.resolve(&self.name_key, &new_child)?;
+        let old_backing = self.pathmap.resolve(&self.names, &old_child)?;
+        let new_backing = self.pathmap.resolve(&self.names, &new_child)?;
         if !old_backing.exists() {
             return Err(VolumeFsError::NotFound);
         }
@@ -432,13 +431,13 @@ impl VolumeEngine {
 mod tests {
     use super::*;
     use crate::keys::VolumeKeys;
-    use secrecy::SecretBox;
+    use moku_crypto::Key;
     use tempfile::tempdir;
 
     fn engine(dir: &Path, limit: u64) -> VolumeEngine {
         let keys = VolumeKeys {
-            content: SecretBox::new(Box::new(ContentKey([1u8; 32]))),
-            name: SecretBox::new(Box::new(NameKey([2u8; 64]))),
+            content: Key::from_slice(&[1u8; 32]).unwrap(),
+            name: Key::from_slice(&[2u8; 64]).unwrap(),
         };
         let lock = VolumeLock::acquire(dir).unwrap();
         VolumeEngine::open_volume(dir.join("data"), keys, dir.join("usage.json"), limit, lock)
@@ -773,7 +772,7 @@ mod tests {
 
         // Corrupt the last on-disk block so the next tail write fails while
         // decrypting it (after the quota reservation was taken).
-        let backing = e.pathmap.resolve(&e.name_key, &VirtualPath::parse("/f.bin")).unwrap();
+        let backing = e.pathmap.resolve(&e.names, &VirtualPath::parse("/f.bin")).unwrap();
         let mut bytes = std::fs::read(&backing).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;

@@ -28,7 +28,6 @@ use moku_vault::{SecurityManager, VaultSession};
 use moku_volume_daemon::PasswordMode;
 use moku_volume_daemon::registry::{VolumeConfig, derive_default_volume_master_key};
 use moku_volume_fs::{VirtualPath, VolumeEngine, derive_volume_keys};
-use secrecy::SecretBox;
 use zeroize::Zeroizing;
 
 pub const VAULT_PASSWORD: &str = "foo-test-password";
@@ -157,7 +156,7 @@ fn write_v0_record(
     root: &Path,
     module: &str,
     key: &str,
-    master: &SecretBox<moku_crypto::SafeKey>,
+    master: &moku_crypto::Key<moku_crypto::RootKey>,
     value: &serde_json::Value,
 ) {
     let raw = serde_json::to_vec(value).unwrap();
@@ -165,7 +164,9 @@ fn write_v0_record(
         schema_version: CURRENT_SCHEMA_VERSION,
         status: EncryptionStatus::Encrypted,
         storage_type: StorageType::Embedded,
-        payload: moku_crypto::encrypt(&raw, master).unwrap(),
+        // Compile-only adaptation to the P3 API (same bytes format); this
+        // generator is never re-run.
+        payload: moku_crypto::format_v1::seal_gcm_no_aad(master, &raw).unwrap(),
         hash: None,
         key_scheme: KeyScheme::V0,
     };
@@ -241,7 +242,7 @@ async fn generate_v0_2_7_fixtures() {
     let datadir = stage.join("datadir");
     let security = SecurityManager::new_with_root(datadir.clone());
     let master = security
-        .initialize_vault(Zeroizing::new(VAULT_PASSWORD.into()))
+        .initialize_vault(moku_crypto::SecretString::from(VAULT_PASSWORD))
         .await
         .unwrap();
 
@@ -263,7 +264,7 @@ async fn generate_v0_2_7_fixtures() {
     let session = Arc::new(VaultSession::new());
     session.unlock(
         security
-            .unlock_vault(Zeroizing::new(VAULT_PASSWORD.into()))
+            .unlock_vault(moku_crypto::SecretString::from(VAULT_PASSWORD))
             .await
             .unwrap(),
     );
@@ -323,12 +324,12 @@ async fn generate_v0_2_7_fixtures() {
     };
     write_volume_config(&custom_dir, &custom_cfg).await;
     let custom_master = SecurityManager::new_with_root(custom_dir.clone())
-        .initialize_vault(Zeroizing::new(CUSTOM_VOLUME_PASSWORD.into()))
+        .initialize_vault(moku_crypto::SecretString::from(CUSTOM_VOLUME_PASSWORD))
         .await
         .unwrap();
     let engine = VolumeEngine::open_volume(
         custom_dir.join("data"),
-        derive_volume_keys(&custom_master),
+        derive_volume_keys(&moku_crypto::format_v1::custom_volume_master(custom_master)),
         custom_dir.join("usage.json"),
         custom_cfg.size_limit_bytes,
         // Compile-only adaptation to the later `open_volume(.., lock)`
@@ -340,17 +341,17 @@ async fn generate_v0_2_7_fixtures() {
     drop(engine);
 
     // --- msxp: secrets encrypted export v1 -----------------------------------
-    let msxp = moku_secrets::engine::export_encrypted(&secrets(), EXPORT_PASSWORD)
+    let msxp = moku_secrets::engine::export_encrypted(&secrets(), &EXPORT_PASSWORD.into())
         .await
         .unwrap();
     std::fs::create_dir_all(stage.join("msxp")).unwrap();
     std::fs::write(stage.join("msxp").join("export-v1.msxp"), msxp).unwrap();
 
     // --- blobs: a real moku_crypto::encrypt output under the K1 key ----
-    let k1 = SecurityManager::derive_key("correct horse", &[0x01; 16])
+    let k1 = SecurityManager::derive_key(&"correct horse".into(), &[0x01; 16])
         .await
         .unwrap();
-    let legacy = moku_crypto::encrypt(b"foo-legacy-plaintext", &k1).unwrap();
+    let legacy = moku_crypto::format_v1::seal_gcm_no_aad(&k1, b"foo-legacy-plaintext").unwrap();
     std::fs::create_dir_all(stage.join("blobs")).unwrap();
     std::fs::write(stage.join("blobs").join("legacy-gcm.bin"), legacy).unwrap();
 

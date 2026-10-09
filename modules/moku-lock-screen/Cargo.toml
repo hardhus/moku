@@ -11,7 +11,7 @@ anyhow.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 async-trait.workspace = true
-zeroize.workspace = true
+moku-crypto.workspace = true
 
 [dev-dependencies]
 moku-store.workspace = true

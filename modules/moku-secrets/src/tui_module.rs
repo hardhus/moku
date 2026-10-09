@@ -334,7 +334,7 @@ impl SecretsModule {
                 Err(e) => Err(e),
             },
             ExportKind::Encrypted => {
-                match engine::export_encrypted(&self.entries, &export.password).await {
+                match engine::export_encrypted(&self.entries, &moku_crypto::SecretString::from(export.password.as_str())).await {
                     Ok(bytes) => tokio::fs::write(&export.path, bytes).await.map_err(Into::into),
                     Err(e) => Err(e),
                 }
@@ -804,11 +804,11 @@ mod confirm_delete_tests {
     /// different key B, so loading fails: stored-but-unreadable data.
     async fn ctx_with_unreadable_secrets() -> AppContext {
         let ctx = create_test_context().await;
-        let key_a = SecurityManager::derive_key("key-a", &[2u8; 16]).await.unwrap();
+        let key_a = SecurityManager::derive_key(&"key-a".into(), &[2u8; 16]).await.unwrap();
         ctx.session.unlock(key_a);
         let entries = vec![SecretEntry::new("keep".to_string(), "v".to_string())];
         engine::save_entries(&ctx.storage, &ctx.config.load(), &entries).await.unwrap();
-        let key_b = SecurityManager::derive_key("key-b", &[2u8; 16]).await.unwrap();
+        let key_b = SecurityManager::derive_key(&"key-b".into(), &[2u8; 16]).await.unwrap();
         ctx.session.unlock(key_b);
         ctx
     }
@@ -830,7 +830,7 @@ mod confirm_delete_tests {
         module.handle_event(&shift_d, &mut ctx).await.unwrap();
         module.save(&mut ctx).await;
 
-        let key_a = SecurityManager::derive_key("key-a", &[2u8; 16]).await.unwrap();
+        let key_a = SecurityManager::derive_key(&"key-a".into(), &[2u8; 16]).await.unwrap();
         ctx.session.unlock(key_a);
         let stored = engine::load_entries(&ctx.storage).await.unwrap();
         assert_eq!(stored.len(), 1);
@@ -847,7 +847,7 @@ mod confirm_delete_tests {
     async fn module_with_one_entry() -> (SecretsModule, AppContext) {
         let mut module = SecretsModule::new();
         let ctx = create_test_context().await;
-        let key = SecurityManager::derive_key("test-pass", &[9u8; 16])
+        let key = SecurityManager::derive_key(&"test-pass".into(), &[9u8; 16])
             .await
             .unwrap();
         ctx.session.unlock(key);
@@ -953,7 +953,7 @@ mod dashboard_summary_tests {
     async fn test_dashboard_summary_reports_count_when_unlocked() {
         let module = SecretsModule::new();
         let ctx = create_test_context().await;
-        let key = SecurityManager::derive_key("test-pass", &[5u8; 16])
+        let key = SecurityManager::derive_key(&"test-pass".into(), &[5u8; 16])
             .await
             .unwrap();
         ctx.session.unlock(key);

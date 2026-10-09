@@ -13,8 +13,7 @@ use ratatui::{
 };
 
 use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
-use moku_crypto::SafeKey;
-use secrecy::SecretBox;
+use moku_crypto::{Key, SecretString, VolumeMasterKey};
 
 use crate::registry::{self, PasswordMode, VolumeConfig, VolumeSecret};
 use crate::worker::{self, StopOutcome};
@@ -172,7 +171,7 @@ impl VolumeManagerModule {
                     display_name,
                     mountpoint,
                     focus: MountField::Password,
-                    input: zeroize::Zeroizing::new(String::new()),
+                    input: SecretString::with_capacity(128),
                     use_app_key: false,
                     error: Some(message),
                 });
@@ -186,7 +185,7 @@ impl VolumeManagerModule {
         volume_id: String,
         display_name: String,
         mountpoint: String,
-        password: String,
+        password: SecretString,
     ) {
         if self.busy {
             return;
@@ -227,7 +226,7 @@ impl VolumeManagerModule {
         volume_id: String,
         display_name: String,
         mountpoint: String,
-        volume_key: SecretBox<SafeKey>,
+        volume_key: Key<VolumeMasterKey>,
     ) {
         if self.busy {
             return;
@@ -493,7 +492,7 @@ impl TuiModule for VolumeManagerModule {
                                 display_name,
                                 mountpoint,
                                 focus: MountField::Mountpoint,
-                                input: zeroize::Zeroizing::new(String::new()),
+                                input: SecretString::with_capacity(128),
                                 use_app_key: fast_path,
                                 error: None,
                             });

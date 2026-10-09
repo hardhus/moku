@@ -319,8 +319,7 @@ impl CliModule for SecretsCliModule {
                 let imported = match format {
                     ImportFormatArg::Json => engine::import_plain_json(&data)?,
                     ImportFormatArg::Encrypted => {
-                        let password = rpassword::prompt_password("Export password: ")
-                            .map_err(|e| anyhow!("Failed to read password: {e}"))?;
+                        let password = moku_vault::cli::read_password("Export password: ")?;
                         engine::import_encrypted(&data, &password).await?
                     }
                 };
@@ -352,7 +351,7 @@ async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
     Ok(())
 }
 
-fn prompt_new_export_password() -> Result<zeroize::Zeroizing<String>> {
+fn prompt_new_export_password() -> Result<moku_crypto::SecretString> {
     Ok(moku_vault::cli::prompt_new_password(
         "New export password: ",
         "Confirm export password: ",

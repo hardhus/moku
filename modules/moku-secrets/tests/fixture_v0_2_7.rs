@@ -16,7 +16,7 @@ fn fixture() -> Vec<u8> {
 
 #[tokio::test]
 async fn k9_msxp_v1_fixture_imports() {
-    let entries = moku_secrets::engine::import_encrypted(&fixture(), EXPORT_PASSWORD)
+    let entries = moku_secrets::engine::import_encrypted(&fixture(), &EXPORT_PASSWORD.into())
         .await
         .unwrap();
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -28,7 +28,7 @@ async fn k9_msxp_v1_fixture_imports() {
 #[tokio::test]
 async fn k9_msxp_v1_fixture_rejects_wrong_password() {
     assert!(
-        moku_secrets::engine::import_encrypted(&fixture(), "not-the-password")
+        moku_secrets::engine::import_encrypted(&fixture(), &"not-the-password".into())
             .await
             .is_err()
     );

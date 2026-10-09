@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 
-use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
-use zeroize::Zeroizing;
 
 use moku_sys::dirs;
 
@@ -11,7 +9,11 @@ use crate::VaultError;
 
 type Result<T> = std::result::Result<T, VaultError>;
 
-use moku_crypto::{CryptoError, SafeKey};
+use moku_crypto::kdf::DEFAULT_KDF;
+use moku_crypto::{CryptoError, Key, RootKey, SecretString, format_v1};
+
+/// What the canary decrypts to when the password is right.
+const CANARY: &[u8] = b"MOKU_VAULT_OK";
 
 #[derive(Serialize, Deserialize)]
 pub struct StorageMetadata {
@@ -37,15 +39,19 @@ impl SecurityManager {
         }
     }
 
-    pub async fn derive_key(password: &str, salt_bytes: &[u8]) -> Result<SecretBox<SafeKey>> {
+    /// The vault's root key from its password: Argon2id with the default
+    /// parameters (`meta.json` v1 records none), run on a blocking thread.
+    pub async fn derive_key(password: &SecretString, salt_bytes: &[u8]) -> Result<Key<RootKey>> {
         // The copy handed to the blocking thread is wiped when it drops.
-        let password = Zeroizing::new(password.as_bytes().to_vec());
+        let password = password.duplicate();
         let salt = salt_bytes.to_vec();
 
-        let key = tokio::task::spawn_blocking(move || moku_crypto::argon2id_key(&password, &salt))
-            .await
-            .map_err(VaultError::Task)??;
-        Ok(key)
+        let key = tokio::task::spawn_blocking(move || {
+            moku_crypto::password_key(&password, &salt, DEFAULT_KDF)
+        })
+        .await
+        .map_err(VaultError::Task)??;
+        Ok(format_v1::adopt_password_key_as_root(key))
     }
 
     pub fn is_vault_initialized(&self) -> bool {
@@ -57,18 +63,14 @@ impl SecurityManager {
     /// record encrypted under the old key. The file is written atomically,
     /// because a torn `meta.json` would lose the salt (and with it all
     /// data) just the same.
-    pub async fn initialize_vault(
-        &self,
-        password: Zeroizing<String>,
-    ) -> Result<SecretBox<SafeKey>> {
+    pub async fn initialize_vault(&self, password: SecretString) -> Result<Key<RootKey>> {
         if self.is_vault_initialized() {
             return Err(VaultError::AlreadyInitialized(self.get_meta_path()));
         }
-        let salt = moku_crypto::generate_salt(16);
+        let salt = moku_crypto::kdf::generate_salt().to_vec();
         let key = Self::derive_key(&password, &salt).await?;
 
-        let canary_text = b"MOKU_VAULT_OK";
-        let encrypted_canary = moku_crypto::encrypt(canary_text, &key)?;
+        let encrypted_canary = format_v1::seal_gcm_no_aad(&key, CANARY)?;
 
         let meta = StorageMetadata {
             salt,
@@ -99,7 +101,7 @@ impl SecurityManager {
     /// missing, unreadable or malformed `meta.json` (or a canary that
     /// decrypts to the wrong bytes) is reported as what it is, so the user
     /// isn't told to retype a password when the real problem is on disk.
-    pub async fn unlock_vault(&self, password: Zeroizing<String>) -> Result<SecretBox<SafeKey>> {
+    pub async fn unlock_vault(&self, password: SecretString) -> Result<Key<RootKey>> {
         let path = self.get_meta_path();
         let content = match fs::read_to_string(&path).await {
             Ok(c) => c,
@@ -115,8 +117,8 @@ impl SecurityManager {
             })?;
 
         let key = Self::derive_key(&password, &meta.salt).await?;
-        match moku_crypto::decrypt(&meta.canary, &key) {
-            Ok(bytes) if bytes == b"MOKU_VAULT_OK" => Ok(key),
+        match format_v1::open_gcm_no_aad(&key, &meta.canary) {
+            Ok(bytes) if bytes[..] == *CANARY => Ok(key),
             Ok(_) | Err(CryptoError::Malformed(_)) => {
                 Err(VaultError::MetadataCorrupt { path, source: None })
             }
@@ -133,18 +135,17 @@ impl SecurityManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secrecy::ExposeSecret;
     use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_key_derivation_consistency() {
-        let password = "test_password";
+        let password = SecretString::from("test_password");
         let salt = vec![1u8; 16];
 
-        let key1 = SecurityManager::derive_key(password, &salt).await.unwrap();
-        let key2 = SecurityManager::derive_key(password, &salt).await.unwrap();
+        let key1 = SecurityManager::derive_key(&password, &salt).await.unwrap();
+        let key2 = SecurityManager::derive_key(&password, &salt).await.unwrap();
 
-        assert_eq!(key1.expose_secret().0, key2.expose_secret().0);
+        assert_eq!(key1.expose(), key2.expose());
     }
 
     #[tokio::test]
@@ -152,21 +153,21 @@ mod tests {
         let temp = tempdir().unwrap();
         let manager = SecurityManager::new_with_root(temp.path().to_path_buf());
 
-        let password = Zeroizing::new("unit_test_password".to_string());
+        let password = SecretString::from("unit_test_password");
 
         assert!(!manager.is_vault_initialized());
 
         let key = manager
-            .initialize_vault(password.clone())
+            .initialize_vault(password.duplicate())
             .await
             .expect("Init failed");
         assert!(manager.is_vault_initialized());
 
         let unlocked_key = manager.unlock_vault(password).await.expect("Unlock failed");
-        assert_eq!(key.expose_secret().0, unlocked_key.expose_secret().0);
+        assert_eq!(key.expose(), unlocked_key.expose());
 
         let wrong_result = manager
-            .unlock_vault(Zeroizing::new("wrong".to_string()))
+            .unlock_vault(SecretString::from("wrong"))
             .await;
         assert!(matches!(wrong_result, Err(VaultError::WrongPassword)));
     }
@@ -183,8 +184,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_argon2_resource_exhaustion_resilience() {
-        let massive_password = "A".repeat(1024 * 1024);
-        let salt = moku_crypto::generate_salt(16);
+        let massive_password = SecretString::from("A".repeat(1024 * 1024));
+        let salt = moku_crypto::kdf::generate_salt();
 
         let result = SecurityManager::derive_key(&massive_password, &salt).await;
         assert!(
@@ -197,22 +198,22 @@ mod tests {
     async fn test_initialize_vault_refuses_to_overwrite_an_existing_vault() {
         let temp = tempfile::tempdir().unwrap();
         let sm = SecurityManager::new_with_root(temp.path().to_path_buf());
-        sm.initialize_vault(Zeroizing::new("first".to_string())).await.unwrap();
+        sm.initialize_vault(SecretString::from("first")).await.unwrap();
         let meta_before = std::fs::read(sm.get_meta_path()).unwrap();
         assert!(matches!(
-            sm.initialize_vault(Zeroizing::new("second".to_string())).await,
+            sm.initialize_vault(SecretString::from("second")).await,
             Err(VaultError::AlreadyInitialized(_))
         ));
         assert_eq!(std::fs::read(sm.get_meta_path()).unwrap(), meta_before);
         // The original password still unlocks it.
-        sm.unlock_vault(Zeroizing::new("first".to_string())).await.unwrap();
+        sm.unlock_vault(SecretString::from("first")).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_unlock_without_meta_is_not_initialized() {
         let temp = tempdir().unwrap();
         let sm = SecurityManager::new_with_root(temp.path().to_path_buf());
-        let err = sm.unlock_vault(Zeroizing::new("pw".to_string())).await.unwrap_err();
+        let err = sm.unlock_vault(SecretString::from("pw")).await.unwrap_err();
         assert!(matches!(err, VaultError::NotInitialized), "got {err:?}");
     }
 
@@ -220,9 +221,9 @@ mod tests {
     async fn test_unlock_with_unparseable_meta_is_corrupt_not_wrong_password() {
         let temp = tempdir().unwrap();
         let sm = SecurityManager::new_with_root(temp.path().to_path_buf());
-        sm.initialize_vault(Zeroizing::new("pw".to_string())).await.unwrap();
+        sm.initialize_vault(SecretString::from("pw")).await.unwrap();
         std::fs::write(sm.get_meta_path(), b"{ not json").unwrap();
-        let err = sm.unlock_vault(Zeroizing::new("pw".to_string())).await.unwrap_err();
+        let err = sm.unlock_vault(SecretString::from("pw")).await.unwrap_err();
         assert!(
             matches!(err, VaultError::MetadataCorrupt { source: Some(_), .. }),
             "got {err:?}"
@@ -233,12 +234,12 @@ mod tests {
     async fn test_unlock_with_a_truncated_canary_is_corrupt_not_wrong_password() {
         let temp = tempdir().unwrap();
         let sm = SecurityManager::new_with_root(temp.path().to_path_buf());
-        sm.initialize_vault(Zeroizing::new("pw".to_string())).await.unwrap();
+        sm.initialize_vault(SecretString::from("pw")).await.unwrap();
         let mut meta: StorageMetadata =
             serde_json::from_slice(&std::fs::read(sm.get_meta_path()).unwrap()).unwrap();
         meta.canary.truncate(5);
         std::fs::write(sm.get_meta_path(), serde_json::to_vec(&meta).unwrap()).unwrap();
-        let err = sm.unlock_vault(Zeroizing::new("pw".to_string())).await.unwrap_err();
+        let err = sm.unlock_vault(SecretString::from("pw")).await.unwrap_err();
         assert!(
             matches!(err, VaultError::MetadataCorrupt { source: None, .. }),
             "got {err:?}"

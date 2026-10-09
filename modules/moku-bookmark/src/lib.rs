@@ -567,11 +567,11 @@ mod confirm_delete_tests {
     /// a different key B, so loading fails: stored-but-unreadable data.
     async fn ctx_with_unreadable_bookmarks() -> AppContext {
         let ctx = create_test_context().await;
-        let key_a = SecurityManager::derive_key("key-a", &[3u8; 16]).await.unwrap();
+        let key_a = SecurityManager::derive_key(&"key-a".into(), &[3u8; 16]).await.unwrap();
         ctx.session.unlock(key_a);
         let items = vec![Bookmark::new("https://example.com/keep".to_string())];
         BookmarkEngine::save_all(&ctx, &items).await.unwrap();
-        let key_b = SecurityManager::derive_key("key-b", &[3u8; 16]).await.unwrap();
+        let key_b = SecurityManager::derive_key(&"key-b".into(), &[3u8; 16]).await.unwrap();
         ctx.session.unlock(key_b);
         ctx
     }
@@ -597,7 +597,7 @@ mod confirm_delete_tests {
         }
         assert!(module.mode == AppMode::Normal, "no add/confirm mode while read-only");
 
-        let key_a = SecurityManager::derive_key("key-a", &[3u8; 16]).await.unwrap();
+        let key_a = SecurityManager::derive_key(&"key-a".into(), &[3u8; 16]).await.unwrap();
         ctx.session.unlock(key_a);
         let stored = BookmarkEngine::load_all(&ctx).await.unwrap();
         assert_eq!(stored.len(), 1);
@@ -614,7 +614,7 @@ mod confirm_delete_tests {
     async fn module_with_one_bookmark() -> (BookmarkModule, AppContext) {
         let mut module = BookmarkModule::new();
         let ctx = create_test_context().await;
-        let key = SecurityManager::derive_key("test-pass", &[9u8; 16])
+        let key = SecurityManager::derive_key(&"test-pass".into(), &[9u8; 16])
             .await
             .unwrap();
         ctx.session.unlock(key);
@@ -705,7 +705,7 @@ mod dashboard_summary_tests {
     async fn test_dashboard_summary_reports_count_when_unlocked() {
         let module = BookmarkModule::new();
         let ctx = create_test_context().await;
-        let key = SecurityManager::derive_key("test-pass", &[3u8; 16])
+        let key = SecurityManager::derive_key(&"test-pass".into(), &[3u8; 16])
             .await
             .unwrap();
         ctx.session.unlock(key);

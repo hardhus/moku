@@ -2,11 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rand::RngCore;
-use rand::rngs::OsRng;
-use secrecy::SecretBox;
+use moku_crypto::random::fill_random;
 
-use crate::keys::NameKey;
 use crate::names::NameCipher;
 use crate::types::{VResult, VResult as Result, VolumeFsError, VirtualPath};
 
@@ -73,8 +70,7 @@ impl PathMapper {
     /// encrypting each path segment. Every ancestor directory must already
     /// exist on disk; the final segment is allowed not to exist yet (the
     /// caller may be about to create it).
-    pub fn resolve(&self, name_key: &SecretBox<NameKey>, path: &VirtualPath) -> VResult<PathBuf> {
-        let cipher = NameCipher::new(name_key);
+    pub fn resolve(&self, cipher: &NameCipher, path: &VirtualPath) -> VResult<PathBuf> {
         let mut backing = self.data_root.clone();
         let comps = path.components();
         for (i, comp) in comps.iter().enumerate() {
@@ -93,11 +89,10 @@ impl PathMapper {
     /// entry name against that directory's own IV.
     pub fn read_dir_plain(
         &self,
-        name_key: &SecretBox<NameKey>,
+        cipher: &NameCipher,
         backing_dir: &PathBuf,
     ) -> Result<Vec<(String, PathBuf, bool)>> {
         let dir_iv = self.dir_iv_for_backing(backing_dir)?;
-        let cipher = NameCipher::new(name_key);
         let mut out = Vec::new();
         for entry in std::fs::read_dir(backing_dir)? {
             let entry = entry?;
@@ -162,10 +157,10 @@ fn create_dir_iv_no_replace(dir: &Path) -> Result<[u8; 16]> {
     use std::io::Write;
 
     let mut iv = [0u8; 16];
-    OsRng.fill_bytes(&mut iv);
+    fill_random(&mut iv);
     let iv_path = dir.join(DIR_IV_FILE);
     let mut suffix = [0u8; 8];
-    OsRng.fill_bytes(&mut suffix);
+    fill_random(&mut suffix);
     let tmp_name = format!(
         "{DIR_IV_FILE}.tmp-{}",
         suffix.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -214,11 +209,11 @@ fn create_dir_iv_no_replace(dir: &Path) -> Result<[u8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::NameKey;
+    use moku_crypto::Key;
     use tempfile::tempdir;
 
-    fn key() -> SecretBox<NameKey> {
-        SecretBox::new(Box::new(NameKey([4u8; 64])))
+    fn key() -> NameCipher {
+        NameCipher::new(Key::from_slice(&[4u8; 64]).unwrap())
     }
 
     #[test]

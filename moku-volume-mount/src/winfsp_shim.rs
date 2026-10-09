@@ -710,12 +710,12 @@ mod tests {
             let security =
                 moku_vault::SecurityManager::new_with_root(volume_tmp.path().to_path_buf());
             security
-                .initialize_vault(zeroize::Zeroizing::new("smoke-test-password".to_string()))
+                .initialize_vault(moku_crypto::SecretString::from("smoke-test-password"))
                 .await
                 .expect("init vault")
         });
         let open_engine = || {
-            let keys = moku_volume_fs::derive_volume_keys(&master_key);
+            let keys = moku_volume_fs::derive_volume_keys(&own_vault_master(&master_key));
             VolumeEngine::open_volume(
                 volume_tmp.path().join("data"),
                 keys,
@@ -820,11 +820,11 @@ mod tests {
             let security =
                 moku_vault::SecurityManager::new_with_root(quota_tmp.path().to_path_buf());
             security
-                .initialize_vault(zeroize::Zeroizing::new("quota-test-password".to_string()))
+                .initialize_vault(moku_crypto::SecretString::from("quota-test-password"))
                 .await
                 .expect("init vault")
         });
-        let quota_keys = moku_volume_fs::derive_volume_keys(&quota_master_key);
+        let quota_keys = moku_volume_fs::derive_volume_keys(&own_vault_master(&quota_master_key));
         let quota_engine = VolumeEngine::open_volume(
             quota_tmp.path().join("data"),
             quota_keys,
@@ -842,16 +842,24 @@ mod tests {
         });
     }
 
+    /// These test volumes have their own vault (like a Custom-mode volume),
+    /// whose unlocked key is the volume master key.
+    fn own_vault_master(
+        k: &moku_crypto::Key<moku_crypto::RootKey>,
+    ) -> moku_crypto::Key<moku_crypto::VolumeMasterKey> {
+        moku_crypto::format_v1::custom_volume_master(k.duplicate())
+    }
+
     fn open_test_engine(root: &std::path::Path, password: &str, limit: u64) -> VolumeEngine {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let master_key = rt.block_on(async {
             let security = moku_vault::SecurityManager::new_with_root(root.to_path_buf());
             security
-                .initialize_vault(zeroize::Zeroizing::new(password.to_string()))
+                .initialize_vault(moku_crypto::SecretString::from(password))
                 .await
                 .expect("init vault")
         });
-        let keys = moku_volume_fs::derive_volume_keys(&master_key);
+        let keys = moku_volume_fs::derive_volume_keys(&own_vault_master(&master_key));
         let lock = moku_volume_fs::VolumeLock::acquire(root).expect("volume lock");
         VolumeEngine::open_volume(root.join("data"), keys, root.join("usage.json"), limit, lock)
             .expect("open_volume")

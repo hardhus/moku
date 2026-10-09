@@ -8,7 +8,7 @@ fn locked_session() -> Arc<VaultSession> {
 
 async fn unlocked_session() -> Arc<VaultSession> {
     let session = VaultSession::new();
-    let key = SecurityManager::derive_key("test_pass", &[7u8; 16])
+    let key = SecurityManager::derive_key(&"test_pass".into(), &[7u8; 16])
         .await
         .unwrap();
     session.unlock(key);
@@ -108,7 +108,7 @@ async fn test_load_opt_under_a_different_key_is_tampered_not_none() {
         .unwrap();
     // Same data dir, a different vault key (as after a wrong-key unlock).
     session.lock();
-    session.unlock(SecurityManager::derive_key("other", &[8u8; 16]).await.unwrap());
+    session.unlock(SecurityManager::derive_key(&"other".into(), &[8u8; 16]).await.unwrap());
     let loaded: Result<Option<Vec<String>>> = manager.load_opt("mod1", "items").await;
     assert!(matches!(loaded, Err(StoreError::Tampered { .. })), "got {loaded:?}");
 }
@@ -220,7 +220,7 @@ async fn test_session_unlock_mid_lifetime_without_recreating_manager() {
     let data = "secret".to_string();
     assert!(manager.save("mod1", "key1", &data, true).await.is_err());
 
-    let key = SecurityManager::derive_key("test_pass", &[3u8; 16])
+    let key = SecurityManager::derive_key(&"test_pass".into(), &[3u8; 16])
         .await
         .unwrap();
     session.unlock(key);
@@ -354,7 +354,7 @@ async fn test_migrate_is_idempotent() {
 async fn test_migrate_encrypted_to_plaintext_readable_after_relock() {
     let temp = tempdir().unwrap();
     let session = Arc::new(VaultSession::new());
-    let key = SecurityManager::derive_key("test_pass", &[9u8; 16])
+    let key = SecurityManager::derive_key(&"test_pass".into(), &[9u8; 16])
         .await
         .unwrap();
     session.unlock(key);

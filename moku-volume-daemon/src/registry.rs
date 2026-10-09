@@ -2,14 +2,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use hkdf::Hkdf;
-use moku_crypto::SafeKey;
+use moku_crypto::{Key, RootKey, SecretString, VolumeMasterKey, format_v1};
 use moku_vault::{SecurityManager, VaultError};
 
 use crate::VolumeError;
-use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
 pub const VOLUME_FILE: &str = "volume.json";
 pub const USAGE_FILE: &str = "usage.json";
@@ -32,13 +29,14 @@ pub enum VolumeSecret {
     /// Custom mode — a password unique to this volume, independent of
     /// moku's own vault. `create_volume` sets up its own `vault/meta.json`
     /// for it, exactly as before.
-    Password(String),
-    /// Default mode — moku's own, already-verified app-vault master key.
-    /// The volume gets no `vault/meta.json` of its own; its data keys are
-    /// derived on demand from this via `derive_default_volume_master_key`
-    /// (see `resolve_volume_master_key`), so the same real "moku vault
-    /// password" genuinely unlocks it later — not just a copy typed twice.
-    FromAppVault(SecretBox<SafeKey>),
+    Password(SecretString),
+    /// Default mode — keyed by moku's own app vault. The volume gets no
+    /// `vault/meta.json` of its own; its data keys are derived on every
+    /// mount from the app vault's root key (`resolve_volume_master_key`),
+    /// so the same real "moku vault password" genuinely unlocks it later.
+    /// Creating one needs no key at all; callers check the app vault is
+    /// set up / the password is right before choosing this.
+    AppVault,
 }
 
 /// The secret used to *mount* an existing volume.
@@ -48,7 +46,7 @@ pub enum MountSecret {
     /// predates this scheme and still needs its own password), this
     /// unlocks the volume's own vault directly; for new-scheme Default-mode
     /// volumes it's verified against moku's *real* app vault instead.
-    Password(String),
+    Password(SecretString),
     /// The app vault's master key, already unlocked and held in memory
     /// (e.g. the TUI's `ctx.session`) — lets a new-scheme Default-mode
     /// volume mount with zero re-prompting.
@@ -62,41 +60,28 @@ pub enum MountSecret {
     /// AES-GCM authentication failure) when actually reading content that
     /// was encrypted under a different key — never pass an unverified key
     /// through this variant.
-    Key(SecretBox<SafeKey>),
+    ///
+    /// Only still accepted from the mount worker's legacy stdin tag `0x01`
+    /// (an older binary); nothing sends it. Removed in P9.
+    AppKey(Key<RootKey>),
     /// The volume's own, already-derived master key
     /// (`derive_default_volume_master_key`), for a new-scheme Default-mode
     /// volume. This is what the TUI sends to a mount worker now: the worker
     /// only ever needs this one volume's key, never the app vault's master
     /// key (which would also decrypt every module's data). Same trust
-    /// caveat as `Key`: only pass a key derived from a verified app key.
-    VolumeKey(SecretBox<SafeKey>),
+    /// caveat as `AppKey`: only pass a key derived from a verified app key.
+    VolumeKey(Key<VolumeMasterKey>),
 }
 
-// NOTE: intentionally still "moku-vault-daemon" even though this crate is
-// now named moku-volume-daemon — permanent key-derivation identifier baked
-// into every already-derived default-volume key; changing it would break
-// decryption of existing users' data. Only the /v1 suffix bumps if this
-// derivation ever changes.
-const DEFAULT_VOLUME_INFO_PREFIX: &[u8] = b"moku-vault-daemon/default-volume/v1/";
-
-/// Derives a per-volume master key from moku's real app-vault master key,
-/// domain-separated by volume id via HKDF-Expand (same technique as
-/// `moku_volume_fs::derive_volume_keys`) so that two Default-mode volumes
-/// sharing the same app master key never end up with the same encryption
-/// key — sharing one would be a real confidentiality bug, not just a
-/// cosmetic one.
+/// A Default-mode volume's master key, derived from moku's app-vault root
+/// key and domain-separated by volume id
+/// (`moku-vault-daemon/default-volume/v1/<id>`, permanent; see
+/// `moku_crypto::purpose`), so two Default-mode volumes never share a key.
 pub fn derive_default_volume_master_key(
-    app_master: &SecretBox<SafeKey>,
+    app_master: &Key<RootKey>,
     volume_id: &str,
-) -> SecretBox<SafeKey> {
-    let hk = Hkdf::<Sha256>::new(None, &app_master.expose_secret().0);
-    let mut info = Vec::with_capacity(DEFAULT_VOLUME_INFO_PREFIX.len() + volume_id.len());
-    info.extend_from_slice(DEFAULT_VOLUME_INFO_PREFIX);
-    info.extend_from_slice(volume_id.as_bytes());
-    let mut out = [0u8; 32];
-    hk.expand(&info, &mut out)
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    SecretBox::new(Box::new(SafeKey(out)))
+) -> Key<VolumeMasterKey> {
+    moku_crypto::default_volume_master(app_master, volume_id)
 }
 
 /// Whether this volume has its own independent `vault/meta.json` (the old
@@ -118,7 +103,7 @@ pub async fn resolve_volume_master_key(
     volume_dir: &Path,
     cfg: &VolumeConfig,
     secret: MountSecret,
-) -> std::result::Result<SecretBox<SafeKey>, VolumeError> {
+) -> std::result::Result<Key<VolumeMasterKey>, VolumeError> {
     if cfg.password_mode == PasswordMode::Custom || has_own_vault(volume_dir) {
         let MountSecret::Password(password) = secret else {
             // Neither an app key nor a pre-derived Default-volume key can
@@ -126,8 +111,8 @@ pub async fn resolve_volume_master_key(
             return Err(VolumeError::NeedsOwnPassword(cfg.display_name.clone()));
         };
         let security = SecurityManager::new_with_root(volume_dir.to_path_buf());
-        return match security.unlock_vault(zeroize::Zeroizing::new(password)).await {
-            Ok(key) => Ok(key),
+        return match security.unlock_vault(password).await {
+            Ok(key) => Ok(format_v1::custom_volume_master(key)),
             Err(VaultError::WrongPassword) => Err(VolumeError::WrongPassword(format!(
                 "wrong password for volume '{}'",
                 cfg.display_name
@@ -141,12 +126,9 @@ pub async fn resolve_volume_master_key(
     // (CLI) or already unlocked and handed straight in (TUI fast path).
     let app_key = match secret {
         MountSecret::VolumeKey(volume_key) => return Ok(volume_key),
-        MountSecret::Key(key) => key,
+        MountSecret::AppKey(key) => key,
         MountSecret::Password(password) => {
-            match SecurityManager::new()?
-                .unlock_vault(zeroize::Zeroizing::new(password))
-                .await
-            {
+            match SecurityManager::new()?.unlock_vault(password).await {
                 Ok(key) => key,
                 // Only a real password mismatch is labelled as one; a
                 // missing/corrupt meta.json or a disk error keeps its own
@@ -367,7 +349,7 @@ pub async fn load_config(dir: &Path) -> Result<VolumeConfig> {
 
 /// Creates a new volume: for `VolumeSecret::Password` (Custom mode), its
 /// own independent `SecurityManager` vault (own salt/meta.json); for
-/// `VolumeSecret::FromAppVault` (Default mode), no vault of its own at all
+/// `VolumeSecret::AppVault` (Default mode), no vault of its own at all
 /// — its keys are derived on demand from moku's real app-vault master key
 /// (see `derive_default_volume_master_key`/`resolve_volume_master_key`),
 /// so "the same password as moku's own vault" is a genuine fact, not two
@@ -389,7 +371,7 @@ pub async fn create_volume(
 ) -> Result<VolumeConfig> {
     let password_mode = match &secret {
         VolumeSecret::Password(_) => PasswordMode::Custom,
-        VolumeSecret::FromAppVault(_) => PasswordMode::Default,
+        VolumeSecret::AppVault => PasswordMode::Default,
     };
 
     let base = match base_dir {
@@ -408,11 +390,11 @@ pub async fn create_volume(
     if let VolumeSecret::Password(password) = secret {
         let security = SecurityManager::new_with_root(dir.clone());
         security
-            .initialize_vault(zeroize::Zeroizing::new(password))
+            .initialize_vault(password)
             .await
             .context("failed to initialize volume vault")?;
     }
-    // VolumeSecret::FromAppVault needs nothing persisted here — its key is
+    // VolumeSecret::AppVault needs nothing persisted here — its key is
     // re-derived from the app vault on every mount instead.
 
     moku_volume_fs::pathmap::PathMapper::new(dir.join(DATA_DIR)).ensure_root()?;
@@ -702,7 +684,7 @@ mod tests {
         let cfg = create_volume(
             name,
             1024,
-            VolumeSecret::Password("pw".to_string()),
+            VolumeSecret::Password("pw".into()),
             Some(base.path().to_path_buf()),
         )
         .await
@@ -716,7 +698,7 @@ mod tests {
         let cfg2 = create_volume(
             name,
             1024,
-            VolumeSecret::Password("pw".to_string()),
+            VolumeSecret::Password("pw".into()),
             Some(base.path().to_path_buf()),
         )
         .await
@@ -736,7 +718,7 @@ mod tests {
         let cfg = create_volume(
             "claude-delete-test-7g8h",
             1024,
-            VolumeSecret::Password("pw".to_string()),
+            VolumeSecret::Password("pw".into()),
             Some(base.path().to_path_buf()),
         )
         .await
@@ -824,8 +806,8 @@ mod tests {
         remove_index_entry(id);
     }
 
-    fn fake_key(byte: u8) -> SecretBox<SafeKey> {
-        SecretBox::new(Box::new(SafeKey([byte; 32])))
+    fn fake_key(byte: u8) -> Key<RootKey> {
+        Key::from_slice(&[byte; 32]).unwrap()
     }
 
     fn fake_config(id: &str, mode: PasswordMode) -> VolumeConfig {
@@ -844,10 +826,10 @@ mod tests {
         let k1 = derive_default_volume_master_key(&app_key, "vol-a");
         let k2 = derive_default_volume_master_key(&app_key, "vol-a");
         let k3 = derive_default_volume_master_key(&app_key, "vol-b");
-        assert_eq!(k1.expose_secret().0, k2.expose_secret().0);
+        assert_eq!(k1.expose(), k2.expose());
         assert_ne!(
-            k1.expose_secret().0,
-            k3.expose_secret().0,
+            k1.expose(),
+            k3.expose(),
             "two Default-mode volumes must never derive the same real key"
         );
     }
@@ -856,7 +838,7 @@ mod tests {
     fn test_derive_default_volume_master_key_differs_by_app_master() {
         let k1 = derive_default_volume_master_key(&fake_key(1), "vol-a");
         let k2 = derive_default_volume_master_key(&fake_key(2), "vol-a");
-        assert_ne!(k1.expose_secret().0, k2.expose_secret().0);
+        assert_ne!(k1.expose(), k2.expose());
     }
 
     #[tokio::test]
@@ -864,13 +846,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let security = SecurityManager::new_with_root(dir.path().to_path_buf());
         security
-            .initialize_vault(zeroize::Zeroizing::new("volume-own-pw".to_string()))
+            .initialize_vault(moku_crypto::SecretString::from("volume-own-pw"))
             .await
             .unwrap();
         let cfg = fake_config("old-scheme-vol", PasswordMode::Default);
 
         assert!(matches!(
-            resolve_volume_master_key(dir.path(), &cfg, MountSecret::Password("wrong".to_string()))
+            resolve_volume_master_key(dir.path(), &cfg, MountSecret::Password("wrong".into()))
                 .await,
             Err(VolumeError::WrongPassword(_))
         ));
@@ -878,7 +860,7 @@ mod tests {
             resolve_volume_master_key(
                 dir.path(),
                 &cfg,
-                MountSecret::Password("volume-own-pw".to_string())
+                MountSecret::Password("volume-own-pw".into())
             )
             .await
             .is_ok()
@@ -894,13 +876,13 @@ mod tests {
         let resolved = resolve_volume_master_key(
             dir.path(),
             &cfg,
-            MountSecret::Key(SecretBox::new(Box::new(SafeKey(app_key.expose_secret().0)))),
+            MountSecret::AppKey(app_key.duplicate()),
         )
         .await
         .unwrap();
 
         let expected = derive_default_volume_master_key(&app_key, &cfg.id);
-        assert_eq!(resolved.expose_secret().0, expected.expose_secret().0);
+        assert_eq!(resolved.expose(), expected.expose());
     }
 
     #[tokio::test]
@@ -909,7 +891,7 @@ mod tests {
         let cfg = fake_config("custom-vol", PasswordMode::Custom);
 
         let result =
-            resolve_volume_master_key(dir.path(), &cfg, MountSecret::Key(fake_key(3))).await;
+            resolve_volume_master_key(dir.path(), &cfg, MountSecret::AppKey(fake_key(3))).await;
         assert!(
             matches!(result, Err(VolumeError::NeedsOwnPassword(_))),
             "Custom mode must always require its own password, never a bare key"
@@ -926,7 +908,7 @@ mod tests {
         let cfg = create_volume(
             "claude-default-mode-test",
             1024,
-            VolumeSecret::FromAppVault(fake_key(4)),
+            VolumeSecret::AppVault,
             Some(dir.path().to_path_buf()),
         )
         .await

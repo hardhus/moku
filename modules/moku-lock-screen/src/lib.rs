@@ -7,7 +7,7 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use zeroize::{Zeroize, Zeroizing};
+use moku_crypto::SecretString;
 
 use moku_core::{AppContext, ModuleId, ModuleMeta, MokuTheme, TuiModule};
 use moku_sys::util::error_chain;
@@ -21,16 +21,19 @@ enum Field {
     Confirm,
 }
 
+/// Room for a long password before a buffer ever has to grow.
+const INPUT_CAPACITY: usize = 128;
+
 pub struct LockScreenModule {
     /// The vault password, accumulated keystroke-by-keystroke. It is the
     /// actual secret, not just a display string, so it is wiped with
     /// `zeroize()` (not `clear()`, which only resets the length and leaves
     /// the bytes in the buffer) whenever it's discarded.
-    input: Zeroizing<String>,
+    input: SecretString,
     /// Setup mode only: the confirmation of a brand-new password. A new
     /// password is always asked twice, since a typo in it would lock the
     /// user out of a vault that has no recovery key yet.
-    confirm: Zeroizing<String>,
+    confirm: SecretString,
     focus: Field,
     is_setup_mode: bool,
     /// No `vault/meta.json`, but encrypted records exist on disk: the meta
@@ -44,8 +47,8 @@ pub struct LockScreenModule {
 impl LockScreenModule {
     pub fn new() -> Self {
         Self {
-            input: Zeroizing::new(String::new()),
-            confirm: Zeroizing::new(String::new()),
+            input: SecretString::with_capacity(INPUT_CAPACITY),
+            confirm: SecretString::with_capacity(INPUT_CAPACITY),
             focus: Field::Password,
             is_setup_mode: false,
             orphaned_data: false,
@@ -59,7 +62,7 @@ impl LockScreenModule {
         self.focus = Field::Password;
     }
 
-    fn focused_input(&mut self) -> &mut Zeroizing<String> {
+    fn focused_input(&mut self) -> &mut SecretString {
         match self.focus {
             Field::Password => &mut self.input,
             Field::Confirm => &mut self.confirm,
@@ -72,20 +75,20 @@ impl LockScreenModule {
         if self.orphaned_data {
             return;
         }
-        if self.input.trim().is_empty() {
+        if self.input.expose().trim().is_empty() {
             self.error_msg = Some("Password cannot be empty!".to_string());
             return;
         }
-        if self.is_setup_mode && *self.input != *self.confirm {
+        if self.is_setup_mode && self.input.expose() != self.confirm.expose() {
             self.error_msg = Some("Passwords don't match. Type them again.".to_string());
             self.wipe_inputs();
             return;
         }
 
         let result = if self.is_setup_mode {
-            ctx.security.initialize_vault(self.input.clone()).await
+            ctx.security.initialize_vault(self.input.duplicate()).await
         } else {
-            ctx.security.unlock_vault(self.input.clone()).await
+            ctx.security.unlock_vault(self.input.duplicate()).await
         };
 
         match result {
@@ -257,7 +260,7 @@ impl TuiModule for LockScreenModule {
                 center(chunks[1]),
                 theme,
                 " 🆕 Vault Setup: new password ",
-                &self.input,
+                self.input.expose(),
                 self.focus == Field::Password,
                 has_error,
             );
@@ -266,7 +269,7 @@ impl TuiModule for LockScreenModule {
                 center(chunks[2]),
                 theme,
                 " Confirm password ",
-                &self.confirm,
+                self.confirm.expose(),
                 self.focus == Field::Confirm,
                 has_error,
             );
@@ -292,7 +295,7 @@ impl TuiModule for LockScreenModule {
                 center(chunks[1]),
                 theme,
                 " 🔒 Secure Login ",
-                &self.input,
+                self.input.expose(),
                 true,
                 has_error,
             );
@@ -435,7 +438,7 @@ mod tests {
     async fn test_login_mode_tab_does_not_switch_to_a_confirm_field() {
         let mut ctx = create_test_context().await;
         ctx.security
-            .initialize_vault(Zeroizing::new("pw".to_string()))
+            .initialize_vault(moku_crypto::SecretString::from("pw"))
             .await
             .unwrap();
         let mut module = LockScreenModule::new();
@@ -449,7 +452,7 @@ mod tests {
     async fn test_missing_meta_with_encrypted_data_refuses_setup() {
         let mut ctx = create_test_context().await;
         // Encrypted data written under some key, but no meta.json exists.
-        let key_bytes = SecurityManager::derive_key("lost", &[5u8; 16]).await.unwrap();
+        let key_bytes = SecurityManager::derive_key(&"lost".into(), &[5u8; 16]).await.unwrap();
         ctx.session.unlock(key_bytes);
         ctx.storage
             .save("todo", "items", &vec!["x".to_string()], true)
@@ -493,7 +496,7 @@ mod tests {
         let mut module = LockScreenModule::new();
         let mut ctx = create_test_context().await;
         ctx.security
-            .initialize_vault(Zeroizing::new("existing-pass".to_string()))
+            .initialize_vault(moku_crypto::SecretString::from("existing-pass"))
             .await
             .unwrap();
 
@@ -534,7 +537,7 @@ mod tests {
     async fn test_enter_in_login_mode_with_correct_password_unlocks_session() {
         let mut ctx = create_test_context().await;
         ctx.security
-            .initialize_vault(Zeroizing::new("correct-pass".to_string()))
+            .initialize_vault(moku_crypto::SecretString::from("correct-pass"))
             .await
             .unwrap();
         let mut module = LockScreenModule::new();
@@ -553,7 +556,7 @@ mod tests {
     async fn test_enter_in_login_mode_with_wrong_password_shows_error_and_clears_input() {
         let mut ctx = create_test_context().await;
         ctx.security
-            .initialize_vault(Zeroizing::new("correct-pass".to_string()))
+            .initialize_vault(moku_crypto::SecretString::from("correct-pass"))
             .await
             .unwrap();
         let mut module = LockScreenModule::new();
@@ -577,11 +580,11 @@ mod tests {
         module.error_msg = Some("stale error".to_string());
 
         module.handle_event(&key(KeyCode::Char('a')), &mut ctx).await.unwrap();
-        assert_eq!(module.input.as_str(), "a");
+        assert_eq!(module.input.expose(), "a");
         assert!(module.error_msg.is_none());
 
         module.handle_event(&key(KeyCode::Char('b')), &mut ctx).await.unwrap();
-        assert_eq!(module.input.as_str(), "ab");
+        assert_eq!(module.input.expose(), "ab");
     }
 
     #[tokio::test]
@@ -589,10 +592,10 @@ mod tests {
         let mut module = LockScreenModule::new();
         let mut ctx = create_test_context().await;
         module.init(&mut ctx).await.unwrap();
-        module.input = Zeroizing::new("ab".to_string());
+        module.input = SecretString::from("ab");
 
         module.handle_event(&key(KeyCode::Backspace), &mut ctx).await.unwrap();
-        assert_eq!(module.input.as_str(), "a");
+        assert_eq!(module.input.expose(), "a");
     }
 
     #[tokio::test]
@@ -600,7 +603,7 @@ mod tests {
         let mut module = LockScreenModule::new();
         let mut ctx = create_test_context().await;
         module.init(&mut ctx).await.unwrap();
-        module.input = Zeroizing::new("partial".to_string());
+        module.input = SecretString::from("partial");
 
         module.handle_event(&key(KeyCode::Esc), &mut ctx).await.unwrap();
         assert_eq!(ctx.take_navigation(), Some(ModuleId::LAUNCHER));
@@ -611,7 +614,7 @@ mod tests {
     async fn test_corrupt_meta_is_not_reported_as_a_wrong_password() {
         let (mut ctx, root) = create_test_context_with_root().await;
         ctx.security
-            .initialize_vault(Zeroizing::new("correct-pass".to_string()))
+            .initialize_vault(moku_crypto::SecretString::from("correct-pass"))
             .await
             .unwrap();
         std::fs::write(root.join("vault").join("meta.json"), b"{ not json").unwrap();

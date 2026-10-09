@@ -2,8 +2,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use moku_config::MokuConfig;
 use moku_core::ModuleId;
 use moku_store::StorageManager;
-use moku_vault::SecurityManager;
+use moku_crypto::{Key, PasswordKey, SecretString, format_v1};
 use totp_rs::{Algorithm, Secret, TOTP};
+use zeroize::Zeroizing;
 
 use crate::model::SecretEntry;
 
@@ -88,11 +89,11 @@ pub fn import_plain_json(data: &[u8]) -> Result<Vec<SecretEntry>> {
 /// even if the main vault is lost. Self-describing envelope (magic +
 /// version + salt + ciphertext) so it can be re-imported without any other
 /// context.
-pub async fn export_encrypted(entries: &[SecretEntry], password: &str) -> Result<Vec<u8>> {
-    let salt = moku_crypto::generate_salt(16);
-    let key = SecurityManager::derive_key(password, &salt).await?;
-    let plaintext = serde_json::to_vec(entries)?;
-    let ciphertext = moku_crypto::encrypt(&plaintext, &key)?;
+pub async fn export_encrypted(entries: &[SecretEntry], password: &SecretString) -> Result<Vec<u8>> {
+    let salt = moku_crypto::kdf::generate_salt();
+    let key = msxp_v1_key(password, &salt).await?;
+    let plaintext = Zeroizing::new(serde_json::to_vec(entries)?);
+    let ciphertext = format_v1::seal_gcm_no_aad(&key, &plaintext)?;
 
     let mut out = Vec::with_capacity(4 + 1 + 1 + salt.len() + ciphertext.len());
     out.extend_from_slice(ENCRYPTED_MAGIC);
@@ -103,7 +104,7 @@ pub async fn export_encrypted(entries: &[SecretEntry], password: &str) -> Result
     Ok(out)
 }
 
-pub async fn import_encrypted(data: &[u8], password: &str) -> Result<Vec<SecretEntry>> {
+pub async fn import_encrypted(data: &[u8], password: &SecretString) -> Result<Vec<SecretEntry>> {
     if data.len() < 6 || &data[0..4] != ENCRYPTED_MAGIC {
         bail!("not a moku-secrets encrypted export (bad magic)");
     }
@@ -119,9 +120,21 @@ pub async fn import_encrypted(data: &[u8], password: &str) -> Result<Vec<SecretE
     let salt = &data[salt_start..salt_end];
     let ciphertext = &data[salt_end..];
 
-    let key = SecurityManager::derive_key(password, salt).await?;
-    let plaintext = moku_crypto::decrypt(ciphertext, &key).map_err(|_| anyhow!("wrong password or corrupted export"))?;
+    let key = msxp_v1_key(password, salt).await?;
+    let plaintext = format_v1::open_gcm_no_aad(&key, ciphertext)
+        .map_err(|_| anyhow!("wrong password or corrupted export"))?;
     serde_json::from_slice(&plaintext).context("decrypted export is not valid JSON")
+}
+
+/// MSXP v1 keys the AES-GCM cipher directly with the Argon2id output of
+/// the export password (default parameters, not recorded in the file).
+async fn msxp_v1_key(password: &SecretString, salt: &[u8]) -> Result<Key<PasswordKey>> {
+    let password = password.duplicate();
+    let salt = salt.to_vec();
+    Ok(tokio::task::spawn_blocking(move || {
+        moku_crypto::password_key(&password, &salt, moku_crypto::kdf::DEFAULT_KDF)
+    })
+    .await??)
 }
 
 #[cfg(test)]
@@ -169,8 +182,8 @@ mod tests {
     #[tokio::test]
     async fn test_encrypted_export_import_roundtrip() {
         let entries = sample_entries();
-        let bytes = export_encrypted(&entries, "correct horse battery staple").await.unwrap();
-        let imported = import_encrypted(&bytes, "correct horse battery staple").await.unwrap();
+        let bytes = export_encrypted(&entries, &"correct horse battery staple".into()).await.unwrap();
+        let imported = import_encrypted(&bytes, &"correct horse battery staple".into()).await.unwrap();
         assert_eq!(imported.len(), 2);
         assert_eq!(imported[1].value.as_str(), "sekrit");
     }
@@ -178,14 +191,14 @@ mod tests {
     #[tokio::test]
     async fn test_encrypted_import_wrong_password_fails() {
         let entries = sample_entries();
-        let bytes = export_encrypted(&entries, "correct-password").await.unwrap();
-        let result = import_encrypted(&bytes, "wrong-password").await;
+        let bytes = export_encrypted(&entries, &"correct-password".into()).await.unwrap();
+        let result = import_encrypted(&bytes, &"wrong-password".into()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_encrypted_import_rejects_bad_magic() {
-        let result = import_encrypted(b"not-a-real-export", "any").await;
+        let result = import_encrypted(b"not-a-real-export", &"any".into()).await;
         assert!(result.is_err());
     }
 }

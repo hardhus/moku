@@ -496,7 +496,7 @@ mod tests {
 
         let config = Arc::new(moku_config::ConfigHandle::detached(MokuConfig::default()));
         let session = Arc::new(VaultSession::new());
-        let key = SecurityManager::derive_key("test_pass", &[1u8; 16])
+        let key = SecurityManager::derive_key(&"test_pass".into(), &[1u8; 16])
             .await
             .unwrap();
         session.unlock(key);

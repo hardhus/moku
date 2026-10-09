@@ -2,10 +2,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use secrecy::SecretBox;
+use moku_crypto::BlockAead;
+use zeroize::Zeroizing;
 
 use crate::block_cipher::{BLOCK_SIZE, BlockCipher, FULL_BLOCK_DISK_SIZE, NONCE_LEN, TAG_LEN};
-use crate::keys::ContentKey;
 use crate::types::{VResult as Result, VolumeFsError};
 
 pub const MAGIC: &[u8; 4] = b"MKV1";
@@ -66,6 +66,19 @@ pub fn logical_layout(physical_len: u64) -> (u64, u64) {
     }
 }
 
+/// `plain` padded with zeros (or cut) to `len`. Growing past the buffer's
+/// capacity moves the bytes into a new buffer and wipes the old one,
+/// instead of letting `Vec` reallocate and free the plaintext unwiped.
+fn resized(mut plain: Zeroizing<Vec<u8>>, len: usize) -> Zeroizing<Vec<u8>> {
+    if len > plain.capacity() {
+        let mut bigger = Zeroizing::new(Vec::with_capacity(len));
+        bigger.extend_from_slice(&plain);
+        plain = bigger;
+    }
+    plain.resize(len, 0);
+    plain
+}
+
 fn block_offset(idx: u64) -> u64 {
     HEADER_SIZE + idx * FULL_BLOCK_DISK_SIZE
 }
@@ -84,7 +97,7 @@ fn read_block_plain(
     file_id: &[u8; 16],
     idx: u64,
     disk_len: u64,
-) -> Result<Vec<u8>> {
+) -> Result<Zeroizing<Vec<u8>>> {
     file.seek(SeekFrom::Start(block_offset(idx)))?;
     let mut disk_bytes = vec![0u8; disk_len as usize];
     file.read_exact(&mut disk_bytes)?;
@@ -95,7 +108,7 @@ fn read_block_plain(
 /// file's logical size. Returns the number of bytes actually read.
 pub fn read_range(
     file: &mut File,
-    content_key: &SecretBox<ContentKey>,
+    aead: &BlockAead,
     file_id: &[u8; 16],
     offset: u64,
     buf: &mut [u8],
@@ -105,7 +118,7 @@ pub fn read_range(
     if offset >= logical_size || buf.is_empty() {
         return Ok(0);
     }
-    let cipher = BlockCipher::new(content_key);
+    let cipher = BlockCipher::new(aead);
     let end = (offset + buf.len() as u64).min(logical_size);
     let mut written = 0usize;
     let mut pos = offset;
@@ -151,7 +164,7 @@ fn patch_block(block: &mut [u8], block_idx: u64, write_offset: u64, data: &[u8])
 /// so the caller can adjust quota accounting (plan §2/§4).
 pub fn write_range(
     file: &mut File,
-    content_key: &SecretBox<ContentKey>,
+    aead: &BlockAead,
     file_id: &[u8; 16],
     offset: u64,
     data: &[u8],
@@ -161,7 +174,7 @@ pub fn write_range(
         return Ok((0, physical_before, physical_before));
     }
     let (logical_size, num_blocks) = logical_layout(physical_before);
-    let cipher = BlockCipher::new(content_key);
+    let cipher = BlockCipher::new(aead);
 
     let write_end = offset
         .checked_add(data.len() as u64)
@@ -181,8 +194,7 @@ pub fn write_range(
         // on-disk size never changes — safe to rewrite in place.
         for block_idx in start_block..=end_block {
             let disk_len = block_disk_len(block_idx, num_blocks, physical_before);
-            let mut plain = read_block_plain(file, &cipher, file_id, block_idx, disk_len)?;
-            plain.resize(BLOCK_SIZE, 0);
+            let mut plain = resized(read_block_plain(file, &cipher, file_id, block_idx, disk_len)?, BLOCK_SIZE);
             patch_block(&mut plain, block_idx, offset, data);
             let encrypted = cipher.encrypt_block(file_id, block_idx, &plain)?;
             debug_assert_eq!(encrypted.len() as u64, FULL_BLOCK_DISK_SIZE);
@@ -215,13 +227,13 @@ pub fn write_range(
         let block_logical_start = block_idx * BLOCK_SIZE as u64;
         let this_block_len = (new_logical_size - block_logical_start).min(BLOCK_SIZE as u64) as usize;
 
-        let mut plain = if block_idx < num_blocks {
+        let plain = if block_idx < num_blocks {
             let disk_len = block_disk_len(block_idx, num_blocks, physical_before);
             read_block_plain(file, &cipher, file_id, block_idx, disk_len)?
         } else {
-            Vec::new()
+            Zeroizing::new(Vec::new())
         };
-        plain.resize(this_block_len, 0);
+        let mut plain = resized(plain, this_block_len);
         patch_block(&mut plain, block_idx, offset, data);
         let encrypted = cipher.encrypt_block(file_id, block_idx, &plain)?;
         batch.extend_from_slice(&encrypted);
@@ -244,7 +256,7 @@ pub fn write_range(
 /// Returns (physical_len_before, physical_len_after).
 pub fn set_len(
     file: &mut File,
-    content_key: &SecretBox<ContentKey>,
+    aead: &BlockAead,
     file_id: &[u8; 16],
     new_size: u64,
 ) -> Result<(u64, u64)> {
@@ -269,7 +281,7 @@ pub fn set_len(
         let mut physical_after = physical_before;
         while pos < new_size {
             let len = (new_size - pos).min(EXTEND_CHUNK_BYTES) as usize;
-            let (_, _, after) = write_range(file, content_key, file_id, pos, &vec![0u8; len])?;
+            let (_, _, after) = write_range(file, aead, file_id, pos, &vec![0u8; len])?;
             physical_after = after;
             pos += len as u64;
         }
@@ -278,7 +290,7 @@ pub fn set_len(
 
     // Shrinking: keep whole blocks up to new_size, and if new_size lands
     // mid-block, truncate that block's plaintext before re-encrypting it.
-    let cipher = BlockCipher::new(content_key);
+    let cipher = BlockCipher::new(aead);
     let new_num_blocks = new_size.div_ceil(BLOCK_SIZE as u64);
     let last_kept = new_num_blocks - 1;
     let remainder = (new_size - last_kept * BLOCK_SIZE as u64) as usize;
@@ -301,11 +313,11 @@ pub fn set_len(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secrecy::SecretBox;
+    use moku_crypto::{Key, VolumeContentKey};
     use tempfile::tempdir;
 
-    fn key() -> SecretBox<ContentKey> {
-        SecretBox::new(Box::new(ContentKey([3u8; 32])))
+    fn key() -> BlockAead {
+        BlockAead::new(&Key::<VolumeContentKey>::from_slice(&[3u8; 32]).unwrap())
     }
 
     fn open_rw(path: &Path) -> File {

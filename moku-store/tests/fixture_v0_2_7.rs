@@ -12,7 +12,6 @@ use std::sync::Arc;
 use moku_store::StorageManager;
 use moku_vault::{SecurityManager, VaultSession};
 use serde_json::Value;
-use zeroize::Zeroizing;
 
 const VAULT_PASSWORD: &str = "foo-test-password";
 
@@ -79,7 +78,7 @@ async fn v0_2_7_datadir_opens_and_loads_every_record() {
 
     let security = SecurityManager::new_with_root(datadir.clone());
     let key = security
-        .unlock_vault(Zeroizing::new(VAULT_PASSWORD.into()))
+        .unlock_vault(moku_crypto::SecretString::from(VAULT_PASSWORD))
         .await
         .expect("fixture vault unlocks with its test password");
     let session = Arc::new(VaultSession::new());
@@ -131,7 +130,7 @@ async fn v0_2_7_wrong_password_is_rejected() {
     let security = SecurityManager::new_with_root(datadir);
     assert!(
         security
-            .unlock_vault(Zeroizing::new("not-the-password".into()))
+            .unlock_vault(moku_crypto::SecretString::from("not-the-password"))
             .await
             .is_err()
     );
@@ -142,11 +141,11 @@ async fn v0_2_7_wrong_password_is_rejected() {
 #[tokio::test]
 async fn k7b_legacy_gcm_fixture_decrypts() {
     let blob = std::fs::read(fixture_root().join("blobs/legacy-gcm.bin")).unwrap();
-    let key = SecurityManager::derive_key("correct horse", &[0x01; 16])
+    let key = SecurityManager::derive_key(&"correct horse".into(), &[0x01; 16])
         .await
         .unwrap();
     assert_eq!(
-        moku_crypto::decrypt(&blob, &key).unwrap(),
+        &moku_crypto::format_v1::open_gcm_no_aad(&key, &blob).unwrap()[..],
         b"foo-legacy-plaintext"
     );
 }
