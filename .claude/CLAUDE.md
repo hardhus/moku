@@ -2,8 +2,95 @@
 
 Rust workspace: a TUI app (`moku-bin`) built from independent per-feature
 modules (`modules/moku-*`, plus top-level crates like `moku-volume-daemon`,
-`moku-daemon`, `moku-lua`) around a shared `moku-core` (theme, config,
-storage, security, module traits, keybinding resolution).
+`moku-daemon`, `moku-lua`) on top of a small stack of layered library
+crates (see "Crate layers" below), with `moku-core` holding only the
+UI/module layer (module traits, contexts, registry, router, keybinding
+resolution, theme, toasts, widgets).
+
+## Crate layers (since P2)
+
+Lower crates never depend on higher ones, and nothing below `moku-core`
+pulls in ratatui, crossterm or sled (check with `cargo tree -p <crate>
+-e normal`):
+
+| Crate | Owns | Depends on |
+|---|---|---|
+| `moku-sys` | `dirs`, `util::{atomic_write(_async), truncate_at_char_boundary, open_url, error_chain}` | — |
+| `moku-crypto` | `SafeKey`, `CryptoError`, `encrypt`/`decrypt` (AES-GCM), `generate_salt`, `argon2id_key`, `derive_module_storage_key` | — (**no file IO, no tokio**, by design) |
+| `moku-vault` | `SecurityManager` (meta.json, init/unlock, async `derive_key`), `VaultSession`, `cli::{ensure_unlocked, prompt_new_password}`, `VaultError` | crypto, sys |
+| `moku-config` | `MokuConfig` + sections, `ThemeColors`, `ConfigHandle`, `ConfigIssue`/`ConfigError`, `resolve_encryption` | sys |
+| `moku-store` | `StorageManager`, envelope/`KeyScheme`, `StoreError`, `MigrationReport` | crypto, vault, sys |
+| `moku-core` | module traits, `AppContext`/`CliContext`/`DaemonContext`, registry, router, keys, `MokuTheme`, toasts, widgets | config, vault, store, sys |
+
+`moku-vault` is the app vault crate (new in P2). It is unrelated to the
+pre-rename `moku-vault-*` crates that the historical notes below
+mention, which are today's `moku-volume-*`.
+
+Import items from the crate that owns them (`moku_vault::SecurityManager`,
+`moku_store::StorageManager`, `moku_config::MokuConfig`, ...); `moku-core`
+re-exports none of them. Crypto primitives go in `moku-crypto` (P3
+redesigns them there as `Key<P>`/`seal`/`open`); anything that touches
+key material on disk or needs a runtime goes in `moku-vault`.
+
+## Errors (since P2)
+
+- **Library crates return typed `thiserror` enums**: `CryptoError`,
+  `VaultError`, `StoreError`, `ConfigError`/`ConfigIssue`,
+  `VolumeFsError`, `MountError`, `VolumeError`, plus `moku-sys`'s
+  `DirsError`/`AtomicWriteError`/`OpenUrlError`. One variant per case a
+  caller handles differently (`VaultError::WrongPassword` vs.
+  `MetadataCorrupt`, `StoreError::Tampered` vs. `SchemaMismatch`, ...);
+  never an `Other(anyhow)` catch-all in a library enum (moku-volume-
+  daemon's `VolumeError::Other` is the one exception: registry plumbing
+  nothing branches on). `moku-bin`, `modules/*` and the module traits
+  stay on `anyhow`; `match` the typed error before `?` when the caller
+  needs to tell cases apart.
+- **`{e:#}` only shows the cause chain for an `anyhow::Error`.** On a
+  typed error it prints the top line and drops the causes. To show a
+  typed error to the user, either convert it first
+  (`anyhow::Error::from(e)` / `?` into an anyhow context) or format it
+  with `moku_sys::util::error_chain(&e)`.
+- **Errors crossing a process boundary are a code plus a message**, never
+  a parsed stderr line: the mount worker prints `MOKU_MOUNT_ERR
+  <code>\t<message>` (`moku-volume-daemon`'s `MountErrorCode`), the
+  parent turns it into `MountOutcome::Failed { code, message }`. Codes
+  never change meaning, and an unknown code parses as `Unknown`. P8/P9
+  move the same set into the agent IPC.
+
+## Config (since P2)
+
+- **`ConfigHandle` (moku-config) is the only owner of config.toml.**
+  Never read/write the file directly or keep a private copy.
+  Modules change config only through `ctx.update_config(|cfg| ..)` or
+  `ctx.update_module_config::<T>(id, |t| ..)`; both save immediately
+  (no Ctrl+S, no debounce), atomically, and only the keys that changed,
+  so comments, ordering and unknown keys survive. They return whether it
+  was saved and show the error toast themselves.
+- **Read a module's settings with `ctx.module_config::<T>(id)`**
+  (or `ConfigHandle::module_config`/`module_keys`): on a wrong-typed
+  table it returns `T`'s defaults *and* reports a `ConfigIssue`, which the
+  TUI shows as a warning (once per session; `app_loop` drains
+  `take_issues`), the CLI prints to stderr, the daemon logs.
+  `MokuConfig::resolve_module_config` itself returns `Result`; a pure
+  render path that can't report may `unwrap_or_default()` with a comment
+  pointing at the event path that does.
+- **Every module config struct has `#[serde(default)]`.** A missing field
+  means its default; only a wrong-typed field is an error.
+- **A broken config is never overwritten.** An unparseable/unreadable
+  file (or one from a newer `config_version`) runs read-only on defaults
+  with a warning and a `config.toml.broken-<ts>` copy. A section or module
+  table that doesn't parse falls back to defaults and is write-locked
+  (`ConfigError::SectionInvalid`), so a default never replaces what the
+  user wrote. `update_module` refuses to write a table that doesn't
+  currently parse as `T`.
+- **`resolve_encryption` fails closed**: it returns `Result<bool,
+  ConfigIssue>`. A save path propagates the error (the write is refused);
+  a gate that only decides "does this need the vault" treats it as
+  encrypted (`unwrap_or(true)`). Never fall back to plaintext.
+- Use `ModuleId::X.as_str()` for module ids, never a string literal.
+- Tests build contexts with `ConfigHandle::detached(..)`, which never
+  touches disk. Before P2, pomodoro tests wrote the real moku_dev
+  config.toml.
 
 ## Versioning convention
 
@@ -27,7 +114,7 @@ storage, security, module traits, keybinding resolution).
 - **Argon2id is the only password KDF.** Params are `Params::new(65536, 3, 4,
   Some(32))` (64 MiB, 3 iterations, 4-way parallelism, 32-byte output),
   `Algorithm::Argon2id`, `Version::V0x13` — see
-  `moku-core/src/security/manager.rs`. Reuse these exact params for any new
+  `moku-crypto/src/password.rs` (`argon2id_key`). Reuse these exact params for any new
   password-derived key; don't invent new ones per-feature.
 - **Never use a raw master/password-derived key directly as a cipher key.**
   Derive independent subkeys via HKDF-SHA256 with a fixed, versioned
@@ -35,7 +122,7 @@ storage, security, module traits, keybinding resolution).
   `moku-vault-fs/content-key/v1` / `moku-vault-fs/name-key/v1`
   (`moku-volume-fs/src/keys.rs`), per-volume via `moku-volume-daemon/src/
   registry.rs`'s `derive_default_volume_master_key`, or per-module via
-  `moku-core/src/storage/keys.rs`'s `derive_module_storage_key` (info
+  `moku-crypto/src/subkey.rs`'s `derive_module_storage_key` (info
   string `moku-core/storage/<module_id>/v1` — see below). One
   `Hkdf::new(None, master)` + one `hk.expand(info, &mut out)` call per
   subkey. Bump the `/v1` suffix (not the string itself) if a derivation
@@ -45,8 +132,8 @@ storage, security, module traits, keybinding resolution).
   "vault": they predate the vault -> volume crate rename and are baked
   into every existing volume's keys, so they stay byte-for-byte forever.
   All four existing derivations (these three + `moku-core/storage/<m>/v1`)
-  are pinned by known-answer tests (`moku-core/tests/crypto_kat.rs`,
-  `moku-core/src/storage/keys.rs`, `moku-volume-fs/tests/crypto_kat.rs`,
+  are pinned by known-answer tests (`moku-crypto/tests/crypto_kat.rs`,
+  `moku-crypto/src/subkey.rs`, `moku-volume-fs/tests/crypto_kat.rs`,
   `moku-volume-daemon/tests/crypto_kat.rs`). Never "update" a KAT's
   expected value to match new code: a failing KAT means existing data
   would no longer decrypt.
@@ -57,7 +144,7 @@ storage, security, module traits, keybinding resolution).
   the raw master key — closing the same "raw key as cipher key" gap the
   bullet above already covered for `moku-volume-fs`/`moku-volume-daemon`.
 - **`StorageEnvelope.key_scheme` is a numbered migration chain, not a
-  one-off flag.** `KeyScheme` (`moku-core/src/storage/envelope.rs`) is
+  one-off flag.** `KeyScheme` (`moku-store/src/envelope.rs`) is
   `V0` (raw master key, `#[default]`/`#[serde(rename = "Legacy")]`) or
   `V1` (per-module HKDF subkey, `#[serde(rename = "PerModuleV1")]`,
   current) — the `serde(rename)`s pin the on-disk JSON tags to their
@@ -131,7 +218,7 @@ storage, security, module traits, keybinding resolution).
   (password + confirmation), since a fresh password has nothing else to
   check a typo against. Don't invent a third pattern. Implementations:
   the lock screen's setup mode (password + Confirm fields),
-  `moku_core::security::cli::prompt_new_password` for CLI.
+  `moku_vault::cli::prompt_new_password` for CLI.
 - **Shared delete-confirmation convention**: a destructive delete goes
   through `moku_core::keys::{is_delete_bypass, resolve_confirm_delete_key,
   ConfirmDeleteKey}` — plain `d`/`Delete` opens a confirm prompt
@@ -141,7 +228,7 @@ storage, security, module traits, keybinding resolution).
   `moku-secrets`, `moku-rss`, `moku-volume-daemon`) uses this same pair of
   helpers rather than reimplementing the key matching.
 - **Untrusted external input needs its own validation layer before it
-  reaches an OS call.** `moku-core/src/util.rs`'s `open_url` validates the
+  reaches an OS call.** `moku-sys/src/util.rs`'s `open_url` validates the
   scheme is `http`/`https` (`url::Url::parse`) before ever invoking the
   Windows Shell API (`ShellExecuteW`, not a `cmd /C start` shell-out — the
   latter lets `cmd.exe`'s own re-parsing turn a feed-supplied URL containing
@@ -164,11 +251,11 @@ storage, security, module traits, keybinding resolution).
 - **A byte-offset string truncation must never be a raw `&s[..n]` slice.**
   Text of external origin (a git diff, a feed/task error string) isn't
   guaranteed ASCII, so an arbitrary byte offset can land mid-codepoint and
-  panic. Always go through `moku_core::util::truncate_at_char_boundary`.
+  panic. Always go through `moku_sys::util::truncate_at_char_boundary`.
 
 ## Data-safety conventions (from the 0.3-foundations P1 phase)
 
-- **Whole-file state is written with `moku_core::util::atomic_write`**
+- **Whole-file state is written with `moku_sys::util::atomic_write`**
   (or `atomic_write_async`): temp file in the same directory, fsync,
   rename over the target. Never a plain `fs::write` for `meta.json`,
   `volume.json`, `usage.json`, the volume index, config files or any
@@ -201,7 +288,7 @@ storage, security, module traits, keybinding resolution).
   goes away in P9. Never keep an app-key `Arc` in module state (a prompt
   must read `ctx.session.current()` at the moment of use), or locking
   can't wipe it.
-- **CLI vault access goes through `moku_core::security::cli`:**
+- **CLI vault access goes through `moku_vault::cli`:**
   `ensure_unlocked` asks once and never creates a vault; first-time
   setup is the TUI's (or a future `moku vault init`).
   `prompt_new_password` asks twice. Never create a vault from a single
@@ -212,7 +299,8 @@ storage, security, module traits, keybinding resolution).
   is safe.** Otherwise log it (`tracing::warn!`) or surface it.
 - **Show error chains:** user-facing error text uses `{e:#}`
   (`show_error(format!("...: {e:#}"))`, fatal CLI prints), so the cause
-  isn't cut off.
+  isn't cut off. That only works on `anyhow::Error`; for a typed error
+  use `moku_sys::util::error_chain` (see "Errors" above).
 
 ## Theme / UI conventions
 
@@ -311,7 +399,7 @@ storage, security, module traits, keybinding resolution).
   `tokio::task::spawn_blocking`** rather than running it inline on an
   async fn called from the TUI event loop — a single-threaded TUI freezes
   for the whole duration otherwise. See `modules/moku-satz`'s vault index
-  build, `moku-core/src/storage/manager.rs::get_or_open_db`.
+  build, `moku-store/src/manager.rs::get_or_open_db`.
 - **A tree/list flattened for display from a flat `Vec<T>` + parent-id
   links should be built with a pre-indexed `parent -> children` map (one
   pass, O(n)), not by having the recursive walk rescan the whole slice at
@@ -324,7 +412,7 @@ storage, security, module traits, keybinding resolution).
   data dir, a Default- and a Custom-mode volume, an MSXP v1 export, a
   raw legacy GCM blob. Future format migrations are tested against these.
   Never regenerate or edit them. `SHA256SUMS` +
-  `moku-core/tests/fixture_v0_2_7.rs` fail on any change; restore from
+  `moku-store/tests/fixture_v0_2_7.rs` fail on any change; restore from
   git instead. Tests always copy them to a temp dir before opening
   anything. Fixtures must only ever contain synthetic data
   (foo/bar/example.com, fixed test passwords). Never copy anything from
