@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tempfile::tempdir;
 use tokio::fs;
 
-use moku_core::StorageManager;
-use moku_core::security::VaultSession;
+use moku_store::StorageManager;
+use moku_vault::VaultSession;
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 struct TestData {

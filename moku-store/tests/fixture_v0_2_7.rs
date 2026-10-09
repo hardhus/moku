@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use moku_core::StorageManager;
-use moku_core::security::{SecurityManager, VaultSession};
+use moku_store::StorageManager;
+use moku_vault::{SecurityManager, VaultSession};
 use serde_json::Value;
 use zeroize::Zeroizing;
 

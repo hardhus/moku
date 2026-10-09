@@ -2537,19 +2537,14 @@ dependencies = [
  "futures",
  "moku-config",
  "moku-crypto",
+ "moku-store",
  "moku-sys",
  "moku-vault",
  "ratatui",
- "secrecy",
  "serde",
- "serde_json",
- "sha2",
- "sled",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
- "tracing",
- "zeroize",
 ]
 
 [[package]]
@@ -2790,6 +2785,25 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+]
+
+[[package]]
+name = "moku-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "moku-crypto",
+ "moku-sys",
+ "moku-vault",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sled",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]

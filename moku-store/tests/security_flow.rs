@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use zeroize::Zeroizing;
 
-use moku_core::StorageManager;
-use moku_core::security::{SecurityManager, VaultSession};
+use moku_store::StorageManager;
+use moku_vault::{SecurityManager, VaultSession};
 
 #[tokio::test]
 async fn test_end_to_end_vault_lifecycle() {

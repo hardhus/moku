@@ -8,25 +8,17 @@ moku-sys.workspace = true
 moku-config.workspace = true
 moku-crypto.workspace = true
 moku-vault.workspace = true
+moku-store.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 arc-swap.workspace = true
 futures.workspace = true
-
-sled.workspace = true
-zeroize.workspace = true
-secrecy.workspace = true
-
 
 [dev-dependencies]
 toml.workspace = true
 tempfile.workspace = true
-# fixture_v0_2_7.rs checks the frozen fixtures against their SHA256SUMS.
-sha2 = "0.10"
 
