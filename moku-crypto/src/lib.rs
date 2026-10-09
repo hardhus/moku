@@ -6,6 +6,7 @@ mod error;
 pub mod format_v1;
 pub mod kdf;
 mod key;
+pub mod keyslot;
 mod password;
 pub mod purpose;
 pub mod random;
