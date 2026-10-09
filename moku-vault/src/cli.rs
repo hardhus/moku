@@ -5,20 +5,22 @@
 //! - passwords go straight into `Zeroizing`;
 //! - a CLI command never silently creates a vault.
 
-use anyhow::{Result, anyhow, bail};
 use zeroize::Zeroizing;
 
-use crate::{SecurityManager, VaultSession};
+use crate::{SecurityManager, VaultError, VaultSession};
+
+type Result<T> = std::result::Result<T, VaultError>;
 
 fn read_password(label: &str) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(
-        rpassword::prompt_password(label).map_err(|e| anyhow!("Failed to read password: {e}"))?,
+        rpassword::prompt_password(label).map_err(VaultError::Prompt)?,
     ))
 }
 
 /// Unlocks `session` from an interactive prompt if it isn't unlocked yet.
 ///
-/// A vault that has never been set up is an error. Creating one here, from
+/// A vault that has never been set up is `VaultError::NotInitialized`.
+/// Creating one here, from
 /// a single unconfirmed prompt, while the user thinks they are just
 /// unlocking, would be exactly the silent-setup trap this replaces. The
 /// first-time setup happens in the TUI (which asks twice); a dedicated
@@ -32,15 +34,10 @@ pub async fn ensure_unlocked(
         return Ok(());
     }
     if !security.is_vault_initialized() {
-        bail!(
-            "the moku vault hasn't been set up yet: open `moku` (the TUI) once and create it there"
-        );
+        return Err(VaultError::NotInitialized);
     }
     let password = read_password(prompt)?;
-    let key = security
-        .unlock_vault(password)
-        .await
-        .map_err(|e| anyhow!("Vault unlock failed: {e}"))?;
+    let key = security.unlock_vault(password).await?;
     session.unlock(key);
     Ok(())
 }
@@ -56,10 +53,10 @@ pub fn prompt_new_password(label: &str, confirm_label: &str) -> Result<Zeroizing
 
 fn check_new_password(first: Zeroizing<String>, second: &str) -> Result<Zeroizing<String>> {
     if first.is_empty() {
-        bail!("password cannot be empty");
+        return Err(VaultError::EmptyPassword);
     }
     if *first != *second {
-        bail!("passwords did not match");
+        return Err(VaultError::PasswordMismatch);
     }
     Ok(first)
 }
@@ -70,8 +67,14 @@ mod tests {
 
     #[test]
     fn test_check_new_password_rules() {
-        assert!(check_new_password(Zeroizing::new(String::new()), "").is_err());
-        assert!(check_new_password(Zeroizing::new("a".into()), "b").is_err());
+        assert!(matches!(
+            check_new_password(Zeroizing::new(String::new()), ""),
+            Err(VaultError::EmptyPassword)
+        ));
+        assert!(matches!(
+            check_new_password(Zeroizing::new("a".into()), "b"),
+            Err(VaultError::PasswordMismatch)
+        ));
         assert_eq!(
             check_new_password(Zeroizing::new("same".into()), "same")
                 .unwrap()
@@ -88,7 +91,7 @@ mod tests {
         let err = ensure_unlocked(&session, &security, "pw: ")
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("hasn't been set up"));
+        assert!(matches!(err, VaultError::NotInitialized));
         assert!(!security.is_vault_initialized());
     }
 

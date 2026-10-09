@@ -348,9 +348,13 @@ async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
     let (Some(session), Some(security)) = (&ctx.session, &ctx.security) else {
         bail!("vault access unavailable (internal error: CliContext.session/security is empty).");
     };
-    moku_vault::cli::ensure_unlocked(session, security, "Moku vault password: ").await
+    moku_vault::cli::ensure_unlocked(session, security, "Moku vault password: ").await?;
+    Ok(())
 }
 
 fn prompt_new_export_password() -> Result<zeroize::Zeroizing<String>> {
-    moku_vault::cli::prompt_new_password("New export password: ", "Confirm export password: ")
+    Ok(moku_vault::cli::prompt_new_password(
+        "New export password: ",
+        "Confirm export password: ",
+    )?)
 }

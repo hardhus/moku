@@ -2559,12 +2559,12 @@ name = "moku-crypto"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
- "anyhow",
  "argon2",
  "hkdf",
  "rand 0.8.8",
  "secrecy",
  "sha2",
+ "thiserror 2.0.20",
  "zeroize",
 ]
 
@@ -2656,6 +2656,7 @@ dependencies = [
  "moku-config",
  "moku-core",
  "moku-store",
+ "moku-sys",
  "moku-vault",
  "ratatui",
  "tempfile",
@@ -2879,7 +2880,6 @@ dependencies = [
 name = "moku-vault"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "moku-crypto",
  "moku-sys",
@@ -2888,6 +2888,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "zeroize",
 ]

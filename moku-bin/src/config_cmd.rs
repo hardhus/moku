@@ -105,7 +105,8 @@ async fn ensure_unlocked_if_needed(
     if !target_encrypted {
         return Ok(());
     }
-    moku_vault::cli::ensure_unlocked(session, security, "Vault password: ").await
+    moku_vault::cli::ensure_unlocked(session, security, "Vault password: ").await?;
+    Ok(())
 }
 
 async fn run_migration(storage: &Arc<StorageManager>, module: &str, target_encrypted: bool) -> Result<()> {

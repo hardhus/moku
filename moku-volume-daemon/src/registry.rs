@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use hkdf::Hkdf;
 use moku_crypto::SafeKey;
-use moku_vault::SecurityManager;
+use moku_vault::{SecurityManager, VaultError};
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -127,10 +127,15 @@ pub async fn resolve_volume_master_key(
             );
         };
         let security = SecurityManager::new_with_root(volume_dir.to_path_buf());
-        return security
-            .unlock_vault(zeroize::Zeroizing::new(password))
-            .await
-            .map_err(|e| anyhow!("failed to unlock volume '{}': {e}", cfg.id));
+        return match security.unlock_vault(zeroize::Zeroizing::new(password)).await {
+            Ok(key) => Ok(key),
+            Err(VaultError::WrongPassword) => {
+                Err(anyhow!("wrong password for volume '{}'", cfg.display_name))
+            }
+            Err(e) => {
+                Err(anyhow::Error::new(e).context(format!("failed to unlock volume '{}'", cfg.id)))
+            }
+        };
     }
 
     // New-scheme Default mode: the volume has no vault of its own — its
@@ -139,10 +144,21 @@ pub async fn resolve_volume_master_key(
     let app_key = match secret {
         MountSecret::VolumeKey(volume_key) => return Ok(volume_key),
         MountSecret::Key(key) => key,
-        MountSecret::Password(password) => SecurityManager::new()?
-            .unlock_vault(zeroize::Zeroizing::new(password))
-            .await
-            .map_err(|e| anyhow!("wrong moku vault password: {e}"))?,
+        MountSecret::Password(password) => {
+            match SecurityManager::new()?
+                .unlock_vault(zeroize::Zeroizing::new(password))
+                .await
+            {
+                Ok(key) => key,
+                // Only a real password mismatch is labelled as one; a
+                // missing/corrupt meta.json or a disk error keeps its own
+                // message (and cause chain).
+                Err(VaultError::WrongPassword) => bail!("wrong moku vault password"),
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context("failed to unlock the moku vault"));
+                }
+            }
+        }
     };
     Ok(derive_default_volume_master_key(&app_key, &cfg.id))
 }

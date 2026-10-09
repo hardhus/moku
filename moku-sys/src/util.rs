@@ -70,6 +70,21 @@ pub async fn atomic_write_async(path: PathBuf, bytes: Vec<u8>) -> Result<(), Ato
         })?
 }
 
+/// Formats `e` and its whole `source()` chain as `"top: cause: root cause"`,
+/// the same shape `anyhow`'s `{e:#}` gives. Use this to show a typed
+/// (thiserror) error to the user: `{e:#}` on a plain `std::error::Error`
+/// prints only the top-level message and silently drops the causes.
+pub fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(cause) = cur {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        cur = cause.source();
+    }
+    out
+}
+
 /// Truncates `s` to at most `max_bytes` bytes without splitting a UTF-8
 /// code point — plain `&s[..max_bytes]` panics ("byte index is not a char
 /// boundary") whenever `max_bytes` lands mid-codepoint, which is a real
@@ -238,6 +253,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"async");
+    }
+
+    #[test]
+    fn test_error_chain_includes_every_cause() {
+        let path = PathBuf::from("state.json");
+        let err = AtomicWriteError {
+            path: path.clone(),
+            step: "replace the file",
+            source: io::Error::new(io::ErrorKind::PermissionDenied, "access denied"),
+        };
+        assert_eq!(
+            error_chain(&err),
+            "failed to replace the file for state.json: access denied"
+        );
     }
 
     #[test]

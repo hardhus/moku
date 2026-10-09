@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 moku-core.workspace = true
+moku-sys.workspace = true
+moku-vault.workspace = true
 anyhow.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
@@ -12,7 +14,6 @@ async-trait.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-moku-vault.workspace = true
 moku-store.workspace = true
 moku-config.workspace = true
 tempfile.workspace = true

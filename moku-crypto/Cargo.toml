@@ -9,7 +9,7 @@ edition = "2024"
 # async runtime lives in moku-vault, which builds on this crate.
 
 [dependencies]
-anyhow.workspace = true
+thiserror.workspace = true
 zeroize.workspace = true
 secrecy.workspace = true
 argon2.workspace = true

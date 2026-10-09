@@ -10,6 +10,8 @@ use ratatui::{
 use zeroize::{Zeroize, Zeroizing};
 
 use moku_core::{AppContext, ModuleId, ModuleMeta, MokuTheme, TuiModule};
+use moku_sys::util::error_chain;
+use moku_vault::VaultError;
 
 /// Which input has focus in setup mode (password + confirmation). Login
 /// mode only ever uses `Password`.
@@ -93,8 +95,8 @@ impl LockScreenModule {
                 self.wipe_inputs();
                 self.error_msg = None;
             }
-            Err(_) => {
-                self.error_msg = Some("Incorrect password or initialization error!".to_string());
+            Err(e) => {
+                self.error_msg = Some(auth_error_message(&e));
                 self.wipe_inputs();
             }
         }
@@ -301,6 +303,29 @@ impl TuiModule for LockScreenModule {
     }
 }
 
+/// What the lock screen says when unlocking or creating the vault fails.
+/// Only a real password mismatch says "incorrect password"; a damaged or
+/// unreadable `meta.json` says so plainly, since retyping the password
+/// can't fix it.
+fn auth_error_message(e: &VaultError) -> String {
+    match e {
+        VaultError::WrongPassword => "Incorrect password.".to_string(),
+        VaultError::AlreadyInitialized(_) => {
+            "A vault already exists here; refusing to overwrite it.".to_string()
+        }
+        VaultError::NotInitialized => {
+            "The vault's meta.json is gone; it may have been moved or deleted.".to_string()
+        }
+        VaultError::MetadataCorrupt { .. } => {
+            "The vault's meta.json is damaged. This is not a password problem.".to_string()
+        }
+        VaultError::Io { .. } | VaultError::DataDir(_) | VaultError::Write(_) => {
+            format!("Couldn't access the vault on disk: {}", error_chain(e))
+        }
+        _ => format!("Couldn't open the vault: {}", error_chain(e)),
+    }
+}
+
 fn error_line<'a>(err: &'a str, theme: &MokuTheme) -> Paragraph<'a> {
     Paragraph::new(err)
         .style(
@@ -309,6 +334,7 @@ fn error_line<'a>(err: &'a str, theme: &MokuTheme) -> Paragraph<'a> {
                 .add_modifier(Modifier::ITALIC),
         )
         .alignment(ratatui::layout::Alignment::Center)
+        .wrap(ratatui::widgets::Wrap { trim: true })
 }
 
 #[cfg(test)]
@@ -325,6 +351,10 @@ mod tests {
     use super::*;
 
     async fn create_test_context() -> AppContext {
+        create_test_context_with_root().await.0
+    }
+
+    async fn create_test_context_with_root() -> (AppContext, std::path::PathBuf) {
         let temp = tempdir().unwrap();
         let root = temp.path().to_path_buf();
         std::mem::forget(temp);
@@ -333,12 +363,12 @@ mod tests {
         let session = Arc::new(VaultSession::new());
         let security = Arc::new(SecurityManager::new_with_root(root.clone()));
         let storage = Arc::new(
-            StorageManager::new_with_root(Arc::clone(&session), root)
+            StorageManager::new_with_root(Arc::clone(&session), root.clone())
                 .await
                 .unwrap(),
         );
 
-        AppContext::new(config, session, security, storage)
+        (AppContext::new(config, session, security, storage), root)
     }
 
     fn key(code: KeyCode) -> Event {
@@ -535,10 +565,7 @@ mod tests {
         }
         module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
 
-        assert_eq!(
-            module.error_msg.as_deref(),
-            Some("Incorrect password or initialization error!")
-        );
+        assert_eq!(module.error_msg.as_deref(), Some("Incorrect password."));
         assert!(!ctx.session.is_unlocked());
         assert!(module.input.is_empty(), "input should be cleared after a failed auth");
     }
@@ -579,5 +606,43 @@ mod tests {
         module.handle_event(&key(KeyCode::Esc), &mut ctx).await.unwrap();
         assert_eq!(ctx.take_navigation(), Some(ModuleId::LAUNCHER));
         assert!(module.input.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_corrupt_meta_is_not_reported_as_a_wrong_password() {
+        let (mut ctx, root) = create_test_context_with_root().await;
+        ctx.security
+            .initialize_vault(Zeroizing::new("correct-pass".to_string()))
+            .await
+            .unwrap();
+        std::fs::write(root.join("vault").join("meta.json"), b"{ not json").unwrap();
+        let mut module = LockScreenModule::new();
+        module.init(&mut ctx).await.unwrap();
+
+        type_str(&mut module, &mut ctx, "correct-pass").await;
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+
+        let msg = module.error_msg.as_deref().unwrap();
+        assert!(msg.contains("damaged"), "got: {msg}");
+        assert!(!msg.contains("Incorrect password"));
+        assert!(!ctx.session.is_unlocked());
+        assert!(rendered(&mut module).contains("damaged"));
+    }
+
+    #[test]
+    fn test_auth_error_message_distinguishes_error_kinds() {
+        assert_eq!(auth_error_message(&VaultError::WrongPassword), "Incorrect password.");
+        let corrupt = VaultError::MetadataCorrupt {
+            path: "meta.json".into(),
+            source: None,
+        };
+        assert!(auth_error_message(&corrupt).contains("not a password problem"));
+        let io = VaultError::Io {
+            path: "meta.json".into(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        let msg = auth_error_message(&io);
+        assert!(msg.starts_with("Couldn't access the vault on disk"), "got: {msg}");
+        assert!(msg.contains("denied"), "the cause must be shown: {msg}");
     }
 }
