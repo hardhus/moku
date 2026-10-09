@@ -58,6 +58,10 @@ impl ConfigHandle {
     /// A handle that isn't backed by a file: writes update memory only.
     /// For tests and for a process that can't locate its config directory.
     pub fn detached(config: MokuConfig) -> Self {
+        // Only an in-memory mirror for `update`'s edits (nothing is ever
+        // written from a detached handle). Serializing/parsing a
+        // `MokuConfig` can't realistically fail; an empty document would
+        // just start from no keys.
         let doc = toml::to_string_pretty(&config)
             .ok()
             .and_then(|s| s.parse::<DocumentMut>().ok())
@@ -372,6 +376,11 @@ fn value_table<T: Serialize>(value: &T) -> Result<toml::Table, toml::ser::Error>
     }
 }
 
+/// The document a fresh default file would contain, used when that file
+/// couldn't be created. Serializing the defaults and parsing our own
+/// output can't realistically fail; if it did, the empty document still
+/// loses nothing (later writes add only the keys they change, and absent
+/// keys read as their defaults).
 fn default_document() -> DocumentMut {
     format!(
         "{HEADER}{}",
