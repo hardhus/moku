@@ -98,7 +98,7 @@ impl VolumeEngine {
             return Ok(*id);
         }
         let mut file = File::open(backing)?;
-        let id = content::read_file_id(&mut file).map_err(VolumeFsError::from)?;
+        let id = content::read_file_id(&mut file)?;
         self.file_id_cache.lock().unwrap().insert(backing.to_path_buf(), id);
         Ok(id)
     }
@@ -117,7 +117,7 @@ impl VolumeEngine {
             self.pathmap.resolve(&self.name_key, path)?
         };
         if backing.is_dir() {
-            Ok(self.pathmap.dir_iv(&backing).map_err(VolumeFsError::from)?)
+            self.pathmap.dir_iv(&backing)
         } else {
             self.file_id_for_backing(&backing)
         }
@@ -157,7 +157,7 @@ impl VolumeEngine {
         if !backing.is_dir() {
             return Err(VolumeFsError::NotADirectory);
         }
-        let entries = self.pathmap.read_dir_plain(&self.name_key, &backing).map_err(VolumeFsError::from)?;
+        let entries = self.pathmap.read_dir_plain(&self.name_key, &backing)?;
         let mut entries: Vec<DirEntry> = entries
             .into_iter()
             .map(|(name, _p, is_dir)| DirEntry {
@@ -183,7 +183,7 @@ impl VolumeEngine {
             return Err(VolumeFsError::AlreadyExists);
         }
         fs::create_dir(&backing)?;
-        self.pathmap.init_dir_iv(&backing).map_err(VolumeFsError::from)?;
+        self.pathmap.init_dir_iv(&backing)?;
         self.stat_backing(&backing)
     }
 
@@ -221,7 +221,7 @@ impl VolumeEngine {
         OsRng.fill_bytes(&mut file_id);
         if let Err(e) = content::create_empty_file(&backing, &file_id) {
             self.quota.shrink(content::HEADER_SIZE);
-            return Err(VolumeFsError::from(e));
+            return Err(e);
         }
 
         let fh = self.next_fh.fetch_add(1, Ordering::SeqCst);
@@ -238,7 +238,7 @@ impl VolumeEngine {
             return Err(VolumeFsError::NotFound);
         }
         let mut file = File::open(&backing)?;
-        let file_id = content::read_file_id(&mut file).map_err(VolumeFsError::from)?;
+        let file_id = content::read_file_id(&mut file)?;
         let fh = self.next_fh.fetch_add(1, Ordering::SeqCst);
         self.open_files.lock().unwrap().insert(fh, OpenFile { backing, file_id });
         Ok(fh)
@@ -260,7 +260,7 @@ impl VolumeEngine {
         let lock = self.file_lock(&file_id);
         let _shared = lock.read().unwrap_or_else(|p| p.into_inner());
         let mut file = OpenOptions::new().read(true).open(&backing)?;
-        content::read_range(&mut file, &self.content_key, &file_id, offset, buf).map_err(VolumeFsError::from)
+        content::read_range(&mut file, &self.content_key, &file_id, offset, buf)
     }
 
     pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> VResult<usize> {
@@ -284,7 +284,7 @@ impl VolumeEngine {
                     // disk; a failed write must not leak quota forever.
                     let now = file.metadata().map(|m| m.len()).unwrap_or(physical_before);
                     self.reconcile_reservation(projected_growth, now.saturating_sub(physical_before));
-                    return Err(VolumeFsError::from(e));
+                    return Err(e);
                 }
             };
         // try_grow reserved a conservative upper bound; true physical
@@ -296,7 +296,7 @@ impl VolumeEngine {
     pub fn setattr_size(&self, path: &VirtualPath, size: u64) -> VResult<Attr> {
         let backing = self.pathmap.resolve(&self.name_key, path)?;
         let mut file = OpenOptions::new().read(true).write(true).open(&backing)?;
-        let file_id = content::read_file_id(&mut file).map_err(VolumeFsError::from)?;
+        let file_id = content::read_file_id(&mut file)?;
         let lock = self.file_lock(&file_id);
         let _exclusive = lock.write().unwrap_or_else(|p| p.into_inner());
         let physical_before = file.metadata()?.len();
@@ -313,7 +313,7 @@ impl VolumeEngine {
                 } else {
                     self.reconcile_reservation(projected_growth, now - physical_before);
                 }
-                return Err(VolumeFsError::from(e));
+                return Err(e);
             }
         };
         if after < before {

@@ -110,25 +110,25 @@ impl ConfigHandle {
             handle
         };
 
-        if !path.exists() {
-            if let Err(e) = write_default_file(&path) {
-                // Not read-only: writes will be retried (and report their
-                // own failure) when the user changes a setting.
-                issues.push(ConfigIssue {
-                    path: "config.toml".into(),
-                    message: format!(
-                        "couldn't create {}: {}; using the defaults",
-                        path.display(),
-                        moku_sys::util::error_chain(e.as_ref())
-                    ),
-                });
-                return Self::from_parts(MokuConfig::default(), State {
-                    path: Some(path.clone()),
-                    doc: default_document(),
-                    read_only: None,
-                    invalid_sections: HashMap::new(),
-                }, issues);
-            }
+        if !path.exists()
+            && let Err(e) = write_default_file(&path)
+        {
+            // Not read-only: writes will be retried (and report their
+            // own failure) when the user changes a setting.
+            issues.push(ConfigIssue {
+                path: "config.toml".into(),
+                message: format!(
+                    "couldn't create {}: {}; using the defaults",
+                    path.display(),
+                    moku_sys::util::error_chain(e.as_ref())
+                ),
+            });
+            return Self::from_parts(MokuConfig::default(), State {
+                path: Some(path.clone()),
+                doc: default_document(),
+                read_only: None,
+                invalid_sections: HashMap::new(),
+            }, issues);
         }
 
         let text = match std::fs::read_to_string(&path) {
