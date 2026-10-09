@@ -85,7 +85,7 @@ pub async fn handle(sub: &VolumeCommands) -> Result<()> {
                 let key = app_security
                     .unlock_vault(password)
                     .await
-                    .map_err(|e| anyhow!("failed to unlock moku vault: {e}"))?;
+                    .map_err(|e| anyhow::Error::new(e).context("failed to unlock moku vault"))?;
                 VolumeSecret::FromAppVault(key)
             };
 

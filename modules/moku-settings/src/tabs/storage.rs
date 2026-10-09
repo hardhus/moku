@@ -14,6 +14,7 @@ use ratatui::{
 
 use moku_config::MokuConfig;
 use moku_core::{AppContext, Command, MokuTheme, resolve_event};
+use moku_sys::util::error_chain;
 
 use super::SettingsTab;
 
@@ -189,7 +190,7 @@ impl StorageTab {
                         report.skipped,
                         report.errors.len()
                     )),
-                    Err(e) => lines.push(format!("{module}: {e}")),
+                    Err(e) => lines.push(format!("{module}: {}", error_chain(&e))),
                 }
             }
             *slot.lock().unwrap() = Some(lines.join(" | "));

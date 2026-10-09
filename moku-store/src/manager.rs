@@ -2,20 +2,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::fs;
 use tokio::sync::RwLock;
 
-use moku_crypto::{SafeKey, derive_module_storage_key};
+use moku_crypto::{CryptoError, SafeKey, derive_module_storage_key};
 use moku_sys::dirs;
 use moku_vault::VaultSession;
 
+use crate::StoreError;
 use crate::envelope::{
     CURRENT_KEY_SCHEME, CURRENT_SCHEMA_VERSION, EncryptionStatus, KeyScheme, StorageEnvelope,
     StorageType, data_transform_for_hop,
 };
+
+type Result<T> = std::result::Result<T, StoreError>;
 
 const EXTERNAL_STORAGE_THRESHOLD: usize = 50 * 1024;
 
@@ -27,12 +29,14 @@ const EXTERNAL_STORAGE_THRESHOLD: usize = 50 * 1024;
 /// own subdirectory.
 const KEY_SCHEME_MARKER_FILENAME: &str = ".key_scheme_version";
 
-/// Result of `StorageManager::migrate_module_encryption`.
+/// Result of `StorageManager::migrate_module_encryption` /
+/// `migrate_key_scheme_to_latest`: per-record failures are collected
+/// (record key + typed error) instead of aborting the whole module.
 #[derive(Debug, Default)]
 pub struct MigrationReport {
     pub migrated: usize,
     pub skipped: usize,
-    pub errors: Vec<(String, String)>,
+    pub errors: Vec<(String, StoreError)>,
 }
 
 /// Hybrid encrypted storage manager.
@@ -55,7 +59,7 @@ impl StorageManager {
         if is_fresh {
             fs::create_dir_all(&vault_root)
                 .await
-                .context("Failed to create vault root directory")?;
+                .map_err(StoreError::io("create the vault root directory", &vault_root))?;
         }
         let manager = Self {
             session,
@@ -81,9 +85,10 @@ impl StorageManager {
     }
 
     async fn write_key_scheme_marker(&self, version: u16) -> Result<()> {
-        fs::write(self.key_scheme_marker_path(), version.to_string())
+        let path = self.key_scheme_marker_path();
+        fs::write(&path, version.to_string())
             .await
-            .context("Failed to write key scheme version marker")
+            .map_err(StoreError::io("write the key-scheme version marker", path))
     }
 
     /// Reads the data directory's own record of which `KeyScheme` version
@@ -119,12 +124,9 @@ impl StorageManager {
             return Ok(db.clone());
         }
         let db_path = self.vault_root.join(module_id).join("db");
-        let opened = tokio::task::spawn_blocking({
-            let db_path = db_path.clone();
-            move || sled::open(&db_path).context(format!("Failed to open sled DB: {:?}", db_path))
-        })
-        .await
-        .map_err(|e| anyhow!("sled::open task panicked: {e}"))??;
+        let opened = tokio::task::spawn_blocking(move || sled::open(&db_path))
+            .await?
+            .map_err(|e| StoreError::from_open(module_id, e))?;
         cache.insert(module_id.to_string(), opened.clone());
         Ok(opened)
     }
@@ -139,10 +141,7 @@ impl StorageManager {
         module_id: &str,
         scheme: KeyScheme,
     ) -> Result<SecretBox<SafeKey>> {
-        let master = self
-            .session
-            .current()
-            .ok_or_else(|| anyhow!("Vault locked"))?;
+        let master = self.session.current().ok_or(StoreError::Locked)?;
         Ok(match scheme {
             KeyScheme::V0 => SecretBox::new(Box::new(master.expose_secret().clone())),
             KeyScheme::V1 => derive_module_storage_key(&master, module_id),
@@ -202,10 +201,10 @@ impl StorageManager {
     ) -> Result<()> {
         let (_, blobs_path) = self.prepare_module_paths(module_id).await?;
         let db = self.get_or_open_db(module_id).await?;
-        let raw_bytes = serde_json::to_vec(data).context("Serialization failed")?;
+        let raw_bytes = serde_json::to_vec(data).map_err(StoreError::Encode)?;
 
         // Every new write uses the derived per-module subkey — never the
-        // raw master key directly (see storage::keys::derive_module_storage_key).
+        // raw master key directly (see moku_crypto::derive_module_storage_key).
         let session_key = if is_encryption_enabled {
             Some(self.resolve_write_key(module_id)?)
         } else {
@@ -248,21 +247,21 @@ impl StorageManager {
                 },
             };
 
-            let envelope_bytes = serde_json::to_vec(&envelope)?;
+            let envelope_bytes = serde_json::to_vec(&envelope).map_err(StoreError::Encode)?;
             db.insert(key_string, envelope_bytes)?;
             if flush {
                 db.flush()?;
             }
 
-            Ok::<_, anyhow::Error>((processed_payload, storage_type))
+            Ok::<_, StoreError>((processed_payload, storage_type))
         })
         .await??;
 
         if storage_type == StorageType::External {
-            let file_name = format!("{}_{}.blob", module_id_str, key);
-            fs::write(blobs_path.join(file_name), &final_payload)
+            let blob_path = blobs_path.join(format!("{}_{}.blob", module_id_str, key));
+            fs::write(&blob_path, &final_payload)
                 .await
-                .context("Failed to write external blob")?;
+                .map_err(StoreError::io("write an external blob", blob_path))?;
         }
 
         Ok(())
@@ -280,7 +279,10 @@ impl StorageManager {
     ) -> Result<(StorageEnvelope, Vec<u8>)> {
         self.fetch_envelope_opt(module_id, key)
             .await?
-            .ok_or_else(|| anyhow!("Key not found: {}", key))
+            .ok_or_else(|| StoreError::NotFound {
+                module: module_id.to_string(),
+                key: key.to_string(),
+            })
     }
 
     /// Like `fetch_envelope`, but a key that simply doesn't exist yet is
@@ -301,15 +303,33 @@ impl StorageManager {
         };
 
         let envelope: StorageEnvelope =
-            serde_json::from_slice(&iv).context("Envelope corrupted")?;
+            serde_json::from_slice(&iv).map_err(|e| StoreError::Corrupt {
+                module: module_id.to_string(),
+                key: key.to_string(),
+                source: Box::new(e),
+            })?;
 
         let raw_data = match envelope.storage_type {
             StorageType::Embedded => envelope.payload.clone(),
             StorageType::External => {
-                let file_name = format!("{}_{}.blob", module_id, key);
-                fs::read(blobs_path.join(file_name))
-                    .await
-                    .context("External blob file missing")?
+                let blob_path = blobs_path.join(format!("{}_{}.blob", module_id, key));
+                match fs::read(&blob_path).await {
+                    Ok(bytes) => bytes,
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(StoreError::MissingBlob {
+                            module: module_id.to_string(),
+                            key: key.to_string(),
+                            source,
+                        });
+                    }
+                    Err(source) => {
+                        return Err(StoreError::Io {
+                            what: "read an external blob",
+                            path: blob_path,
+                            source,
+                        });
+                    }
+                }
             }
         };
 
@@ -323,6 +343,7 @@ impl StorageManager {
     async fn decrypt_payload<T: DeserializeOwned>(
         &self,
         module_id: &str,
+        key: &str,
         envelope: &StorageEnvelope,
         raw_data: Vec<u8>,
     ) -> Result<T> {
@@ -332,22 +353,42 @@ impl StorageManager {
             None
         };
 
-        let decrypted_data = tokio::task::spawn_blocking(move || {
+        let decrypted = tokio::task::spawn_blocking(move || {
             if let Some(k) = session_key {
                 moku_crypto::decrypt(&raw_data, &k)
             } else {
                 Ok(raw_data)
             }
         })
-        .await??;
+        .await?;
+        let decrypted_data = match decrypted {
+            Ok(bytes) => bytes,
+            Err(CryptoError::AuthFailed) => {
+                return Err(StoreError::Tampered {
+                    module: module_id.to_string(),
+                    key: key.to_string(),
+                });
+            }
+            Err(e @ CryptoError::Malformed(_)) => {
+                return Err(StoreError::Corrupt {
+                    module: module_id.to_string(),
+                    key: key.to_string(),
+                    source: Box::new(e),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
 
-        serde_json::from_slice(&decrypted_data)
-            .context("Stored record doesn't match the expected data shape")
+        serde_json::from_slice(&decrypted_data).map_err(|source| StoreError::SchemaMismatch {
+            module: module_id.to_string(),
+            key: key.to_string(),
+            source,
+        })
     }
 
     pub async fn load<T: DeserializeOwned>(&self, module_id: &str, key: &str) -> Result<T> {
         let (envelope, raw_data) = self.fetch_envelope(module_id, key).await?;
-        self.decrypt_payload(module_id, &envelope, raw_data).await
+        self.decrypt_payload(module_id, key, &envelope, raw_data).await
     }
 
     /// Loads `key`, distinguishing "nothing stored yet" (`Ok(None)`) from
@@ -366,7 +407,7 @@ impl StorageManager {
         match self.fetch_envelope_opt(module_id, key).await? {
             None => Ok(None),
             Some((envelope, raw_data)) => self
-                .decrypt_payload(module_id, &envelope, raw_data)
+                .decrypt_payload(module_id, key, &envelope, raw_data)
                 .await
                 .map(Some),
         }
@@ -383,10 +424,14 @@ impl StorageManager {
         let mut entries = match fs::read_dir(&self.vault_root).await {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e).context("failed to list the vault directory"),
+            Err(e) => return Err(StoreError::io("list the vault directory", &self.vault_root)(e)),
         };
         let mut modules = Vec::new();
-        while let Some(entry) = entries.next_entry().await? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(StoreError::io("list the vault directory", &self.vault_root))?
+        {
             if entry.path().join("db").is_dir() {
                 modules.push(entry.file_name().to_string_lossy().into_owned());
             }
@@ -440,7 +485,7 @@ impl StorageManager {
         target_encrypted: bool,
     ) -> Result<MigrationReport> {
         if target_encrypted && self.session.current().is_none() {
-            anyhow::bail!("Vault must be unlocked to migrate '{module_id}' to encrypted");
+            return Err(StoreError::Locked);
         }
 
         let (db, keys) = self.list_keys(module_id).await?;
@@ -457,7 +502,7 @@ impl StorageManager {
             {
                 Ok(true) => report.migrated += 1,
                 Ok(false) => report.skipped += 1,
-                Err(e) => report.errors.push((key, e.to_string())),
+                Err(e) => report.errors.push((key, e)),
             }
         }
 
@@ -484,7 +529,9 @@ impl StorageManager {
             return Ok(false);
         }
 
-        let value: serde_json::Value = self.decrypt_payload(module_id, &envelope, raw_data).await?;
+        let value: serde_json::Value = self
+            .decrypt_payload(module_id, key, &envelope, raw_data)
+            .await?;
         self.save_impl(module_id, key, &value, target_encrypted, false)
             .await?;
         Ok(true)
@@ -500,7 +547,7 @@ impl StorageManager {
     /// record already on `CURRENT_KEY_SCHEME` is left untouched.
     pub async fn migrate_key_scheme_to_latest(&self, module_id: &str) -> Result<MigrationReport> {
         if self.session.current().is_none() {
-            anyhow::bail!("Vault must be unlocked to migrate '{module_id}' key scheme");
+            return Err(StoreError::Locked);
         }
 
         let (db, keys) = self.list_keys(module_id).await?;
@@ -514,7 +561,7 @@ impl StorageManager {
             match self.migrate_one_key_scheme(module_id, &key).await {
                 Ok(true) => report.migrated += 1,
                 Ok(false) => report.skipped += 1,
-                Err(e) => report.errors.push((key, e.to_string())),
+                Err(e) => report.errors.push((key, e)),
             }
         }
 
@@ -534,11 +581,16 @@ impl StorageManager {
             return Ok(false);
         }
 
-        let mut value: serde_json::Value =
-            self.decrypt_payload(module_id, &envelope, raw_data).await?;
+        let mut value: serde_json::Value = self
+            .decrypt_payload(module_id, key, &envelope, raw_data)
+            .await?;
         for from_version in envelope.key_scheme.version()..CURRENT_KEY_SCHEME.version() {
             if let Some(transform) = data_transform_for_hop(from_version) {
-                value = transform(value)?;
+                value = transform(value).map_err(|message| StoreError::Transform {
+                    module: module_id.to_string(),
+                    key: key.to_string(),
+                    message,
+                })?;
             }
         }
         self.save_impl(module_id, key, &value, true, false).await?;
@@ -575,10 +627,14 @@ impl StorageManager {
         let db_path = module_root.join("db");
         let blobs_path = module_root.join("blobs");
         if !db_path.exists() {
-            fs::create_dir_all(&db_path).await?;
+            fs::create_dir_all(&db_path)
+                .await
+                .map_err(StoreError::io("create a module directory", &db_path))?;
         }
         if !blobs_path.exists() {
-            fs::create_dir_all(&blobs_path).await?;
+            fs::create_dir_all(&blobs_path)
+                .await
+                .map_err(StoreError::io("create a module directory", &blobs_path))?;
         }
         Ok((db_path, blobs_path))
     }

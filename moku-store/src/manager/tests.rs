@@ -63,7 +63,7 @@ async fn test_load_opt_corrupt_envelope_is_an_error_not_none() {
     db.insert("items", b"not an envelope".to_vec()).unwrap();
     db.flush().unwrap();
     let loaded: Result<Option<Vec<String>>> = manager.load_opt("mod1", "items").await;
-    assert!(loaded.is_err());
+    assert!(matches!(loaded, Err(StoreError::Corrupt { .. })), "got {loaded:?}");
 }
 
 #[tokio::test]
@@ -80,7 +80,7 @@ async fn test_load_opt_locked_vault_is_an_error_not_none() {
         .unwrap();
     session.lock();
     let loaded: Result<Option<Vec<String>>> = manager.load_opt("mod1", "items").await;
-    assert!(loaded.is_err());
+    assert!(matches!(loaded, Err(StoreError::Locked)), "got {loaded:?}");
 }
 
 #[tokio::test]
@@ -91,7 +91,45 @@ async fn test_load_opt_shape_mismatch_is_an_error_not_none() {
         .unwrap();
     manager.save("mod1", "items", &42u32, false).await.unwrap();
     let loaded: Result<Option<Vec<String>>> = manager.load_opt("mod1", "items").await;
-    assert!(loaded.is_err());
+    assert!(matches!(loaded, Err(StoreError::SchemaMismatch { .. })), "got {loaded:?}");
+}
+
+#[tokio::test]
+async fn test_load_opt_under_a_different_key_is_tampered_not_none() {
+    let temp = tempdir().unwrap();
+    let session = unlocked_session().await;
+    let manager =
+        StorageManager::new_with_root(Arc::clone(&session), temp.path().to_path_buf())
+            .await
+            .unwrap();
+    manager
+        .save("mod1", "items", &vec!["secret".to_string()], true)
+        .await
+        .unwrap();
+    // Same data dir, a different vault key (as after a wrong-key unlock).
+    session.lock();
+    session.unlock(SecurityManager::derive_key("other", &[8u8; 16]).await.unwrap());
+    let loaded: Result<Option<Vec<String>>> = manager.load_opt("mod1", "items").await;
+    assert!(matches!(loaded, Err(StoreError::Tampered { .. })), "got {loaded:?}");
+}
+
+#[tokio::test]
+async fn test_db_held_by_another_handle_is_in_use_by_other_process() {
+    let temp = tempdir().unwrap();
+    let first = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
+        .await
+        .unwrap();
+    first.save("mod1", "k", &1u32, false).await.unwrap();
+    // A second manager on the same data dir can't open the DB the first
+    // one still holds (sled's exclusive file lock, as across processes).
+    let second = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
+        .await
+        .unwrap();
+    let loaded: Result<Option<u32>> = second.load_opt("mod1", "k").await;
+    assert!(
+        matches!(loaded, Err(StoreError::InUseByOtherProcess { .. })),
+        "got {loaded:?}"
+    );
 }
 
 #[tokio::test]
@@ -151,8 +189,7 @@ async fn test_encryption_error_without_unlocked_session() {
     let data = "secret".to_string();
     let result = manager.save("mod1", "key1", &data, true).await;
 
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Vault locked"));
+    assert!(matches!(result, Err(StoreError::Locked)), "got {result:?}");
 }
 
 #[tokio::test]
@@ -288,8 +325,7 @@ async fn test_migrate_requires_unlocked_vault_for_encrypted_target() {
         .unwrap();
 
     let result = manager.migrate_module_encryption("mod1", true).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("unlocked"));
+    assert!(matches!(result, Err(StoreError::Locked)), "got {result:?}");
 }
 
 #[tokio::test]
@@ -518,8 +554,7 @@ async fn test_migrate_key_scheme_to_latest_requires_unlocked_vault() {
         .unwrap();
 
     let result = manager.migrate_key_scheme_to_latest("mod1").await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("unlocked"));
+    assert!(matches!(result, Err(StoreError::Locked)), "got {result:?}");
 }
 
 #[tokio::test]

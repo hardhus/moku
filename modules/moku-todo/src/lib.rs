@@ -297,8 +297,12 @@ impl ModuleMeta for TodoModule {
 impl TuiModule for TodoModule {
     async fn init(&mut self, ctx: &mut AppContext) -> Result<()> {
         self.load_error = None;
-        let loaded_items: Result<Option<Vec<Task>>> =
-            ctx.storage.load_opt(ModuleId::TODO.as_str(), "items").await;
+        // Into anyhow so `{e:#}` below shows the whole cause chain.
+        let loaded_items: Result<Option<Vec<Task>>> = ctx
+            .storage
+            .load_opt(ModuleId::TODO.as_str(), "items")
+            .await
+            .map_err(anyhow::Error::from);
 
         match loaded_items {
             Ok(Some(items)) => {

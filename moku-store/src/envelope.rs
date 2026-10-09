@@ -76,7 +76,7 @@ pub const CURRENT_KEY_SCHEME: KeyScheme = KeyScheme::V1;
 /// shape — so this always returns `None` for now; add a `match` arm
 /// here (and use `from_version` instead of `_from_version`) when a real
 /// data-shape change is introduced.
-pub type DataTransform = fn(serde_json::Value) -> anyhow::Result<serde_json::Value>;
+pub type DataTransform = fn(serde_json::Value) -> Result<serde_json::Value, String>;
 
 pub fn data_transform_for_hop(_from_version: u16) -> Option<DataTransform> {
     None

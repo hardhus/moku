@@ -69,12 +69,9 @@ async fn test_storage_corruption_handling() {
     fs::remove_file(blob_path).await.unwrap();
 
     let result: Result<String, _> = manager.load("corrupt_mod", "target_key").await;
-    assert!(result.is_err(), "Should return error for missing blob file");
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("External blob file missing")
+        matches!(result, Err(moku_store::StoreError::MissingBlob { .. })),
+        "a deleted external blob must be reported as MissingBlob"
     );
 }
 

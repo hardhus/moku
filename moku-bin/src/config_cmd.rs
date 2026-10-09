@@ -120,7 +120,7 @@ async fn run_migration(storage: &Arc<StorageManager>, module: &str, target_encry
         report.errors.len()
     );
     for (key, err) in &report.errors {
-        println!("  - {key}: {err}");
+        println!("  - {key}: {}", moku_sys::util::error_chain(err));
     }
     if !report.errors.is_empty() {
         return Err(anyhow!("{} record(s) in '{module}' failed to migrate", report.errors.len()));

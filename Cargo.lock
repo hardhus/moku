@@ -2815,6 +2815,7 @@ dependencies = [
  "moku-config",
  "moku-core",
  "moku-store",
+ "moku-sys",
  "moku-vault",
  "ratatui",
  "serde",
@@ -2829,7 +2830,6 @@ dependencies = [
 name = "moku-store"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "moku-crypto",
  "moku-sys",
  "moku-vault",
@@ -2839,6 +2839,7 @@ dependencies = [
  "sha2",
  "sled",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "zeroize",
