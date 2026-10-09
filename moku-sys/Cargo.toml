@@ -1,0 +1,23 @@
+[package]
+name = "moku-sys"
+version = "0.1.0"
+edition = "2024"
+
+# OS-facing helpers with no UI, crypto or storage dependency: the app's
+# data/config directories, atomic whole-file writes, safe string
+# truncation and the http(s)-only URL opener. Low-level crates
+# (moku-volume-fs, moku-notify, moku-pomodoro-daemon) depend on this
+# instead of moku-core so they never pull in ratatui/crossterm/sled.
+
+[dependencies]
+anyhow.workspace = true
+directories.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+# URL-scheme validation in util::open_url — a defensive check before
+# handing a remote (RSS feed) URL to the OS's default-handler mechanism.
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

@@ -1,6 +1,5 @@
 pub mod config;
 pub mod context;
-pub mod dirs;
 pub mod keys;
 pub mod module;
 pub mod router;
@@ -8,8 +7,11 @@ pub mod security;
 pub mod storage;
 pub mod theme;
 pub mod toast;
-pub mod util;
 pub mod widgets;
+
+// Temporary facade while P2 splits moku-core; removed once every crate
+// imports moku_sys directly.
+pub use moku_sys::{dirs, util};
 
 pub use config::{ConfigManager, MokuConfig};
 pub use context::{AppContext, CliContext, DaemonContext, SuspendRequest};

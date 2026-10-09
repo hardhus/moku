@@ -2524,9 +2524,9 @@ dependencies = [
  "argon2",
  "async-trait",
  "crossterm",
- "directories",
  "futures",
  "hkdf",
+ "moku-sys",
  "rand 0.8.8",
  "ratatui",
  "rpassword",
@@ -2539,8 +2539,6 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
- "url",
- "windows 0.62.2",
  "zeroize",
 ]
 
@@ -2649,7 +2647,7 @@ name = "moku-notify"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "moku-core",
+ "moku-sys",
  "notify-rust",
  "tracing",
  "windows 0.62.2",
@@ -2679,8 +2677,8 @@ name = "moku-pomodoro-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "moku-core",
  "moku-notify",
+ "moku-sys",
  "serde",
  "serde_json",
  "sysinfo",
@@ -2768,6 +2766,18 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
+]
+
+[[package]]
+name = "moku-sys"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "tempfile",
+ "tokio",
+ "url",
+ "windows 0.62.2",
 ]
 
 [[package]]

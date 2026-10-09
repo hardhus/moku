@@ -4,12 +4,12 @@ version = "0.1.1"
 edition = "2024"
 
 [dependencies]
+moku-sys.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 toml.workspace = true
-directories.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -24,13 +24,6 @@ aes-gcm.workspace = true
 rand.workspace = true
 secrecy.workspace = true
 
-# URL-scheme validation in util::open_url — a defensive check before
-# handing a remote (RSS feed) URL to the OS's default-handler mechanism.
-url = "2"
-
-# util::atomic_write: temp file in the target directory + persist (rename).
-tempfile.workspace = true
-
 # security::cli: interactive, no-echo vault password prompts shared by CLI commands.
 rpassword.workspace = true
 
@@ -40,6 +33,6 @@ rpassword.workspace = true
 hkdf = "0.12"
 sha2 = "0.10"
 
-[target.'cfg(windows)'.dependencies]
-windows.workspace = true
+[dev-dependencies]
+tempfile.workspace = true
 
