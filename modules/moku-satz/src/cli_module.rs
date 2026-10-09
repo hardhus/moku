@@ -93,7 +93,7 @@ impl CliModule for NotesCliModule {
             Err(e) => bail!("{e}"),
         };
 
-        let config: NotesConfig = ctx.config.resolve_module_config("notes")?;
+        let config: NotesConfig = ctx.config.resolve_module_config(ModuleId::NOTES.as_str())?;
 
         match parsed.cmd.unwrap_or(NotesCmd::Stats { path: None }) {
             NotesCmd::Index { path } => {

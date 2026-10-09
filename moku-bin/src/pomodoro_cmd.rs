@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use moku_config::MokuConfig;
+use moku_core::ModuleId;
 use moku_pomodoro::engine::PomodoroConfig;
 
 use crate::cli::PomodoroCommands;
@@ -12,7 +13,7 @@ use crate::cli::PomodoroCommands;
 pub async fn handle(sub: &PomodoroCommands, config: &MokuConfig) -> Result<()> {
     match sub {
         PomodoroCommands::Start { name } => {
-            let pomodoro_config: PomodoroConfig = config.resolve_module_config("pomodoro")?;
+            let pomodoro_config: PomodoroConfig = config.resolve_module_config(ModuleId::POMODORO.as_str())?;
             println!(
                 "{}",
                 moku_pomodoro::cli_module::start(&pomodoro_config, name.as_deref()).await?
@@ -20,7 +21,7 @@ pub async fn handle(sub: &PomodoroCommands, config: &MokuConfig) -> Result<()> {
             Ok(())
         }
         PomodoroCommands::List => {
-            let pomodoro_config: PomodoroConfig = config.resolve_module_config("pomodoro")?;
+            let pomodoro_config: PomodoroConfig = config.resolve_module_config(ModuleId::POMODORO.as_str())?;
             println!("{}", moku_pomodoro::cli_module::list(&pomodoro_config));
             Ok(())
         }

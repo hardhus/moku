@@ -13,7 +13,7 @@ use ratatui::{
 };
 
 use moku_config::MokuConfig;
-use moku_core::{AppContext, Command, MokuTheme, resolve_event};
+use moku_core::{AppContext, Command, ModuleId, MokuTheme, resolve_event};
 use moku_sys::util::error_chain;
 
 use super::SettingsTab;
@@ -73,7 +73,7 @@ impl StorageTab {
         let mut state = ListState::default();
         state.select(Some(0));
         let keys = config
-            .get_module_keys("settings")
+            .get_module_keys(ModuleId::SETTINGS.as_str())
             // A broken `[modules.settings.keys]` is reported by the settings
             // module's own event path (`ConfigHandle::module_keys`).
             .ok()

@@ -222,6 +222,7 @@ pub fn build_plan_from_simple_form(form: &SimplePresetForm) -> Plan {
 mod tests {
     use super::*;
     use moku_config::MokuConfig;
+    use moku_core::ModuleId;
 
     fn profile(name: &str, plan: Plan) -> Profile {
         Profile {
@@ -233,7 +234,7 @@ mod tests {
     #[test]
     fn test_default_config_when_module_section_missing() {
         let config = MokuConfig::default();
-        let pomodoro: PomodoroConfig = config.resolve_module_config("pomodoro").unwrap();
+        let pomodoro: PomodoroConfig = config.resolve_module_config(ModuleId::POMODORO.as_str()).unwrap();
         assert_eq!(pomodoro, PomodoroConfig::default());
         assert!(pomodoro.notify);
         assert_eq!(pomodoro.detail, DetailLevel::Seconds);

@@ -46,7 +46,7 @@ impl CliModule for CommitModule {
             return Err(anyhow::anyhow!("GEMINI_API_KEY cannot be empty."));
         }
 
-        let settings: CommitSettings = ctx.config.resolve_module_config("commit")?;
+        let settings: CommitSettings = ctx.config.resolve_module_config(ModuleId::COMMIT.as_str())?;
         let engine = CommitEngine::new(settings.clone());
 
         println!("🔍 Scanning staged changes...");

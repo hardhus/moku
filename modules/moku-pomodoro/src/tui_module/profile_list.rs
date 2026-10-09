@@ -18,7 +18,10 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use moku_core::{AppContext, Command, ConfirmDeleteKey, MokuTheme, resolve_confirm_delete_key, resolve_event};
+use moku_core::{
+    AppContext, Command, ConfirmDeleteKey, ModuleId, MokuTheme, resolve_confirm_delete_key,
+    resolve_event,
+};
 
 use crate::daemon_client;
 use crate::engine::{PomodoroConfig, Profile};
@@ -171,7 +174,7 @@ pub(super) async fn handle_event(
             let Some(name) = state.profiles.get(idx).map(|p| p.name.clone()) else {
                 return Ok(Outcome::None);
             };
-            let mut config: PomodoroConfig = ctx.config.module_config("pomodoro");
+            let mut config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
             config.default_profile = Some(name.clone());
             super::save_config(ctx, &config).await;
             state.sync_from(&config);
@@ -210,7 +213,7 @@ fn clamp_selection(state: &mut ProfileListState, len: usize) {
 /// Removes the profile at `idx` and saves, returning the resulting config
 /// (`None` if `idx` was already out of range).
 async fn delete_profile_at(ctx: &mut AppContext, idx: usize) -> Option<PomodoroConfig> {
-    let mut config: PomodoroConfig = ctx.config.module_config("pomodoro");
+    let mut config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
     if idx >= config.profiles.len() {
         return None;
     }
@@ -228,7 +231,7 @@ async fn start_profile(state: &ProfileListState, idx: usize, ctx: &mut AppContex
         return Outcome::None;
     };
     let name = p.name.clone();
-    let config: PomodoroConfig = ctx.config.module_config("pomodoro");
+    let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
     match daemon_client::start(p.plan.clone(), config.notify).await {
         Ok(()) => {
             ctx.show_info(format!("Started '{name}'."));
@@ -364,7 +367,7 @@ mod tests {
     }
 
     async fn state_from(ctx: &AppContext) -> ProfileListState {
-        let config: PomodoroConfig = ctx.config.module_config("pomodoro");
+        let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
         ProfileListState::new(&config)
     }
 
@@ -386,7 +389,7 @@ mod tests {
         let mut state = state_from(&ctx).await;
         let event = Event::Key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
         handle_event(&mut state, &event, &mut ctx, false).await.unwrap();
-        let config: PomodoroConfig = ctx.config.module_config("pomodoro");
+        let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
         assert!(config.profiles.is_empty());
         assert!(state.profiles.is_empty(), "the cached display list should reflect the deletion");
     }
@@ -395,7 +398,7 @@ mod tests {
     async fn test_confirm_delete_yes_deletes_and_clears_default_if_it_was_default() {
         let mut ctx = create_test_context_with_profiles(vec![simple_profile("basic")]).await;
         ctx.update_config(|cfg| {
-            let mut pc: PomodoroConfig = cfg.resolve_module_config("pomodoro").unwrap();
+            let mut pc: PomodoroConfig = cfg.resolve_module_config(ModuleId::POMODORO.as_str()).unwrap();
             pc.default_profile = Some("basic".to_string());
             cfg.modules.insert("pomodoro".to_string(), toml::Value::try_from(&pc).unwrap());
         });
@@ -404,7 +407,7 @@ mod tests {
         handle_event(&mut state, &key(KeyCode::Char('y')), &mut ctx, false)
             .await
             .unwrap();
-        let config: PomodoroConfig = ctx.config.module_config("pomodoro");
+        let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
         assert!(config.profiles.is_empty());
         assert!(config.default_profile.is_none(), "deleting the default profile should clear default_profile");
     }
@@ -417,7 +420,7 @@ mod tests {
         handle_event(&mut state, &key(KeyCode::Char('x')), &mut ctx, false)
             .await
             .unwrap();
-        let config: PomodoroConfig = ctx.config.module_config("pomodoro");
+        let config: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
         assert_eq!(config.default_profile.as_deref(), Some("kitap"));
         assert_eq!(state.default_profile.as_deref(), Some("kitap"));
     }

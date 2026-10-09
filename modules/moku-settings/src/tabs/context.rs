@@ -60,7 +60,7 @@ impl ContextTab {
         let mut state = ListState::default();
         state.select(Some(0));
         let keys = config
-            .get_module_keys("settings")
+            .get_module_keys(ModuleId::SETTINGS.as_str())
             // A broken `[modules.settings.keys]` is reported by the settings
             // module's own event path (`ConfigHandle::module_keys`).
             .ok()
@@ -103,7 +103,7 @@ impl ContextTab {
             let selected_option = self.options[i];
 
             let mut settings: ContextModuleSettings =
-                ctx.config.module_config("context");
+                ctx.config.module_config(ModuleId::CONTEXT.as_str());
 
             match selected_option {
                 ContextOption::GitIgnore => {
@@ -151,7 +151,7 @@ impl SettingsTab for ContextTab {
 
         // Rendering can't report; a broken table is reported (and shown
         // with its defaults) via `ctx.module_config` on the event path.
-        let settings: ContextModuleSettings = config.resolve_module_config("context").unwrap_or_default();
+        let settings: ContextModuleSettings = config.resolve_module_config(ModuleId::CONTEXT.as_str()).unwrap_or_default();
 
         let items: Vec<ListItem> = self
             .options

@@ -1,9 +1,9 @@
 use std::fmt::Display;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Unique identifier for a module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct ModuleId(&'static str);
 
 impl ModuleId {
@@ -35,7 +35,7 @@ impl ModuleId {
         Self(id)
     }
 
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         self.0
     }
 

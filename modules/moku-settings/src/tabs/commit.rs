@@ -81,7 +81,7 @@ impl CommitTab {
         let mut state = ListState::default();
         state.select(Some(0));
         let keys = config
-            .get_module_keys("settings")
+            .get_module_keys(ModuleId::SETTINGS.as_str())
             // A broken `[modules.settings.keys]` is reported by the settings
             // module's own event path (`ConfigHandle::module_keys`).
             .ok()
@@ -122,7 +122,7 @@ impl CommitTab {
 
     fn start_editing(&mut self, ctx: &AppContext) {
         let Some(i) = self.state.selected() else { return };
-        let settings: CommitModuleSettings = ctx.config.module_config("commit");
+        let settings: CommitModuleSettings = ctx.config.module_config(ModuleId::COMMIT.as_str());
         self.editing = Some(match self.options[i] {
             CommitOption::Model => settings.model.clone().unwrap_or_default(),
             CommitOption::ApiUrl => settings.api_url.clone().unwrap_or_default(),
@@ -132,7 +132,7 @@ impl CommitTab {
 
     fn confirm_editing(&mut self, ctx: &mut AppContext) {
         let (Some(i), Some(buffer)) = (self.state.selected(), self.editing.take()) else { return };
-        let mut settings: CommitModuleSettings = ctx.config.module_config("commit");
+        let mut settings: CommitModuleSettings = ctx.config.module_config(ModuleId::COMMIT.as_str());
         let trimmed = buffer.trim();
         let value = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
         match self.options[i] {
@@ -145,7 +145,7 @@ impl CommitTab {
 
     fn change_numeric(&mut self, ctx: &mut AppContext, direction: i32) {
         let Some(i) = self.state.selected() else { return };
-        let mut settings: CommitModuleSettings = ctx.config.module_config("commit");
+        let mut settings: CommitModuleSettings = ctx.config.module_config(ModuleId::COMMIT.as_str());
         match self.options[i] {
             CommitOption::CharLimit => {
                 let step = 1000;
@@ -225,7 +225,7 @@ impl SettingsTab for CommitTab {
         let theme = MokuTheme::from_config(config);
         // Rendering can't report; a broken table is reported (and shown
         // with its defaults) via `ctx.module_config` on the event path.
-        let settings: CommitModuleSettings = config.resolve_module_config("commit").unwrap_or_default();
+        let settings: CommitModuleSettings = config.resolve_module_config(ModuleId::COMMIT.as_str()).unwrap_or_default();
         let editing_index = self.editing.is_some().then_some(self.state.selected()).flatten();
 
         let items: Vec<ListItem> = self

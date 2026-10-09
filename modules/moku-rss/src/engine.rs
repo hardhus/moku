@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use moku_core::ModuleId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -23,7 +24,7 @@ pub struct FeedItem {
     pub summary: Option<String>,
 }
 
-const STORAGE_NS: &str = "rss";
+const STORAGE_NS: &str = ModuleId::RSS.as_str();
 const FEEDS_KEY: &str = "feeds";
 const ITEMS_KEY: &str = "items";
 const MAX_ITEMS: usize = 200;

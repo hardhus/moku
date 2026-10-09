@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(state.nodes.len(), 2, "a new phase node was added");
         assert!(state.editing.is_some(), "adding a phase opens its editor immediately");
 
-        let saved: PomodoroConfig = ctx.config.module_config("pomodoro");
+        let saved: PomodoroConfig = ctx.config.module_config(ModuleId::POMODORO.as_str());
         assert_eq!(
             saved.profiles[0].plan.len(),
             2,

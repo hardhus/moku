@@ -99,7 +99,7 @@ impl NotesModule {
     // `SecurityManager::derive_key`); `resolve_vault_root` itself is cheap
     // (no I/O), so only the walk needs offloading.
     async fn load(&mut self, ctx: &AppContext) {
-        let config: NotesConfig = ctx.config.module_config("notes");
+        let config: NotesConfig = ctx.config.module_config(ModuleId::NOTES.as_str());
         let result = match resolve_vault_root(&config, None) {
             Ok(root) => {
                 let root_for_index = root.clone();
@@ -420,7 +420,7 @@ impl TuiModule for NotesModule {
     // works even if the module was never opened this session (unlike
     // `self.index`, which is only populated by `load()`/`init()`).
     async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
-        let config: NotesConfig = ctx.config.module_config("notes");
+        let config: NotesConfig = ctx.config.module_config(ModuleId::NOTES.as_str());
         match resolve_vault_root(&config, None).and_then(|root| build_index(&root)) {
             Ok(index) => Some(ModuleStatus::normal(format!(
                 "{} notes",
