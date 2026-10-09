@@ -197,4 +197,49 @@ mod moku_types {
         assert!(frees.checked >= 2, "growth should have moved the buffer");
         assert_eq!(frees.dirty, 0);
     }
+
+    #[test]
+    fn block_aead_wipes_its_cipher_state() {
+        let size = std::mem::size_of::<aes_gcm::Aes256Gcm>();
+        let key = moku_crypto::Key::<moku_crypto::VolumeContentKey>::from_slice(&[7; 32]).unwrap();
+        let frees = track(size, size, || {
+            let block = moku_crypto::BlockAead::new(&key);
+            let disk = block.seal_block(&[0; 24], b"data").unwrap();
+            block.open_block(&[0; 24], &disk).unwrap();
+            drop(block);
+        });
+        assert_eq!(frees, Frees { checked: 1, dirty: 0 });
+    }
+
+    #[test]
+    fn seal_and_open_wipe_their_cipher_states() {
+        use moku_crypto::{Aad, Alg, ExportKey, open, seal};
+        let key = Key::<ExportKey>::from_slice(&[7; 32]).unwrap();
+        let aad = Aad::new("moku/test/v1");
+        for (alg, size) in [
+            (Alg::Aes256Gcm, std::mem::size_of::<aes_gcm::Aes256Gcm>()),
+            (
+                Alg::XChaCha20Poly1305,
+                std::mem::size_of::<chacha20poly1305::XChaCha20Poly1305>(),
+            ),
+        ] {
+            let frees = track(size, size, || {
+                let sealed = seal(&key, alg, &aad, b"data").unwrap();
+                drop(open(&key, &aad, &sealed).unwrap());
+            });
+            assert_eq!(frees.dirty, 0, "{alg:?}");
+            assert!(frees.checked >= 2, "{alg:?}: seal and open each build one");
+        }
+    }
+
+    #[test]
+    fn opened_plaintext_is_wiped() {
+        use moku_crypto::{Aad, Alg, ExportKey, open, seal};
+        let key = Key::<ExportKey>::from_slice(&[7; 32]).unwrap();
+        let aad = Aad::new("moku/test/v1");
+        let sealed = seal(&key, Alg::XChaCha20Poly1305, &aad, &[0x5a; 4096]).unwrap();
+        let frees = track(4096, 4096 + 64, || drop(open(&key, &aad, &sealed).unwrap()));
+        assert!(frees.checked >= 1);
+        assert_eq!(frees.dirty, 0);
+    }
 }

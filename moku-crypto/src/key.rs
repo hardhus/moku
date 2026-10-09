@@ -136,6 +136,16 @@ impl<P: KeyRole, const N: usize> Key<P, N> {
         key.bytes.copy_from_slice(&self.bytes[..]);
         key
     }
+
+    /// Relabels the key as another role without copying it. Only the
+    /// explicitly named conversions in `format_v1` use this.
+    pub(crate) fn into_role<Q: KeyRole>(mut self) -> Key<Q, N> {
+        let bytes = std::mem::replace(&mut self.bytes, alloc_key_box());
+        Key {
+            bytes,
+            _role: PhantomData,
+        }
+    }
 }
 
 impl<P: KeyRole, const N: usize> Drop for Key<P, N> {

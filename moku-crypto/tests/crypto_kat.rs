@@ -73,3 +73,26 @@ fn k7a_production_encrypt_keeps_the_same_framing() {
     assert_eq!(blob.len(), 12 + plaintext.len() + 16);
     assert_eq!(decrypt(&blob, &key).unwrap(), plaintext);
 }
+
+/// K7a through the P3 API: `format_v1` opens the pinned legacy blob.
+#[test]
+fn k7a_format_v1_opens_the_pinned_blob() {
+    let blob: Vec<u8> = (0..K7A_EXPECTED.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&K7A_EXPECTED[i..i + 2], 16).unwrap())
+        .collect();
+    let key = moku_crypto::Key::<moku_crypto::RootKey>::from_slice(&[0x42; 32]).unwrap();
+    let opened = moku_crypto::format_v1::open_gcm_no_aad(&key, &blob).unwrap();
+    assert_eq!(&opened[..], b"foo-kat-plaintext");
+}
+
+/// K6 through the P3 API: `NameSiv` + URL-safe base64 gives the pinned
+/// 0.2.7 volume file name.
+#[test]
+fn k6_name_siv_known_answer() {
+    use base64::Engine as _;
+    let siv = moku_crypto::NameSiv::new(moku_crypto::Key::from_slice(&[5u8; 64]).unwrap());
+    let sealed = siv.seal(&[1u8; 16], b"todo.md").unwrap();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sealed);
+    assert_eq!(encoded, "UJ1gnd9b36kqfhWnlT1Rx1ZwwEodVTw");
+}

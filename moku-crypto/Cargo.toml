@@ -28,3 +28,6 @@ ghash = { workspace = true, features = ["zeroize"] }
 polyval = { workspace = true, features = ["zeroize"] }
 chacha20 = { workspace = true, features = ["zeroize"] }
 poly1305 = { workspace = true, features = ["zeroize"] }
+
+[dev-dependencies]
+base64.workspace = true
