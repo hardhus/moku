@@ -1,6 +1,7 @@
 mod aad;
 mod aead;
 mod block;
+mod cell;
 mod error;
 pub mod format_v1;
 pub mod kdf;
@@ -16,6 +17,7 @@ mod wipe;
 pub use aad::Aad;
 pub use aead::{decrypt, encrypt};
 pub use block::{BLOCK_NONCE_LEN, BlockAead, NameSiv};
+pub use cell::KeyCell;
 pub use error::CryptoError;
 pub use key::{
     AeadKey, Dek, ExportKey, Kek, Key, KeyRole, ModuleStorageKey, PasswordKey, RecoverySecret,
