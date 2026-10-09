@@ -13,7 +13,6 @@ moku-crypto.workspace = true
 moku-sys.workspace = true
 thiserror.workspace = true
 arc-swap.workspace = true
-secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

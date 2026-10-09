@@ -13,15 +13,14 @@ moku-crypto.workspace = true
 moku-sys.workspace = true
 moku-vault.workspace = true
 thiserror.workspace = true
-secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sled.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-zeroize.workspace = true
 # fixture_v0_2_7.rs checks the frozen fixtures against their SHA256SUMS.
-sha2 = "0.10"
+sha2.workspace = true

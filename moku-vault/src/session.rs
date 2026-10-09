@@ -1,7 +1,4 @@
-use std::sync::Arc;
-
-use moku_crypto::{CryptoError, Key, KeyCell, RootKey, SafeKey};
-use secrecy::SecretBox;
+use moku_crypto::{CryptoError, Key, KeyCell, RootKey};
 
 /// Thread-safe, global source of truth for the vault's unlock state.
 ///
@@ -40,13 +37,6 @@ impl VaultSession {
     /// Changes on every unlock and lock.
     pub fn generation(&self) -> u64 {
         self.key.generation()
-    }
-
-    /// Transitional (removed later in P3, once moku-store and
-    /// moku-volume-daemon use `with`): a copy of the key in the old type.
-    pub fn current(&self) -> Option<Arc<SecretBox<SafeKey>>> {
-        self.with(|k| Arc::new(SecretBox::new(Box::new(SafeKey(*k.expose())))))
-            .ok()
     }
 }
 

@@ -395,9 +395,11 @@ async fn test_v0_key_scheme_record_still_loads() {
             .await
             .unwrap();
 
-    let master = session.current().unwrap();
     let raw_bytes = serde_json::to_vec(&"legacy value".to_string()).unwrap();
-    let ciphertext = moku_crypto::encrypt(&raw_bytes, &master).unwrap();
+    let ciphertext = session
+        .with(|master| format_v1::seal_gcm_no_aad(master, &raw_bytes))
+        .unwrap()
+        .unwrap();
     let envelope = StorageEnvelope {
         schema_version: 1,
         status: EncryptionStatus::Encrypted,
@@ -442,13 +444,12 @@ async fn test_save_always_writes_current_key_scheme() {
 /// with the other (AEAD auth failure, not silent garbage).
 #[tokio::test]
 async fn test_per_module_key_differs_from_master_and_cannot_cross_decrypt() {
-    let master = SecretBox::new(Box::new(SafeKey([5u8; 32])));
-    let derived = derive_module_storage_key(&master, "mod1");
-    assert_ne!(master.expose_secret().0, derived.expose_secret().0);
+    let master = Key::<RootKey>::from_slice(&[5u8; 32]).unwrap();
+    let derived = module_storage_key(&master, "mod1");
+    assert_ne!(master.expose(), derived.expose());
 
-    let plaintext = b"hello".to_vec();
-    let ciphertext = moku_crypto::encrypt(&plaintext, &master).unwrap();
-    assert!(moku_crypto::decrypt(&ciphertext, &derived).is_err());
+    let ciphertext = format_v1::seal_gcm_no_aad(&master, b"hello").unwrap();
+    assert!(format_v1::open_gcm_no_aad(&derived, &ciphertext).is_err());
 }
 
 /// `migrate_module_encryption` is purely about the encrypted/plaintext
@@ -464,9 +465,11 @@ async fn test_migrate_module_encryption_no_longer_touches_key_scheme() {
             .await
             .unwrap();
 
-    let master = session.current().unwrap();
     let raw_bytes = serde_json::to_vec(&"legacy value".to_string()).unwrap();
-    let ciphertext = moku_crypto::encrypt(&raw_bytes, &master).unwrap();
+    let ciphertext = session
+        .with(|master| format_v1::seal_gcm_no_aad(master, &raw_bytes))
+        .unwrap()
+        .unwrap();
     let envelope = StorageEnvelope {
         schema_version: 1,
         status: EncryptionStatus::Encrypted,
@@ -512,9 +515,11 @@ async fn test_migrate_key_scheme_to_latest_upgrades_v0_to_current() {
             .await
             .unwrap();
 
-    let master = session.current().unwrap();
     let raw_bytes = serde_json::to_vec(&"legacy value".to_string()).unwrap();
-    let ciphertext = moku_crypto::encrypt(&raw_bytes, &master).unwrap();
+    let ciphertext = session
+        .with(|master| format_v1::seal_gcm_no_aad(master, &raw_bytes))
+        .unwrap()
+        .unwrap();
     let envelope = StorageEnvelope {
         schema_version: 1,
         status: EncryptionStatus::Encrypted,
@@ -618,9 +623,11 @@ async fn test_migrate_all_key_schemes_advances_marker_on_full_success() {
             .unwrap();
     assert_eq!(manager.data_dir_key_scheme_version().await, 0);
 
-    let master = session.current().unwrap();
     let raw_bytes = serde_json::to_vec(&"legacy value".to_string()).unwrap();
-    let ciphertext = moku_crypto::encrypt(&raw_bytes, &master).unwrap();
+    let ciphertext = session
+        .with(|master| format_v1::seal_gcm_no_aad(master, &raw_bytes))
+        .unwrap()
+        .unwrap();
     let envelope = StorageEnvelope {
         schema_version: 1,
         status: EncryptionStatus::Encrypted,

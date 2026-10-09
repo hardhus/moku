@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use secrecy::{ExposeSecret, SecretBox};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::fs;
 use tokio::sync::RwLock;
+use zeroize::Zeroizing;
 
-use moku_crypto::{CryptoError, SafeKey, derive_module_storage_key};
+use moku_crypto::{CryptoError, Key, ModuleStorageKey, RootKey, format_v1, module_storage_key};
 use moku_sys::dirs;
 use moku_vault::VaultSession;
 
@@ -18,6 +18,31 @@ use crate::envelope::{
 };
 
 type Result<T> = std::result::Result<T, StoreError>;
+
+/// The key an envelope is (to be) encrypted with, by `KeyScheme`.
+enum RecordKey {
+    /// `V0`: the raw root key itself (read only; nothing writes V0).
+    V0(Key<RootKey>),
+    /// `V1`: the module's HKDF subkey.
+    V1(Key<ModuleStorageKey>),
+}
+
+impl RecordKey {
+    // Envelopes are still the pre-P3 format (P6 replaces it).
+    fn seal(&self, plaintext: &[u8]) -> std::result::Result<Vec<u8>, CryptoError> {
+        match self {
+            RecordKey::V0(k) => format_v1::seal_gcm_no_aad(k, plaintext),
+            RecordKey::V1(k) => format_v1::seal_gcm_no_aad(k, plaintext),
+        }
+    }
+
+    fn open(&self, data: &[u8]) -> std::result::Result<Zeroizing<Vec<u8>>, CryptoError> {
+        match self {
+            RecordKey::V0(k) => format_v1::open_gcm_no_aad(k, data),
+            RecordKey::V1(k) => format_v1::open_gcm_no_aad(k, data),
+        }
+    }
+}
 
 const EXTERNAL_STORAGE_THRESHOLD: usize = 50 * 1024;
 
@@ -140,18 +165,21 @@ impl StorageManager {
         &self,
         module_id: &str,
         scheme: KeyScheme,
-    ) -> Result<SecretBox<SafeKey>> {
-        let master = self.session.current().ok_or(StoreError::Locked)?;
-        Ok(match scheme {
-            KeyScheme::V0 => SecretBox::new(Box::new(master.expose_secret().clone())),
-            KeyScheme::V1 => derive_module_storage_key(&master, module_id),
-        })
+    ) -> Result<RecordKey> {
+        // The root key is only borrowed long enough to derive (or, for a
+        // V0 read, copy) the record key.
+        self.session
+            .with(|root| match scheme {
+                KeyScheme::V0 => RecordKey::V0(root.duplicate()),
+                KeyScheme::V1 => RecordKey::V1(module_storage_key(root, module_id)),
+            })
+            .map_err(|_| StoreError::Locked)
     }
 
     /// Derives the write key for `module_id` — always under
     /// `CURRENT_KEY_SCHEME`, never an older scheme. Every new write uses
     /// this, unconditionally.
-    fn resolve_write_key(&self, module_id: &str) -> Result<SecretBox<SafeKey>> {
+    fn resolve_write_key(&self, module_id: &str) -> Result<RecordKey> {
         self.resolve_key_for_scheme(module_id, CURRENT_KEY_SCHEME)
     }
 
@@ -160,7 +188,7 @@ impl StorageManager {
     /// written before per-module subkeys existed, and forever if a user
     /// never explicitly migrates) still decrypts with the raw master
     /// key, exactly as before; `V1` envelopes use the derived subkey.
-    fn resolve_read_key(&self, module_id: &str, scheme: KeyScheme) -> Result<SecretBox<SafeKey>> {
+    fn resolve_read_key(&self, module_id: &str, scheme: KeyScheme) -> Result<RecordKey> {
         self.resolve_key_for_scheme(module_id, scheme)
     }
 
@@ -201,10 +229,12 @@ impl StorageManager {
     ) -> Result<()> {
         let (_, blobs_path) = self.prepare_module_paths(module_id).await?;
         let db = self.get_or_open_db(module_id).await?;
-        let raw_bytes = serde_json::to_vec(data).map_err(StoreError::Encode)?;
+        // The plaintext JSON is wiped once it has been encrypted (or, for a
+        // plaintext module, written).
+        let raw_bytes = Zeroizing::new(serde_json::to_vec(data).map_err(StoreError::Encode)?);
 
         // Every new write uses the derived per-module subkey — never the
-        // raw master key directly (see moku_crypto::derive_module_storage_key).
+        // raw master key directly (see moku_crypto::module_storage_key).
         let session_key = if is_encryption_enabled {
             Some(self.resolve_write_key(module_id)?)
         } else {
@@ -216,12 +246,9 @@ impl StorageManager {
 
         let (final_payload, storage_type) = tokio::task::spawn_blocking(move || {
             let (processed_payload, status) = if let Some(k) = session_key {
-                (
-                    moku_crypto::encrypt(&raw_bytes, &k)?,
-                    EncryptionStatus::Encrypted,
-                )
+                (k.seal(&raw_bytes)?, EncryptionStatus::Encrypted)
             } else {
-                (raw_bytes, EncryptionStatus::Plaintext)
+                (raw_bytes.to_vec(), EncryptionStatus::Plaintext)
             };
 
             let storage_type = if processed_payload.len() > EXTERNAL_STORAGE_THRESHOLD {
@@ -355,9 +382,9 @@ impl StorageManager {
 
         let decrypted = tokio::task::spawn_blocking(move || {
             if let Some(k) = session_key {
-                moku_crypto::decrypt(&raw_data, &k)
+                k.open(&raw_data)
             } else {
-                Ok(raw_data)
+                Ok(Zeroizing::new(raw_data))
             }
         })
         .await?;
@@ -484,7 +511,7 @@ impl StorageManager {
         module_id: &str,
         target_encrypted: bool,
     ) -> Result<MigrationReport> {
-        if target_encrypted && self.session.current().is_none() {
+        if target_encrypted && !self.session.is_unlocked() {
             return Err(StoreError::Locked);
         }
 
@@ -546,7 +573,7 @@ impl StorageManager {
     /// encrypted record forward to a newer key scheme. Idempotent — a
     /// record already on `CURRENT_KEY_SCHEME` is left untouched.
     pub async fn migrate_key_scheme_to_latest(&self, module_id: &str) -> Result<MigrationReport> {
-        if self.session.current().is_none() {
+        if !self.session.is_unlocked() {
             return Err(StoreError::Locked);
         }
 
