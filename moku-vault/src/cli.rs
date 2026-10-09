@@ -8,7 +8,7 @@
 use anyhow::{Result, anyhow, bail};
 use zeroize::Zeroizing;
 
-use super::{SecurityManager, VaultSession};
+use crate::{SecurityManager, VaultSession};
 
 fn read_password(label: &str) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(

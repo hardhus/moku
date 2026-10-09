@@ -2525,8 +2525,8 @@ dependencies = [
  "futures",
  "moku-crypto",
  "moku-sys",
+ "moku-vault",
  "ratatui",
- "rpassword",
  "secrecy",
  "serde",
  "serde_json",
@@ -2809,6 +2809,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "moku-vault"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "moku-crypto",
+ "moku-sys",
+ "rpassword",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "moku-volume-daemon"
 version = "0.1.0"
 dependencies = [
@@ -2860,7 +2877,7 @@ dependencies = [
  "anyhow",
  "fuser",
  "libc",
- "moku-core",
+ "moku-vault",
  "moku-volume-fs",
  "tempfile",
  "tokio",

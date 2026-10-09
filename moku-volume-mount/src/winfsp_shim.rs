@@ -696,7 +696,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let master_key = rt.block_on(async {
             let security =
-                moku_core::SecurityManager::new_with_root(volume_tmp.path().to_path_buf());
+                moku_vault::SecurityManager::new_with_root(volume_tmp.path().to_path_buf());
             security
                 .initialize_vault(zeroize::Zeroizing::new("smoke-test-password".to_string()))
                 .await
@@ -806,7 +806,7 @@ mod tests {
         let quota_tmp = tempfile::tempdir().expect("tempdir");
         let quota_master_key = rt.block_on(async {
             let security =
-                moku_core::SecurityManager::new_with_root(quota_tmp.path().to_path_buf());
+                moku_vault::SecurityManager::new_with_root(quota_tmp.path().to_path_buf());
             security
                 .initialize_vault(zeroize::Zeroizing::new("quota-test-password".to_string()))
                 .await
@@ -833,7 +833,7 @@ mod tests {
     fn open_test_engine(root: &std::path::Path, password: &str, limit: u64) -> VolumeEngine {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         let master_key = rt.block_on(async {
-            let security = moku_core::SecurityManager::new_with_root(root.to_path_buf());
+            let security = moku_vault::SecurityManager::new_with_root(root.to_path_buf());
             security
                 .initialize_vault(zeroize::Zeroizing::new(password.to_string()))
                 .await

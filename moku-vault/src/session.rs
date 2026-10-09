@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use secrecy::SecretBox;
 
-use crate::security::manager::SafeKey;
+use crate::manager::SafeKey;
 
 /// Thread-safe, global source of truth for the vault's unlock state.
 /// Shares the key pointer via `Arc` without copying the underlying secret.
@@ -44,7 +44,7 @@ impl Default for VaultSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::manager::SecurityManager;
+    use crate::manager::SecurityManager;
 
     #[tokio::test]
     async fn test_vault_session_lifecycle() {

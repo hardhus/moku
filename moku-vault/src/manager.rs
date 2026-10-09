@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use zeroize::Zeroizing;
 
-use crate::dirs;
+use moku_sys::dirs;
 
 // Temporary facade while P2 splits moku-core: `SafeKey` and the AES-GCM /
 // Argon2 primitives now live in moku-crypto. Removed once every crate
@@ -94,7 +94,7 @@ impl SecurityManager {
         }
 
         let json = serde_json::to_string_pretty(&meta)?;
-        crate::util::atomic_write_async(path, json.into_bytes()).await?;
+        moku_sys::util::atomic_write_async(path, json.into_bytes()).await?;
 
         Ok(key)
     }

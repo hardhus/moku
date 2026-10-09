@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 moku-sys.workspace = true
 moku-crypto.workspace = true
+moku-vault.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 anyhow.workspace = true
@@ -21,9 +22,6 @@ futures.workspace = true
 sled.workspace = true
 zeroize.workspace = true
 secrecy.workspace = true
-
-# security::cli: interactive, no-echo vault password prompts shared by CLI commands.
-rpassword.workspace = true
 
 
 [dev-dependencies]

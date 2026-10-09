@@ -33,7 +33,7 @@ fuser = "0.18"
 libc = "0.2"
 
 [dev-dependencies]
-moku-core.workspace = true
+moku-vault.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
 zeroize.workspace = true
