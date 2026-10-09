@@ -17,6 +17,7 @@ use moku_core::{
 };
 
 #[derive(Deserialize, Default, Clone)]
+#[serde(default)]
 struct DashboardKeyConfig {
     #[serde(default)]
     pub keys: HashMap<String, String>,

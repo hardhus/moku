@@ -20,6 +20,7 @@ pub mod model;
 use model::{Task, ViewRow, build_view, collect_subtree_ids, has_children, now_secs};
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct TodoKeyConfig {
     pub keys: HashMap<String, String>,
 }

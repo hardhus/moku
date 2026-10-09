@@ -12,6 +12,7 @@ use moku_pomodoro_daemon::{Block, PhaseKind, Plan, RepeatCount};
 use serde::Deserialize;
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct PomodoroKeyConfig {
     pub keys: HashMap<String, String>,
 }
@@ -370,6 +371,26 @@ pub fn next_node_id(nodes: &[EditNode]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `[modules.pomodoro]` table without a `keys` sub-table (every
+    /// config that never customized pomodoro keys) must read as "no
+    /// overrides", not as an invalid table. Found by the P2 moku_dev
+    /// check: without `#[serde(default)]` this raised a config warning.
+    #[test]
+    fn test_key_config_without_keys_table_is_valid() {
+        let table: toml::Value = toml::from_str(
+            "detail = \"seconds\"
+notify = true
+[[profiles]]
+name = \"test\"
+",
+        )
+        .unwrap();
+        let mut config = moku_config::MokuConfig::default();
+        config.modules.insert("pomodoro".to_string(), table);
+        let keys: PomodoroKeyConfig = config.resolve_module_config("pomodoro").unwrap();
+        assert!(keys.keys.is_empty());
+    }
 
     #[test]
     fn test_tab_order_skips_hidden_fields_when_long_break_off_and_infinite() {

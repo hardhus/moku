@@ -17,6 +17,7 @@ use moku_core::{AppContext, Command, ModuleId, MokuTheme, resolve_event};
 use super::SettingsTab;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(default)]
 struct ContextModuleSettings {
     pub use_gitignore: bool,
     pub char_limit: usize,

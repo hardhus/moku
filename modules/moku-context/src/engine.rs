@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 /// Configuration settings required for the context module.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct ContextSettings {
     #[serde(default)]
     pub use_gitignore: bool,
