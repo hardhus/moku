@@ -18,7 +18,7 @@ pub(crate) fn execute(action: &NotificationAction) {
     match action {
         NotificationAction::OpenUrl(url) => {
             if let Err(e) = moku_sys::util::open_url(url) {
-                tracing::warn!("Bildirim tıklaması: URL açılamadı: {e}");
+                tracing::warn!("Bildirim tıklaması: URL açılamadı: {e:#}");
             }
         }
     }

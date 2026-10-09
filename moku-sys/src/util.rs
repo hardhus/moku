@@ -1,7 +1,29 @@
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+/// A failed [`atomic_write`]: which step failed, for which target file.
+/// The target itself is untouched whenever this is returned.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to {step} for {}", path.display())]
+pub struct AtomicWriteError {
+    pub path: PathBuf,
+    pub step: &'static str,
+    #[source]
+    pub source: io::Error,
+}
+
+/// A URL [`open_url`] refused or failed to open.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenUrlError {
+    #[error("invalid URL")]
+    Invalid(#[from] url::ParseError),
+    #[error("refusing to open a non-http(s) URL: {0}")]
+    UnsupportedScheme(String),
+    #[error("failed to launch the URL handler")]
+    Launch(#[source] io::Error),
+    #[error("ShellExecuteW failed to open URL (code {0})")]
+    ShellExecute(isize),
+}
 
 /// Writes `bytes` to `path` atomically: the data goes to a temp file in the
 /// same directory, is fsynced, and is then renamed over `path` (replacing
@@ -12,30 +34,40 @@ use anyhow::{Context, Result, bail};
 /// files, ...) should go through this instead of a plain `fs::write`.
 ///
 /// The parent directory must already exist.
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
+    let fail = |step| {
+        move |source| AtomicWriteError {
+            path: path.to_path_buf(),
+            step,
+            source,
+        }
+    };
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)
-        .with_context(|| format!("failed to create a temp file next to {}", path.display()))?;
-    tmp.write_all(bytes)
-        .with_context(|| format!("failed to write temp file for {}", path.display()))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(fail("create a temp file"))?;
+    tmp.write_all(bytes).map_err(fail("write the temp file"))?;
     tmp.as_file()
         .sync_all()
-        .with_context(|| format!("failed to fsync temp file for {}", path.display()))?;
+        .map_err(fail("fsync the temp file"))?;
     tmp.persist(path)
         .map_err(|e| e.error)
-        .with_context(|| format!("failed to replace {}", path.display()))?;
+        .map_err(fail("replace the file"))?;
     Ok(())
 }
 
 /// Async wrapper around [`atomic_write`] for callers on the tokio runtime,
 /// so the fsync never blocks an async worker thread.
-pub async fn atomic_write_async(path: PathBuf, bytes: Vec<u8>) -> Result<()> {
+pub async fn atomic_write_async(path: PathBuf, bytes: Vec<u8>) -> Result<(), AtomicWriteError> {
+    let target = path.clone();
     tokio::task::spawn_blocking(move || atomic_write(&path, &bytes))
         .await
-        .context("atomic_write task panicked")?
+        .map_err(|e| AtomicWriteError {
+            path: target,
+            step: "run the write task",
+            source: io::Error::other(e),
+        })?
 }
 
 /// Truncates `s` to at most `max_bytes` bytes without splitting a UTF-8
@@ -57,7 +89,7 @@ pub fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
 /// bu tek yeri paylaşır — mantık iki kez yazılmıyor. `url` bir RSS
 /// feed'inden (uzak, güvenilmeyen bir kaynaktan) geldiği için önce şema
 /// doğrulanıyor — sadece `http`/`https` kabul ediliyor.
-pub fn open_url(url: &str) -> Result<()> {
+pub fn open_url(url: &str) -> Result<(), OpenUrlError> {
     require_http_scheme(url)?;
 
     #[cfg(target_os = "windows")]
@@ -66,11 +98,17 @@ pub fn open_url(url: &str) -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(url).spawn()?;
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(OpenUrlError::Launch)?;
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        std::process::Command::new("xdg-open").arg(url).spawn()?;
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(OpenUrlError::Launch)?;
     }
     Ok(())
 }
@@ -78,10 +116,10 @@ pub fn open_url(url: &str) -> Result<()> {
 /// Rejects anything that isn't a well-formed `http`/`https` URL — split
 /// out from `open_url` so it can be unit-tested without actually invoking
 /// the OS's URL-open mechanism (which would launch a real browser).
-fn require_http_scheme(url: &str) -> Result<()> {
-    let parsed = url::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid URL: {e}"))?;
+fn require_http_scheme(url: &str) -> Result<(), OpenUrlError> {
+    let parsed = url::Url::parse(url)?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        bail!("refusing to open a non-http(s) URL: {url}");
+        return Err(OpenUrlError::UnsupportedScheme(url.to_string()));
     }
     Ok(())
 }
@@ -97,7 +135,7 @@ fn require_http_scheme(url: &str) -> Result<()> {
 /// spawned). Calling the Shell API directly never invokes a command
 /// interpreter, so there's nothing left to re-parse.
 #[cfg(target_os = "windows")]
-fn open_url_windows(url: &str) -> Result<()> {
+fn open_url_windows(url: &str) -> Result<(), OpenUrlError> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::{HSTRING, PCWSTR};
@@ -120,10 +158,7 @@ fn open_url_windows(url: &str) -> Result<()> {
     // ShellExecuteW returns a pseudo-HINSTANCE that's > 32 on success (a
     // legacy Win16 convention it still follows), not a real handle.
     if (result.0 as isize) <= 32 {
-        bail!(
-            "ShellExecuteW failed to open URL (code {})",
-            result.0 as isize
-        );
+        return Err(OpenUrlError::ShellExecute(result.0 as isize));
     }
     Ok(())
 }
@@ -143,15 +178,18 @@ mod tests {
         // The exact injection this guards against: a malicious RSS feed
         // item whose `link` isn't a URL moku should ever hand to the OS's
         // default-handler mechanism at all.
-        assert!(require_http_scheme("file:///etc/passwd").is_err());
-        assert!(require_http_scheme("javascript:alert(1)").is_err());
-        assert!(require_http_scheme("ftp://example.com").is_err());
+        for url in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com"] {
+            assert!(
+                matches!(require_http_scheme(url), Err(OpenUrlError::UnsupportedScheme(u)) if u == url),
+                "{url} must be refused as an unsupported scheme"
+            );
+        }
     }
 
     #[test]
     fn test_require_http_scheme_rejects_malformed_urls() {
-        assert!(require_http_scheme("not a url at all").is_err());
-        assert!(require_http_scheme("").is_err());
+        assert!(matches!(require_http_scheme("not a url at all"), Err(OpenUrlError::Invalid(_))));
+        assert!(matches!(require_http_scheme(""), Err(OpenUrlError::Invalid(_))));
     }
 
     #[test]
@@ -174,7 +212,9 @@ mod tests {
     fn test_atomic_write_fails_when_parent_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing").join("state.json");
-        assert!(atomic_write(&path, b"x").is_err());
+        let err = atomic_write(&path, b"x").unwrap_err();
+        assert_eq!(err.path, path);
+        assert_eq!(err.step, "create a temp file");
         assert!(!path.exists());
     }
 

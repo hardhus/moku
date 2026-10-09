@@ -1,7 +1,26 @@
+use std::io;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
 use directories::ProjectDirs;
+
+/// Why one of moku's directories couldn't be resolved or created.
+#[derive(Debug, thiserror::Error)]
+pub enum DirsError {
+    #[error(
+        "failed to determine the user home directory, or access to system paths was denied"
+    )]
+    NoProjectDirs,
+    #[error("failed to determine the current executable's directory")]
+    CurrentExe(#[source] Option<io::Error>),
+    #[error("failed to create {}", path.display())]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+type Result<T> = std::result::Result<T, DirsError>;
 
 pub fn get_project_dirs() -> Result<ProjectDirs> {
     let app_name = if cfg!(debug_assertions) {
@@ -9,8 +28,7 @@ pub fn get_project_dirs() -> Result<ProjectDirs> {
     } else {
         "moku"
     };
-    ProjectDirs::from("com", "hardhus", app_name)
-        .context("Failed to determine user home directory or access to system paths was denied.")
+    ProjectDirs::from("com", "hardhus", app_name).ok_or(DirsError::NoProjectDirs)
 }
 
 fn detect_portable_root() -> Option<PathBuf> {
@@ -35,13 +53,14 @@ fn detect_portable_root() -> Option<PathBuf> {
 }
 
 pub fn init_portable_mode() -> Result<()> {
-    let exe = std::env::current_exe().context("Failed to determine current executable path")?;
-    let exe_dir = exe
-        .parent()
-        .context("Failed to get directory of current executable")?;
+    let exe = std::env::current_exe().map_err(|e| DirsError::CurrentExe(Some(e)))?;
+    let exe_dir = exe.parent().ok_or(DirsError::CurrentExe(None))?;
     let portable = exe_dir.join("moku-data");
     if !portable.exists() {
-        std::fs::create_dir_all(&portable).context("Failed to create moku-data directory")?;
+        std::fs::create_dir_all(&portable).map_err(|source| DirsError::CreateDir {
+            path: portable.clone(),
+            source,
+        })?;
         println!("✅ Portable mode initialized at: {:?}", portable);
     } else {
         println!("ℹ️ Portable mode already active at: {:?}", portable);

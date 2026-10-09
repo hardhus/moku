@@ -2847,9 +2847,9 @@ dependencies = [
 name = "moku-sys"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "directories",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "url",
  "windows 0.62.2",
