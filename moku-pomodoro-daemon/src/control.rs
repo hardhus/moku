@@ -49,7 +49,7 @@ fn pipe_name() -> &'static str {
 
 #[cfg(unix)]
 fn socket_path() -> Result<std::path::PathBuf> {
-    Ok(moku_core::dirs::get_data_dir()?.join("pomodoro-control.sock"))
+    Ok(moku_sys::dirs::get_data_dir()?.join("pomodoro-control.sock"))
 }
 
 /// Listens for incoming control-channel connections. Only one `Listener`

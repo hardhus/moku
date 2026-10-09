@@ -59,7 +59,7 @@ fn register() -> anyhow::Result<()> {
 }
 
 fn extract_icon() -> anyhow::Result<PathBuf> {
-    let data_dir = moku_core::dirs::get_data_dir()?;
+    let data_dir = moku_sys::dirs::get_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
     let path = data_dir.join("moku.ico");
     std::fs::write(&path, ICON_ICO_BYTES)?;

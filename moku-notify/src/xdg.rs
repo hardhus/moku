@@ -42,7 +42,7 @@ pub(crate) fn send(req: NotificationRequest) {
 }
 
 fn extract_icon() -> anyhow::Result<std::path::PathBuf> {
-    let data_dir = moku_core::dirs::get_data_dir()?;
+    let data_dir = moku_sys::dirs::get_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
     let path = data_dir.join("moku-icon.png");
     std::fs::write(&path, ICON_PNG_BYTES)?;

@@ -17,7 +17,7 @@ pub enum NotificationAction {
 pub(crate) fn execute(action: &NotificationAction) {
     match action {
         NotificationAction::OpenUrl(url) => {
-            if let Err(e) = moku_core::util::open_url(url) {
+            if let Err(e) = moku_sys::util::open_url(url) {
                 tracing::warn!("Bildirim tıklaması: URL açılamadı: {e}");
             }
         }
