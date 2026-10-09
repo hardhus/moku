@@ -1,6 +1,6 @@
 use ratatui::style::Color;
 
-use crate::config::{MokuConfig, ThemeColors};
+use moku_config::{MokuConfig, ThemeColors};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MokuTheme {

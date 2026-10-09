@@ -50,7 +50,7 @@ impl DaemonStatusModule {
         self.autostart_enabled = std::env::current_exe()
             .map(|exe| crate::autostart::is_autostart_enabled(&exe, AUTOSTART_ARGS))
             .unwrap_or(false);
-        self.task_statuses = moku_core::dirs::get_data_dir()
+        self.task_statuses = moku_sys::dirs::get_data_dir()
             .ok()
             .map(|d| crate::task_status::read_statuses(&d))
             .unwrap_or_default();
@@ -283,7 +283,7 @@ impl TuiModule for DaemonStatusModule {
                     let status = match &t.last_error {
                         None => format!("OK (processed: {})", t.last_item_count),
                         Some(e) => {
-                            format!("ERR: {}", moku_core::util::truncate_at_char_boundary(e, 40))
+                            format!("ERR: {}", moku_sys::util::truncate_at_char_boundary(e, 40))
                         }
                     };
                     ListItem::new(format!(

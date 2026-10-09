@@ -3,7 +3,7 @@
 //! default, whether phase transitions notify, and how much countdown
 //! detail the TUI shows. Read/write through the same
 //! `MokuConfig.modules`/`resolve_module_config` machinery every other
-//! module uses — see `moku-core/src/config/schema.rs`.
+//! module uses — see `moku-config/src/schema.rs`.
 
 use std::time::Duration;
 
@@ -221,7 +221,7 @@ pub fn build_plan_from_simple_form(form: &SimplePresetForm) -> Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moku_core::MokuConfig;
+    use moku_config::MokuConfig;
 
     fn profile(name: &str, plan: Plan) -> Profile {
         Profile {

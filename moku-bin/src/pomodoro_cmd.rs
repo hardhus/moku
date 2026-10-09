@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use moku_core::MokuConfig;
+use moku_config::MokuConfig;
 use moku_pomodoro::engine::PomodoroConfig;
 
 use crate::cli::PomodoroCommands;

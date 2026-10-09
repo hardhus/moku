@@ -5,7 +5,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt};
 
-use moku_core::dirs;
+use moku_sys::dirs;
 
 use crate::tui;
 

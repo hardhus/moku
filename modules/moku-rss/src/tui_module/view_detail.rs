@@ -55,7 +55,7 @@ pub(super) async fn handle_detail_event(
                     changed = true;
                 }
                 KeyCode::Char('o') => {
-                    match moku_core::util::open_url(&item.link) {
+                    match moku_sys::util::open_url(&item.link) {
                         Ok(_) => ctx.show_info("Opening in browser..."),
                         Err(e) => ctx.show_error(format!("Failed to open: {e:#}")),
                     }

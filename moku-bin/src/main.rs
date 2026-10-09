@@ -14,9 +14,10 @@ mod tui;
 mod utils;
 mod volume_cmd;
 
-use moku_core::{
-    CliContext, ConfigManager, ModuleId, MokuConfig, SecurityManager, StorageManager, VaultSession,
-};
+use moku_config::{ConfigManager, MokuConfig};
+use moku_core::{CliContext, ModuleId};
+use moku_store::StorageManager;
+use moku_vault::{SecurityManager, VaultSession};
 
 use crate::app_loop::run;
 use crate::cli::{Cli, Commands, DaemonCommands};
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.portable {
-        moku_core::dirs::init_portable_mode().map_err(|e| eyre!(e))?;
+        moku_sys::dirs::init_portable_mode().map_err(|e| eyre!(e))?;
     }
 
     if let Some(Commands::Daemon { sub: Some(sub_cmd) }) = &cli.command {
@@ -223,7 +224,7 @@ async fn main() -> Result<()> {
     // upgrade once the vault actually gets unlocked.
     let stored_key_scheme_version = storage.data_dir_key_scheme_version().await;
     let schema_versions_behind =
-        moku_core::CURRENT_KEY_SCHEME.version().saturating_sub(stored_key_scheme_version);
+        moku_store::CURRENT_KEY_SCHEME.version().saturating_sub(stored_key_scheme_version);
 
     run(
         config,

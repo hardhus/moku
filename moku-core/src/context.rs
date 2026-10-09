@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::config::MokuConfig;
+use moku_config::MokuConfig;
 use crate::module::ModuleId;
-use crate::security::{SecurityManager, VaultSession};
-use crate::storage::StorageManager;
+use moku_store::StorageManager;
+use moku_vault::{SecurityManager, VaultSession};
 use crate::toast::ToastType;
 
 /// A request to suspend the TUI, run an external command with inherited
@@ -133,7 +133,7 @@ pub struct DaemonContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::SecurityManager;
+    use moku_vault::SecurityManager;
     use tempfile::tempdir;
 
     async fn test_ctx() -> AppContext {

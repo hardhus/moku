@@ -80,7 +80,7 @@ impl TodoModule {
             return;
         }
         let encrypt =
-            moku_core::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true);
+            moku_config::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true);
         if let Err(e) = ctx
             .storage
             .save(ModuleId::TODO.as_str(), "items", &self.items, encrypt)
@@ -543,7 +543,7 @@ impl TuiModule for TodoModule {
 
     async fn dashboard_summary(&self, ctx: &AppContext) -> Option<ModuleStatus> {
         let needs_vault =
-            moku_core::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true);
+            moku_config::resolve_encryption(&ctx.config.load(), ModuleId::TODO.as_str(), true);
         if needs_vault && !ctx.session.is_unlocked() {
             return Some(ModuleStatus::locked());
         }
@@ -566,8 +566,9 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use crossterm::event::{KeyEvent, KeyModifiers};
-    use moku_core::security::{SecurityManager, VaultSession};
-    use moku_core::{MokuConfig, StorageManager};
+    use moku_config::MokuConfig;
+    use moku_store::StorageManager;
+    use moku_vault::{SecurityManager, VaultSession};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tempfile::tempdir;

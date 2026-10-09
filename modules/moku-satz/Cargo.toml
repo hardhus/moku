@@ -25,6 +25,9 @@ satz-core = { git = "https://github.com/hardhus/satz" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
+moku-vault.workspace = true
+moku-store.workspace = true
+moku-config.workspace = true
 tempfile.workspace = true
 arc-swap.workspace = true
 tokio.workspace = true

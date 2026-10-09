@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::config::KeyBindings;
+use moku_config::KeyBindings;
 
 /// Standard commands used throughout the application.
 #[derive(Debug, PartialEq, Clone)]
@@ -217,7 +217,7 @@ pub fn keys_match(key_event: KeyEvent, config_str: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::KeyBindings;
+    use moku_config::KeyBindings;
 
     // Helper to create a KeyEvent easily
     fn make_key(code: KeyCode, modifiers: KeyModifiers) -> Event {

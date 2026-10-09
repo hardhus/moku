@@ -8,7 +8,8 @@ pub mod general;
 pub mod keybindings;
 pub mod storage;
 
-use moku_core::{AppContext, MokuConfig};
+use moku_config::MokuConfig;
+use moku_core::AppContext;
 
 pub trait SettingsTab {
     fn title(&self) -> &str;

@@ -139,7 +139,7 @@ async fn save_config(ctx: &mut AppContext, config: &PomodoroConfig) {
         cfg.modules.insert(ModuleId::POMODORO.as_str().to_string(), value);
     });
     let snapshot = (**ctx.config.load()).clone();
-    if let Err(e) = moku_core::ConfigManager::save(&snapshot).await {
+    if let Err(e) = moku_config::ConfigManager::save(&snapshot).await {
         ctx.show_error(format!("Pomodoro: failed to save settings: {e:#}"));
     }
 }

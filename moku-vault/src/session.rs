@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use secrecy::SecretBox;
 
-use crate::manager::SafeKey;
+use moku_crypto::SafeKey;
 
 /// Thread-safe, global source of truth for the vault's unlock state.
 /// Shares the key pointer via `Arc` without copying the underlying secret.

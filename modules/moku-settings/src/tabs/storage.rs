@@ -12,7 +12,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use moku_core::{AppContext, Command, MokuConfig, MokuTheme, resolve_event};
+use moku_config::MokuConfig;
+use moku_core::{AppContext, Command, MokuTheme, resolve_event};
 
 use super::SettingsTab;
 
@@ -21,7 +22,7 @@ use super::SettingsTab;
 /// and with moku-bin/src/config_cmd.rs's identical list for the CLI
 /// equivalent. `secrets` is included so `[m]`/`[Shift+M]` can also
 /// re-key it to the current per-module HKDF storage key scheme (see
-/// `moku-core/src/storage/keys.rs`) — without it here, a user's real
+/// `moku-crypto/src/subkey.rs`) — without it here, a user's real
 /// secrets would never get an in-app trigger to migrate off the legacy
 /// raw-master-key scheme.
 const ENCRYPTABLE_MODULES: &[(&str, bool)] =
@@ -245,7 +246,7 @@ impl SettingsTab for StorageTab {
                     KeyCode::Char('m') if key.modifiers.is_empty() => {
                         if let Some(StorageOption::Module(idx)) = self.state.selected().map(|i| self.options[i]) {
                             let (module, module_default) = ENCRYPTABLE_MODULES[idx];
-                            let target = moku_core::resolve_encryption(&ctx.config.load(), module, module_default);
+                            let target = moku_config::resolve_encryption(&ctx.config.load(), module, module_default);
                             self.migrate(ctx, vec![(module, target)]);
                         }
                     }
@@ -253,7 +254,7 @@ impl SettingsTab for StorageTab {
                         let cfg = ctx.config.load();
                         let modules: Vec<(&'static str, bool)> = ENCRYPTABLE_MODULES
                             .iter()
-                            .map(|(m, d)| (*m, moku_core::resolve_encryption(&cfg, m, *d)))
+                            .map(|(m, d)| (*m, moku_config::resolve_encryption(&cfg, m, *d)))
                             .collect();
                         drop(cfg);
                         self.migrate(ctx, modules);
@@ -291,7 +292,7 @@ impl SettingsTab for StorageTab {
                         match override_value {
                             None => format!(
                                 "Inherit ({})",
-                                if moku_core::resolve_encryption(config, module, module_default) {
+                                if moku_config::resolve_encryption(config, module, module_default) {
                                     "encrypted"
                                 } else {
                                     "plaintext"
@@ -356,8 +357,9 @@ mod tests {
     use std::sync::Arc;
 
     use arc_swap::ArcSwap;
-    use moku_core::security::{SecurityManager, VaultSession};
-    use moku_core::{MokuConfig, StorageManager};
+    use moku_config::MokuConfig;
+    use moku_store::StorageManager;
+    use moku_vault::{SecurityManager, VaultSession};
     use tempfile::tempdir;
 
     use super::*;

@@ -11,7 +11,8 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use moku_core::{AppContext, Command, MokuConfig, MokuTheme, resolve_event};
+use moku_config::MokuConfig;
+use moku_core::{AppContext, Command, MokuTheme, resolve_event};
 
 use super::SettingsTab;
 

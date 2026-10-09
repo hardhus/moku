@@ -137,7 +137,7 @@ async fn v0_2_7_wrong_password_is_rejected() {
     );
 }
 
-/// K7b — a real `SecurityManager::encrypt` output (under the K1 key) from
+/// K7b — a real `moku_crypto::encrypt` output (under the K1 key) from
 /// 0.2.7 still decrypts.
 #[tokio::test]
 async fn k7b_legacy_gcm_fixture_decrypts() {
@@ -146,7 +146,7 @@ async fn k7b_legacy_gcm_fixture_decrypts() {
         .await
         .unwrap();
     assert_eq!(
-        SecurityManager::decrypt(&blob, &key).unwrap(),
+        moku_crypto::decrypt(&blob, &key).unwrap(),
         b"foo-legacy-plaintext"
     );
 }

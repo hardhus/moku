@@ -33,7 +33,7 @@ fn cleanup_old_logs(log_dir: &Path, keep_days: u64) {
 }
 
 pub fn init() -> Result<WorkerGuard> {
-    let data_dir = moku_core::dirs::get_data_dir()?;
+    let data_dir = moku_sys::dirs::get_data_dir()?;
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir)?;
 

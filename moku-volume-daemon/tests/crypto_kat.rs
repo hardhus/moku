@@ -4,8 +4,8 @@
 //! of these fails, the change broke compatibility with existing volumes.
 //! Never "update" the expected values to match a new implementation.
 
-use moku_core::SafeKey;
-use moku_core::security::SecurityManager;
+use moku_crypto::SafeKey;
+use moku_vault::SecurityManager;
 use moku_volume_daemon::registry::derive_default_volume_master_key;
 use moku_volume_fs::derive_volume_keys;
 use secrecy::{ExposeSecret, SecretBox};

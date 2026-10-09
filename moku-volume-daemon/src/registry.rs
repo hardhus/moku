@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use hkdf::Hkdf;
-use moku_core::{SafeKey, SecurityManager};
+use moku_crypto::SafeKey;
+use moku_vault::SecurityManager;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -162,7 +163,7 @@ pub fn volumes_root() -> Result<PathBuf> {
     // disk; renaming this segment would make them all vanish from moku's
     // point of view without a migration step. Only the Rust-facing name
     // (`volumes_root`) and everything above it changed.
-    Ok(moku_core::dirs::get_data_dir()?.join("vaults"))
+    Ok(moku_sys::dirs::get_data_dir()?.join("vaults"))
 }
 
 /// Maps a volume id to its actual directory, wherever it lives. Volumes
@@ -219,7 +220,7 @@ fn load_index() -> HashMap<String, PathBuf> {
 fn save_index_at(root: &Path, index: &HashMap<String, PathBuf>) -> Result<()> {
     std::fs::create_dir_all(root)?;
     let json = serde_json::to_string_pretty(index)?;
-    moku_core::util::atomic_write(&root.join(INDEX_FILE), json.as_bytes())
+    moku_sys::util::atomic_write(&root.join(INDEX_FILE), json.as_bytes())
 }
 
 /// Reads, mutates and writes back the index as one locked step: the
@@ -336,7 +337,7 @@ fn now() -> u64 {
 
 async fn save_config(dir: &Path, config: &VolumeConfig) -> Result<()> {
     let json = serde_json::to_string_pretty(config)?;
-    moku_core::util::atomic_write_async(dir.join(VOLUME_FILE), json.into_bytes()).await
+    moku_sys::util::atomic_write_async(dir.join(VOLUME_FILE), json.into_bytes()).await
 }
 
 pub async fn load_config(dir: &Path) -> Result<VolumeConfig> {

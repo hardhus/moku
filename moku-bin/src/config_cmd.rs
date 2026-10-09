@@ -3,12 +3,14 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwap;
 
-use moku_core::{ConfigManager, MokuConfig, SecurityManager, StorageManager, VaultSession};
+use moku_config::{ConfigManager, MokuConfig};
+use moku_store::StorageManager;
+use moku_vault::{SecurityManager, VaultSession};
 
 use crate::cli::ConfigCommands;
 
 /// (module id, ModuleMeta::encrypt_by_default()) for every module whose
-/// storage encryption is actually resolved via moku_core::resolve_encryption
+/// storage encryption is actually resolved via moku_config::resolve_encryption
 /// today (see Faz 5) — kept in sync with the ModuleMeta::encrypt_by_default
 /// overrides in moku-todo, moku-bookmark, moku-rss and moku-secrets, and
 /// with modules/moku-settings/src/tabs/storage.rs's identical list for the
@@ -32,7 +34,7 @@ pub async fn handle(
         ConfigCommands::ShowEncrypt => {
             let cfg = config.load();
             for (module, module_default) in ENCRYPTABLE_MODULES {
-                let encrypted = moku_core::resolve_encryption(&cfg, module, *module_default);
+                let encrypted = moku_config::resolve_encryption(&cfg, module, *module_default);
                 println!("{module}: {}", if encrypted { "encrypted" } else { "plaintext" });
             }
             Ok(())
@@ -56,19 +58,19 @@ pub async fn handle(
 
             ensure_unlocked_if_needed(session, security, *value).await?;
 
-            run_migration(storage, module, moku_core::resolve_encryption(&new_config, module, module_default)).await
+            run_migration(storage, module, moku_config::resolve_encryption(&new_config, module, module_default)).await
         }
         ConfigCommands::Migrate { module: Some(module) } => {
             let (_, module_default) = lookup_module(module)?;
             let cfg = config.load();
-            let target = moku_core::resolve_encryption(&cfg, module, module_default);
+            let target = moku_config::resolve_encryption(&cfg, module, module_default);
             ensure_unlocked_if_needed(session, security, target).await?;
             run_migration(storage, module, target).await
         }
         ConfigCommands::Migrate { module: None } => {
             let cfg = config.load();
             for (module, module_default) in ENCRYPTABLE_MODULES {
-                let target = moku_core::resolve_encryption(&cfg, module, *module_default);
+                let target = moku_config::resolve_encryption(&cfg, module, *module_default);
                 ensure_unlocked_if_needed(session, security, target).await?;
                 run_migration(storage, module, target).await?;
             }
@@ -103,7 +105,7 @@ async fn ensure_unlocked_if_needed(
     if !target_encrypted {
         return Ok(());
     }
-    moku_core::security::cli::ensure_unlocked(session, security, "Vault password: ").await
+    moku_vault::cli::ensure_unlocked(session, security, "Vault password: ").await
 }
 
 async fn run_migration(storage: &Arc<StorageManager>, module: &str, target_encrypted: bool) -> Result<()> {

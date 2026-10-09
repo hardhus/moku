@@ -12,9 +12,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use moku_core::{
-    AppContext, Command, ModuleId, ModuleMeta, MokuTheme, SafeKey, TuiModule, resolve_event,
-};
+use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
+use moku_crypto::SafeKey;
 use secrecy::SecretBox;
 
 use crate::registry::{self, PasswordMode, VolumeConfig, VolumeSecret};
@@ -568,8 +567,9 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use crossterm::event::{KeyEvent, KeyModifiers};
-    use moku_core::security::{SecurityManager, VaultSession};
-    use moku_core::{MokuConfig, StorageManager};
+    use moku_config::MokuConfig;
+    use moku_store::StorageManager;
+    use moku_vault::{SecurityManager, VaultSession};
     use tempfile::tempdir;
 
     use super::*;

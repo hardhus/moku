@@ -1,4 +1,5 @@
-use moku_core::{CliRegistry, ModuleId, MokuConfig, TuiModule, TuiRegistry};
+use moku_config::MokuConfig;
+use moku_core::{CliRegistry, ModuleId, TuiModule, TuiRegistry};
 use moku_daemon::DaemonStatusModule;
 
 pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
@@ -39,7 +40,7 @@ pub fn build_tui_registry(config: &MokuConfig) -> TuiRegistry {
 fn load_lua_plugins(config: &MokuConfig) -> Vec<Box<dyn TuiModule>> {
     let mut loaded = Vec::new();
 
-    if let Ok(plugins_dir) = moku_core::dirs::get_plugins_dir() {
+    if let Ok(plugins_dir) = moku_sys::dirs::get_plugins_dir() {
         for entry in &config.plugins {
             let id = ModuleId::new(Box::leak(entry.id.clone().into_boxed_str()));
             let title: &'static str = Box::leak(entry.title.clone().into_boxed_str());

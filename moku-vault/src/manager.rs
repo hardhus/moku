@@ -8,10 +8,7 @@ use zeroize::Zeroizing;
 
 use moku_sys::dirs;
 
-// Temporary facade while P2 splits moku-core: `SafeKey` and the AES-GCM /
-// Argon2 primitives now live in moku-crypto. Removed once every crate
-// imports moku_crypto directly.
-pub use moku_crypto::SafeKey;
+use moku_crypto::SafeKey;
 
 #[derive(Serialize, Deserialize)]
 pub struct StorageMetadata {
@@ -38,24 +35,12 @@ impl SecurityManager {
         }
     }
 
-    pub fn generate_salt(len: usize) -> Vec<u8> {
-        moku_crypto::generate_salt(len)
-    }
-
     pub async fn derive_key(password: &str, salt_bytes: &[u8]) -> Result<SecretBox<SafeKey>> {
         let password = password.to_string();
         let salt = salt_bytes.to_vec();
 
         tokio::task::spawn_blocking(move || moku_crypto::argon2id_key(password.as_bytes(), &salt))
             .await?
-    }
-
-    pub fn encrypt(data: &[u8], key: &SecretBox<SafeKey>) -> Result<Vec<u8>> {
-        moku_crypto::encrypt(data, key)
-    }
-
-    pub fn decrypt(combined_data: &[u8], key: &SecretBox<SafeKey>) -> Result<Vec<u8>> {
-        moku_crypto::decrypt(combined_data, key)
     }
 
     pub fn is_vault_initialized(&self) -> bool {
@@ -77,11 +62,11 @@ impl SecurityManager {
                 self.get_meta_path().display()
             ));
         }
-        let salt = Self::generate_salt(16);
+        let salt = moku_crypto::generate_salt(16);
         let key = Self::derive_key(&password, &salt).await?;
 
         let canary_text = b"MOKU_VAULT_OK";
-        let encrypted_canary = Self::encrypt(canary_text, &key)?;
+        let encrypted_canary = moku_crypto::encrypt(canary_text, &key)?;
 
         let meta = StorageMetadata {
             salt,
@@ -107,7 +92,7 @@ impl SecurityManager {
         let meta: StorageMetadata = serde_json::from_str(&content)?;
 
         let key = Self::derive_key(&password, &meta.salt).await?;
-        let decrypted = Self::decrypt(&meta.canary, &key);
+        let decrypted = moku_crypto::decrypt(&meta.canary, &key);
 
         match decrypted {
             Ok(bytes) if bytes == b"MOKU_VAULT_OK" => Ok(key),
@@ -174,7 +159,7 @@ mod tests {
     #[tokio::test]
     async fn test_argon2_resource_exhaustion_resilience() {
         let massive_password = "A".repeat(1024 * 1024);
-        let salt = SecurityManager::generate_salt(16);
+        let salt = moku_crypto::generate_salt(16);
 
         let result = SecurityManager::derive_key(&massive_password, &salt).await;
         assert!(

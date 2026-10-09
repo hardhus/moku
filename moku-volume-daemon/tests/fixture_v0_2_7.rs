@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use moku_core::security::SecurityManager;
+use moku_vault::SecurityManager;
 use moku_volume_daemon::registry::{MountSecret, load_config, resolve_volume_master_key};
 use moku_volume_fs::{FileKind, VirtualPath, VolumeEngine, derive_volume_keys};
 use zeroize::Zeroizing;

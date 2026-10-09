@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, anyhow, bail};
-use moku_core::{ModuleId, MokuConfig, SecurityManager, StorageManager};
+use moku_config::MokuConfig;
+use moku_core::ModuleId;
+use moku_store::StorageManager;
+use moku_vault::SecurityManager;
 use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::model::SecretEntry;
@@ -15,7 +18,7 @@ pub async fn load_entries(storage: &StorageManager) -> Result<Vec<SecretEntry>> 
 }
 
 pub async fn save_entries(storage: &StorageManager, config: &MokuConfig, entries: &[SecretEntry]) -> Result<()> {
-    let encrypt = moku_core::resolve_encryption(config, ModuleId::SECRETS.as_str(), true);
+    let encrypt = moku_config::resolve_encryption(config, ModuleId::SECRETS.as_str(), true);
     storage.save(ModuleId::SECRETS.as_str(), STORAGE_KEY, &entries.to_vec(), encrypt).await
 }
 
@@ -85,10 +88,10 @@ pub fn import_plain_json(data: &[u8]) -> Result<Vec<SecretEntry>> {
 /// version + salt + ciphertext) so it can be re-imported without any other
 /// context.
 pub async fn export_encrypted(entries: &[SecretEntry], password: &str) -> Result<Vec<u8>> {
-    let salt = SecurityManager::generate_salt(16);
+    let salt = moku_crypto::generate_salt(16);
     let key = SecurityManager::derive_key(password, &salt).await?;
     let plaintext = serde_json::to_vec(entries)?;
-    let ciphertext = SecurityManager::encrypt(&plaintext, &key)?;
+    let ciphertext = moku_crypto::encrypt(&plaintext, &key)?;
 
     let mut out = Vec::with_capacity(4 + 1 + 1 + salt.len() + ciphertext.len());
     out.extend_from_slice(ENCRYPTED_MAGIC);
@@ -116,7 +119,7 @@ pub async fn import_encrypted(data: &[u8], password: &str) -> Result<Vec<SecretE
     let ciphertext = &data[salt_end..];
 
     let key = SecurityManager::derive_key(password, salt).await?;
-    let plaintext = SecurityManager::decrypt(ciphertext, &key).map_err(|_| anyhow!("wrong password or corrupted export"))?;
+    let plaintext = moku_crypto::decrypt(ciphertext, &key).map_err(|_| anyhow!("wrong password or corrupted export"))?;
     serde_json::from_slice(&plaintext).context("decrypted export is not valid JSON")
 }
 

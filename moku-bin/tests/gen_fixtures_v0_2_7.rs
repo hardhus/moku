@@ -19,14 +19,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use moku_bookmark::model::Bookmark;
-use moku_core::StorageManager;
-use moku_core::security::{SecurityManager, VaultSession};
-use moku_core::storage::{
-    CURRENT_SCHEMA_VERSION, EncryptionStatus, KeyScheme, StorageEnvelope, StorageType,
-};
 use moku_rss::engine::{FeedItem, FeedSubscription};
 use moku_secrets::model::SecretEntry;
+use moku_store::StorageManager;
+use moku_store::{CURRENT_SCHEMA_VERSION, EncryptionStatus, KeyScheme, StorageEnvelope, StorageType};
 use moku_todo::model::Task;
+use moku_vault::{SecurityManager, VaultSession};
 use moku_volume_daemon::PasswordMode;
 use moku_volume_daemon::registry::{VolumeConfig, derive_default_volume_master_key};
 use moku_volume_fs::{VirtualPath, VolumeEngine, derive_volume_keys};
@@ -159,7 +157,7 @@ fn write_v0_record(
     root: &Path,
     module: &str,
     key: &str,
-    master: &SecretBox<moku_core::SafeKey>,
+    master: &SecretBox<moku_crypto::SafeKey>,
     value: &serde_json::Value,
 ) {
     let raw = serde_json::to_vec(value).unwrap();
@@ -167,7 +165,7 @@ fn write_v0_record(
         schema_version: CURRENT_SCHEMA_VERSION,
         status: EncryptionStatus::Encrypted,
         storage_type: StorageType::Embedded,
-        payload: SecurityManager::encrypt(&raw, master).unwrap(),
+        payload: moku_crypto::encrypt(&raw, master).unwrap(),
         hash: None,
         key_scheme: KeyScheme::V0,
     };
@@ -348,11 +346,11 @@ async fn generate_v0_2_7_fixtures() {
     std::fs::create_dir_all(stage.join("msxp")).unwrap();
     std::fs::write(stage.join("msxp").join("export-v1.msxp"), msxp).unwrap();
 
-    // --- blobs: a real SecurityManager::encrypt output under the K1 key ----
+    // --- blobs: a real moku_crypto::encrypt output under the K1 key ----
     let k1 = SecurityManager::derive_key("correct horse", &[0x01; 16])
         .await
         .unwrap();
-    let legacy = SecurityManager::encrypt(b"foo-legacy-plaintext", &k1).unwrap();
+    let legacy = moku_crypto::encrypt(b"foo-legacy-plaintext", &k1).unwrap();
     std::fs::create_dir_all(stage.join("blobs")).unwrap();
     std::fs::write(stage.join("blobs").join("legacy-gcm.bin"), legacy).unwrap();
 

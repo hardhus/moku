@@ -161,11 +161,11 @@ fn print_result(r: &RunResult) {
 }
 
 /// Unlocks the shared session from an interactive prompt if needed, via the
-/// shared `moku_core::security::cli::ensure_unlocked` (asks once, never
+/// shared `moku_vault::cli::ensure_unlocked` (asks once, never
 /// creates a vault).
 async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
     let (Some(session), Some(security)) = (&ctx.session, &ctx.security) else {
         bail!("vault access unavailable (internal error: CliContext.session/security is empty).");
     };
-    moku_core::security::cli::ensure_unlocked(session, security, "Moku vault password: ").await
+    moku_vault::cli::ensure_unlocked(session, security, "Moku vault password: ").await
 }

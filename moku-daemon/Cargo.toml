@@ -8,6 +8,10 @@ name = "moku_daemon"
 path = "src/lib.rs"
 
 [dependencies]
+moku-vault.workspace = true
+moku-sys.workspace = true
+moku-store.workspace = true
+moku-config.workspace = true
 moku-core.workspace = true
 anyhow.workspace = true
 tokio.workspace = true

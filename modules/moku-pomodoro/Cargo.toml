@@ -8,6 +8,7 @@ default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
+moku-config.workspace = true
 moku-core.workspace = true
 moku-pomodoro-daemon.workspace = true
 anyhow.workspace = true
@@ -21,5 +22,7 @@ ratatui = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
 
 [dev-dependencies]
+moku-vault.workspace = true
+moku-store.workspace = true
 tempfile.workspace = true
 arc-swap.workspace = true

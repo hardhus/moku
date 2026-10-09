@@ -6,7 +6,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use moku_core::{AppContext, MokuConfig, MokuTheme};
+use moku_config::MokuConfig;
+use moku_core::{AppContext, MokuTheme};
 
 use super::SettingsTab;
 

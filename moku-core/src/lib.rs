@@ -1,19 +1,11 @@
-pub mod config;
 pub mod context;
 pub mod keys;
 pub mod module;
 pub mod router;
-pub mod security;
-pub mod storage;
 pub mod theme;
 pub mod toast;
 pub mod widgets;
 
-// Temporary facade while P2 splits moku-core; removed once every crate
-// imports moku_sys directly.
-pub use moku_sys::{dirs, util};
-
-pub use config::{ConfigManager, MokuConfig};
 pub use context::{AppContext, CliContext, DaemonContext, SuspendRequest};
 pub use keys::{
     Command, ConfirmDeleteKey, is_delete_bypass, keys_match, resolve_confirm_delete_key,
@@ -24,8 +16,6 @@ pub use module::{
     TuiModule, TuiRegistry,
 };
 pub use router::Router;
-pub use security::{SafeKey, SecurityManager, VaultSession};
-pub use storage::{CURRENT_KEY_SCHEME, MigrationReport, StorageManager, resolve_encryption};
 pub use theme::MokuTheme;
 pub use toast::{ToastManager, ToastType};
 pub use widgets::draw_load_error_banner;

@@ -6,11 +6,12 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Frame, layout::Rect};
 use tempfile::tempdir;
 
-use moku_core::security::{SecurityManager, VaultSession};
+use moku_config::MokuConfig;
 use moku_core::{
-    AppContext, ModuleId, ModuleMeta, ModuleStatus, MokuConfig, MokuTheme, StorageManager,
-    ToastType, TuiModule, TuiRegistry,
+    AppContext, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, ToastType, TuiModule, TuiRegistry,
 };
+use moku_store::StorageManager;
+use moku_vault::{SecurityManager, VaultSession};
 
 async fn create_test_context() -> AppContext {
     let temp = tempdir().unwrap();

@@ -4,9 +4,7 @@ version = "0.1.1"
 edition = "2024"
 
 [dependencies]
-moku-sys.workspace = true
 moku-config.workspace = true
-moku-crypto.workspace = true
 moku-vault.workspace = true
 moku-store.workspace = true
 ratatui.workspace = true

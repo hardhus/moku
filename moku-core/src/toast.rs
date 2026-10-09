@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::config::MokuConfig;
+use moku_config::MokuConfig;
 use crate::theme::MokuTheme;
 
 #[derive(Clone, Copy, PartialEq, Debug)]

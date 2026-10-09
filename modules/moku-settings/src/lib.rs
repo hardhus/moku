@@ -12,10 +12,8 @@ use ratatui::{
 
 mod tabs;
 
-use moku_core::{
-    AppContext, Command, ConfigManager, ModuleId, ModuleMeta, MokuConfig, MokuTheme, TuiModule,
-    resolve_event,
-};
+use moku_config::{ConfigManager, MokuConfig};
+use moku_core::{AppContext, Command, ModuleId, ModuleMeta, MokuTheme, TuiModule, resolve_event};
 
 use crate::tabs::{
     SettingsTab, commit::CommitTab, context::ContextTab, general::GeneralTab,

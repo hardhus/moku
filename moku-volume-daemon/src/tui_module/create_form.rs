@@ -14,7 +14,8 @@ use ratatui::{
 use secrecy::{ExposeSecret, SecretBox};
 use zeroize::Zeroizing;
 
-use moku_core::{AppContext, MokuTheme, SafeKey};
+use moku_core::{AppContext, MokuTheme};
+use moku_crypto::SafeKey;
 
 use super::VolumeManagerModule;
 use crate::registry::{PasswordMode, VolumeSecret};
@@ -305,8 +306,10 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use crossterm::event::{KeyEvent, KeyModifiers};
-    use moku_core::security::{SecurityManager, VaultSession};
-    use moku_core::{MokuConfig, StorageManager, TuiModule};
+    use moku_config::MokuConfig;
+    use moku_core::TuiModule;
+    use moku_store::StorageManager;
+    use moku_vault::{SecurityManager, VaultSession};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tempfile::tempdir;

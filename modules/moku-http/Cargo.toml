@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+moku-vault.workspace = true
+moku-store.workspace = true
 moku-core.workspace = true
 moku-secrets = { path = "../moku-secrets" }
 anyhow.workspace = true

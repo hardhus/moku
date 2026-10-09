@@ -11,10 +11,10 @@ use ratatui::style::Style;
 use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use moku_core::{
-    AppContext, ModuleId, MokuConfig, MokuTheme, Router, SecurityManager, StorageManager,
-    ToastManager, TuiRegistry, VaultSession, keys_match,
-};
+use moku_config::MokuConfig;
+use moku_core::{AppContext, ModuleId, MokuTheme, Router, ToastManager, TuiRegistry, keys_match};
+use moku_store::StorageManager;
+use moku_vault::{SecurityManager, VaultSession};
 
 /// Below this many versions behind, a key-scheme upgrade is applied
 /// silently in the background right after unlock (small, cheap, no need
@@ -407,7 +407,7 @@ async fn enter_module(
         .map(|m| m.encrypt_by_default())
         .unwrap_or(true);
     let needs_vault =
-        moku_core::resolve_encryption(&ctx.config.load(), target.as_str(), module_default_encrypt);
+        moku_config::resolve_encryption(&ctx.config.load(), target.as_str(), module_default_encrypt);
 
     if needs_vault && !ctx.session.is_unlocked() {
         if let Some(m) = registry.get_mut(ModuleId::LOCK_SCREEN) {
@@ -457,8 +457,9 @@ mod tests {
     use std::sync::Arc;
 
     use arc_swap::ArcSwap;
-    use moku_core::security::{SecurityManager, VaultSession};
-    use moku_core::{StorageManager, TuiModule};
+    use moku_core::TuiModule;
+    use moku_store::StorageManager;
+    use moku_vault::{SecurityManager, VaultSession};
     use tempfile::tempdir;
 
     use super::*;

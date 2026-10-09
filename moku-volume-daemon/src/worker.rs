@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow, bail};
-use moku_core::SafeKey;
+use moku_crypto::SafeKey;
 use moku_volume_fs::{VolumeEngine, derive_volume_keys};
 use secrecy::SecretBox;
 use zeroize::Zeroizing;
@@ -310,7 +310,7 @@ fn spawn_mount_process_inner(
 ///
 /// Waits as long as it takes rather than giving up on a clock: a CLI mount
 /// always pays a real Argon2id cost (deliberately expensive — see
-/// `moku-core/src/security/manager.rs`) verifying the password against the
+/// `moku-crypto/src/password.rs`) verifying the password against the
 /// real app vault, which can easily take longer than a short fixed
 /// timeout would allow, while the TUI's already-unlocked fast path
 /// resolves almost instantly with no Argon2 at all. An earlier, shorter

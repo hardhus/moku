@@ -12,6 +12,9 @@ async-trait.workspace = true
 mlua.workspace = true
 
 [dev-dependencies]
+moku-vault.workspace = true
+moku-store.workspace = true
+moku-config.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 arc-swap.workspace = true

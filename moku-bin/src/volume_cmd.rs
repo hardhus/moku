@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 
-use moku_core::SecurityManager;
+use moku_vault::SecurityManager;
 use moku_volume_daemon::registry::VolumeSecret;
 use moku_volume_daemon::worker::{MountOutcome, StopOutcome};
 use moku_volume_daemon::{PasswordMode, registry, size, status, worker};
@@ -59,7 +59,7 @@ pub async fn handle(sub: &VolumeCommands) -> Result<()> {
             };
 
             let secret = if use_custom {
-                let password = moku_core::security::cli::prompt_new_password(
+                let password = moku_vault::cli::prompt_new_password(
                     "New volume password: ",
                     "Confirm volume password: ",
                 )?;

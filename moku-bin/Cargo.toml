@@ -12,6 +12,10 @@ default = ["lua-plugins"]
 lua-plugins = ["dep:moku-lua"]
 
 [dependencies]
+moku-vault.workspace = true
+moku-sys.workspace = true
+moku-store.workspace = true
+moku-config.workspace = true
 moku-core.workspace = true
 moku-lua = { path = "../moku-lua", optional = true }
 anyhow.workspace = true
@@ -52,6 +56,7 @@ moku-http = { path = "../modules/moku-http" }
 moku-pomodoro = { path = "../modules/moku-pomodoro" }
 
 [dev-dependencies]
+moku-crypto.workspace = true
 tempfile.workspace = true
 # Only for tests/gen_fixtures_v0_2_7.rs: writing legacy (KeyScheme::V0)
 # envelopes straight into sled and building volume fixtures without

@@ -34,7 +34,7 @@ impl RssEngine {
     /// Nothing stored yet is an empty list; any real failure (corrupt
     /// record, locked vault if RSS is encrypted, shape change) is an `Err`,
     /// never an empty list, so no caller saves over unreadable data.
-    pub async fn load_feeds(storage: &moku_core::StorageManager) -> Result<Vec<FeedSubscription>> {
+    pub async fn load_feeds(storage: &moku_store::StorageManager) -> Result<Vec<FeedSubscription>> {
         Ok(storage
             .load_opt(STORAGE_NS, FEEDS_KEY)
             .await?
@@ -42,18 +42,18 @@ impl RssEngine {
     }
 
     pub async fn save_feeds(
-        storage: &moku_core::StorageManager,
-        config: &moku_core::MokuConfig,
+        storage: &moku_store::StorageManager,
+        config: &moku_config::MokuConfig,
         feeds: &[FeedSubscription],
     ) -> Result<()> {
-        let encrypt = moku_core::resolve_encryption(config, STORAGE_NS, false);
+        let encrypt = moku_config::resolve_encryption(config, STORAGE_NS, false);
         storage
             .save(STORAGE_NS, FEEDS_KEY, &feeds.to_vec(), encrypt)
             .await
     }
 
     /// Same contract as `load_feeds`.
-    pub async fn load_items(storage: &moku_core::StorageManager) -> Result<Vec<FeedItem>> {
+    pub async fn load_items(storage: &moku_store::StorageManager) -> Result<Vec<FeedItem>> {
         Ok(storage
             .load_opt(STORAGE_NS, ITEMS_KEY)
             .await?
@@ -71,11 +71,11 @@ impl RssEngine {
     }
 
     async fn save_items(
-        storage: &moku_core::StorageManager,
-        config: &moku_core::MokuConfig,
+        storage: &moku_store::StorageManager,
+        config: &moku_config::MokuConfig,
         items: &[FeedItem],
     ) -> Result<()> {
-        let encrypt = moku_core::resolve_encryption(config, STORAGE_NS, false);
+        let encrypt = moku_config::resolve_encryption(config, STORAGE_NS, false);
         storage
             .save(STORAGE_NS, ITEMS_KEY, &items.to_vec(), encrypt)
             .await
@@ -84,8 +84,8 @@ impl RssEngine {
     /// Fetches all subscribed feeds, appends new items to the persistent list,
     /// and returns items for which notifications should be sent (previously unseen and from favorite feeds).
     pub async fn fetch_all(
-        storage: &moku_core::StorageManager,
-        config: &moku_core::MokuConfig,
+        storage: &moku_store::StorageManager,
+        config: &moku_config::MokuConfig,
     ) -> Result<Vec<FeedItem>> {
         // `?`: if either list can't be read, fetch nothing and write
         // nothing, rather than appending new items to an empty list and

@@ -306,7 +306,7 @@ pub(super) async fn handle_event(
                         let filtered = get_filtered_items(feeds, items, feed_idx);
                         if let Some(i) = item_state.selected() {
                             if i < filtered.len() {
-                                match moku_core::util::open_url(&filtered[i].link) {
+                                match moku_sys::util::open_url(&filtered[i].link) {
                                     Ok(_) => ctx.show_info("Opening in browser..."),
                                     Err(e) => ctx.show_error(format!("Failed to open: {e:#}")),
                                 }

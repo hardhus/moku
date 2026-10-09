@@ -8,6 +8,9 @@ default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:arboard"]
 
 [dependencies]
+moku-sys.workspace = true
+moku-store.workspace = true
+moku-config.workspace = true
 moku-core.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
@@ -25,5 +28,6 @@ crossterm = { workspace = true, optional = true }
 arboard = { workspace = true, optional = true }
 
 [dev-dependencies]
+moku-vault.workspace = true
 tempfile.workspace = true
 arc-swap.workspace = true

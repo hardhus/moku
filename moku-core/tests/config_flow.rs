@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
 
-use moku_core::{Command, MokuConfig, MokuTheme, resolve_event};
+use moku_config::MokuConfig;
+use moku_core::{Command, MokuTheme, resolve_event};
 
 #[derive(Deserialize, Default, PartialEq, Debug)]
 #[serde(default)]

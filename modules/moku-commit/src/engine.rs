@@ -100,7 +100,7 @@ impl CommitEngine {
         let truncated_diff = if diff.len() > self.settings.char_limit {
             format!(
                 "{}\n\n[... DIFF TRUNCATED (Limit: {}) ...]",
-                moku_core::util::truncate_at_char_boundary(diff, self.settings.char_limit),
+                moku_sys::util::truncate_at_char_boundary(diff, self.settings.char_limit),
                 self.settings.char_limit
             )
         } else {

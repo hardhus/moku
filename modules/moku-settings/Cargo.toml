@@ -4,6 +4,7 @@ version = "0.1.1"
 edition = "2024"
 
 [dependencies]
+moku-config.workspace = true
 moku-core.workspace = true
 anyhow.workspace = true
 ratatui.workspace = true
@@ -17,4 +18,6 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+moku-vault.workspace = true
+moku-store.workspace = true
 tempfile.workspace = true

@@ -3,7 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use moku_core::{ConfigManager, DaemonContext, DaemonTask, StorageManager, VaultSession};
+use moku_config::ConfigManager;
+use moku_core::{DaemonContext, DaemonTask};
+use moku_store::StorageManager;
+use moku_vault::VaultSession;
 
 use crate::task_status::{TaskStatus, write_statuses};
 
@@ -53,7 +56,7 @@ pub async fn run_worker() -> Result<()> {
     // bildirimde aynı işi tembel yapardı, bu sadece erken görünürlük için.
     moku_notify::ensure_registered();
 
-    let data_dir = moku_core::dirs::get_data_dir()?;
+    let data_dir = moku_sys::dirs::get_data_dir()?;
     let loaded_config = ConfigManager::load().await.unwrap_or_default();
     let config = Arc::new(ArcSwap::from_pointee(loaded_config));
 

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use moku_core::StorageManager;
+use moku_store::StorageManager;
 
 use crate::interpolate::{find_secret_refs, interpolate, interpolate_toml_value};
 use crate::jsonpath_lite;

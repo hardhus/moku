@@ -317,8 +317,9 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use crossterm::event::{KeyEvent, KeyModifiers};
-    use moku_core::security::{SecurityManager, VaultSession};
-    use moku_core::{MokuConfig, StorageManager};
+    use moku_config::MokuConfig;
+    use moku_store::StorageManager;
+    use moku_vault::{SecurityManager, VaultSession};
     use tempfile::tempdir;
 
     use super::*;
