@@ -95,6 +95,18 @@ pub fn get_plugins_dir() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// `test_detect_portable_root` sets `MOKU_TEST_PORTABLE_ROOT`, which
+    /// every directory lookup reads. Tests run in parallel, so each test
+    /// that resolves a directory holds this lock; otherwise one test can
+    /// see the portable root appear or vanish halfway through.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        // A test that panicked while holding the lock leaves it poisoned;
+        // the guarded state (an env var) is still fine to use.
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn test_project_dirs_resolve() {
         let dirs = get_project_dirs();
@@ -103,6 +115,7 @@ mod tests {
 
     #[test]
     fn test_paths_contain_app_name() {
+        let _env = env_lock();
         let config_path = get_config_dir().unwrap();
         let data_path = get_data_dir().unwrap();
 
@@ -124,6 +137,7 @@ mod tests {
 
     #[test]
     fn test_paths_are_absolute() {
+        let _env = env_lock();
         if let Ok(path) = get_config_dir() {
             assert!(path.is_absolute());
         }
@@ -134,6 +148,7 @@ mod tests {
 
     #[test]
     fn test_plugins_dir_is_under_config_dir() {
+        let _env = env_lock();
         let config = get_config_dir().unwrap();
         let plugins = get_plugins_dir().unwrap();
         assert!(plugins.starts_with(config));
@@ -142,6 +157,7 @@ mod tests {
 
     #[test]
     fn test_detect_portable_root() {
+        let _env = env_lock();
         let temp = tempfile::tempdir().unwrap();
         let portable_dir = temp.path().join("moku-data");
 
