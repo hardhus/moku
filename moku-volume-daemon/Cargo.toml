@@ -11,6 +11,7 @@ moku-core.workspace = true
 moku-volume-fs = { path = "../moku-volume-fs" }
 moku-volume-mount = { path = "../moku-volume-mount" }
 anyhow.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

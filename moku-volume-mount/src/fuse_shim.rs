@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, anyhow};
 use fuser::{
     Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo,
     LockOwner, MountOption, OpenFlags, Request, RenameFlags, ReplyAttr, ReplyCreate, ReplyData,
@@ -22,6 +21,8 @@ use fuser::{
 };
 
 use moku_volume_fs::{Attr, FileKind, VolumeFsError, VirtualPath, VolumeEngine};
+
+use crate::MountError;
 
 const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
@@ -457,7 +458,7 @@ pub fn mount_and_wait(
     mountpoint: &str,
     stop_rx: Receiver<()>,
     on_mounted: impl FnOnce(),
-) -> Result<()> {
+) -> Result<(), MountError> {
     let fs = VolumeFsFilesystem { engine, inodes: Mutex::new(InodeTable::new()) };
     // `Config` is `#[non_exhaustive]`, so it can't be built with a struct
     // literal outside fuser's own crate — start from its `Default` and
@@ -465,7 +466,18 @@ pub fn mount_and_wait(
     let mut options = Config::default();
     options.mount_options = vec![MountOption::FSName("mokuvolume".to_string()), MountOption::DefaultPermissions];
 
-    let session = fuser::spawn_mount(fs, mountpoint, &options).map_err(|e| anyhow!("failed to mount at '{mountpoint}': {e}"))?;
+    let session = fuser::spawn_mount(fs, mountpoint, &options).map_err(|e| {
+        // A missing mount point and a missing FUSE helper are both
+        // NotFound; only the second means "install FUSE".
+        if e.kind() == std::io::ErrorKind::NotFound && std::path::Path::new(mountpoint).exists() {
+            MountError::BackendMissing(e.to_string())
+        } else {
+            MountError::MountPointUnavailable {
+                mountpoint: mountpoint.to_string(),
+                detail: e.to_string(),
+            }
+        }
+    })?;
     // `spawn_mount` only returns once the kernel mount has succeeded (the
     // session thread then serves requests), so the mount is live here.
     on_mounted();
@@ -473,5 +485,5 @@ pub fn mount_and_wait(
     // Err = every sender dropped, which also means "stop".
     let _ = stop_rx.recv();
 
-    session.umount_and_join().map_err(|e| anyhow!("failed to unmount: {e}"))
+    session.umount_and_join().map_err(MountError::Unmount)
 }

@@ -2918,6 +2918,7 @@ dependencies = [
  "sha2",
  "sysinfo",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "zeroize",
 ]
@@ -2947,12 +2948,12 @@ dependencies = [
 name = "moku-volume-mount"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "fuser",
  "libc",
  "moku-vault",
  "moku-volume-fs",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "windows 0.62.2",
  "winfsp",

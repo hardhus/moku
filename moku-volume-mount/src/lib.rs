@@ -8,6 +8,10 @@
 //! (`fuse_shim.rs`) is implemented and cross-compile-checked for Linux,
 //! but not runtime-tested yet.
 
+mod error;
+
+pub use error::MountError;
+
 #[cfg(windows)]
 mod winfsp_shim;
 

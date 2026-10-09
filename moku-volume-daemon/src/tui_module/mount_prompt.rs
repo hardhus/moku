@@ -57,6 +57,9 @@ pub(super) struct PasswordPrompt {
     /// Default-mode volume with its own vault, or a currently-locked main
     /// vault) — the Password field is shown too.
     pub(super) use_app_key: bool,
+    /// Why the previous attempt failed (a wrong password), shown inside
+    /// the prompt until the user types again.
+    pub(super) error: Option<String>,
 }
 
 impl VolumeManagerModule {
@@ -97,10 +100,13 @@ impl VolumeManagerModule {
                     MountField::Password => MountField::Mountpoint,
                 };
             }
-            KeyCode::Char(c) => match prompt.focus {
-                MountField::Mountpoint => prompt.mountpoint.push(c),
-                MountField::Password => prompt.input.push(c),
-            },
+            KeyCode::Char(c) => {
+                prompt.error = None;
+                match prompt.focus {
+                    MountField::Mountpoint => prompt.mountpoint.push(c),
+                    MountField::Password => prompt.input.push(c),
+                }
+            }
             KeyCode::Backspace => match prompt.focus {
                 MountField::Mountpoint => {
                     prompt.mountpoint.pop();
@@ -162,6 +168,9 @@ impl VolumeManagerModule {
                 ),
                 field_style(prompt.focus == MountField::Password),
             ));
+        }
+        if let Some(err) = &prompt.error {
+            lines.push(Line::styled(format!("  {err}"), Style::default().fg(theme.error)));
         }
 
         let p = Paragraph::new(lines)
@@ -230,6 +239,7 @@ mod tests {
             focus: MountField::Mountpoint,
             input: Zeroizing::new(String::new()),
             use_app_key,
+            error: None,
         }
     }
 

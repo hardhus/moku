@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 moku-volume-fs = { path = "../moku-volume-fs" }
-anyhow.workspace = true
+thiserror.workspace = true
 
 # WinFsp shim — only compiled (and only depended on) when targeting
 # Windows. The FUSE/Unix shim (fuser, below) is implemented and

@@ -5,6 +5,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use hkdf::Hkdf;
 use moku_crypto::SafeKey;
 use moku_vault::{SecurityManager, VaultError};
+
+use crate::VolumeError;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -116,25 +118,21 @@ pub async fn resolve_volume_master_key(
     volume_dir: &Path,
     cfg: &VolumeConfig,
     secret: MountSecret,
-) -> Result<SecretBox<SafeKey>> {
+) -> std::result::Result<SecretBox<SafeKey>, VolumeError> {
     if cfg.password_mode == PasswordMode::Custom || has_own_vault(volume_dir) {
         let MountSecret::Password(password) = secret else {
             // Neither an app key nor a pre-derived Default-volume key can
             // open a volume that has its own password.
-            bail!(
-                "'{}' needs its own password to mount — it can't be unlocked from an already-open moku vault",
-                cfg.display_name
-            );
+            return Err(VolumeError::NeedsOwnPassword(cfg.display_name.clone()));
         };
         let security = SecurityManager::new_with_root(volume_dir.to_path_buf());
         return match security.unlock_vault(zeroize::Zeroizing::new(password)).await {
             Ok(key) => Ok(key),
-            Err(VaultError::WrongPassword) => {
-                Err(anyhow!("wrong password for volume '{}'", cfg.display_name))
-            }
-            Err(e) => {
-                Err(anyhow::Error::new(e).context(format!("failed to unlock volume '{}'", cfg.id)))
-            }
+            Err(VaultError::WrongPassword) => Err(VolumeError::WrongPassword(format!(
+                "wrong password for volume '{}'",
+                cfg.display_name
+            ))),
+            Err(e) => Err(e.into()),
         };
     }
 
@@ -152,11 +150,13 @@ pub async fn resolve_volume_master_key(
                 Ok(key) => key,
                 // Only a real password mismatch is labelled as one; a
                 // missing/corrupt meta.json or a disk error keeps its own
-                // message (and cause chain).
-                Err(VaultError::WrongPassword) => bail!("wrong moku vault password"),
-                Err(e) => {
-                    return Err(anyhow::Error::new(e).context("failed to unlock the moku vault"));
+                // typed error (and cause chain).
+                Err(VaultError::WrongPassword) => {
+                    return Err(VolumeError::WrongPassword(
+                        "wrong moku vault password".to_string(),
+                    ));
                 }
+                Err(e) => return Err(e.into()),
             }
         }
     };
@@ -869,11 +869,11 @@ mod tests {
             .unwrap();
         let cfg = fake_config("old-scheme-vol", PasswordMode::Default);
 
-        assert!(
+        assert!(matches!(
             resolve_volume_master_key(dir.path(), &cfg, MountSecret::Password("wrong".to_string()))
-                .await
-                .is_err()
-        );
+                .await,
+            Err(VolumeError::WrongPassword(_))
+        ));
         assert!(
             resolve_volume_master_key(
                 dir.path(),
@@ -911,7 +911,7 @@ mod tests {
         let result =
             resolve_volume_master_key(dir.path(), &cfg, MountSecret::Key(fake_key(3))).await;
         assert!(
-            result.is_err(),
+            matches!(result, Err(VolumeError::NeedsOwnPassword(_))),
             "Custom mode must always require its own password, never a bare key"
         );
     }

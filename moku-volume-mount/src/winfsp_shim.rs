@@ -10,7 +10,6 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Receiver;
 
-use anyhow::{Result, anyhow};
 use windows::Win32::Foundation::{
     STATUS_DATA_ERROR, STATUS_DIRECTORY_NOT_EMPTY, STATUS_DISK_FULL, STATUS_END_OF_FILE,
     STATUS_FILE_CORRUPT_ERROR, STATUS_FILE_IS_A_DIRECTORY, STATUS_FILE_TOO_LARGE,
@@ -33,6 +32,8 @@ use winfsp::host::{FileSystemHost, FileSystemParams, VolumeParams};
 use winfsp::notify::{Notifier, NotifyInfo, NotifyingFileSystemContext};
 
 use moku_volume_fs::{Attr, DirEntry, FileKind, VolumeFsError, VirtualPath, VolumeEngine};
+
+use crate::MountError;
 
 const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
 /// FILETIME epoch (1601-01-01) offset from the Unix epoch, in seconds.
@@ -576,9 +577,8 @@ pub fn mount_and_wait(
     mountpoint: &str,
     stop_rx: Receiver<()>,
     on_mounted: impl FnOnce(),
-) -> Result<()> {
-    winfsp::winfsp_init()
-        .map_err(|e| anyhow!("WinFsp initialization failed: {e:?} (is WinFsp installed?)"))?;
+) -> Result<(), MountError> {
+    winfsp::winfsp_init().map_err(|e| MountError::BackendMissing(format!("{e:?}")))?;
 
     let mut volume_params = VolumeParams::new();
     volume_params
@@ -600,16 +600,19 @@ pub fn mount_and_wait(
     // rename events without polling too aggressively.
     let mut host: FileSystemHost<VolumeFsContext> =
         FileSystemHost::new_with_timer::<Vec<PendingNotify>, 250>(params, context)
-            .map_err(|e| anyhow!("failed to create WinFsp filesystem host: {e:?}"))?;
+            .map_err(|e| MountError::Host(format!("{e:?}")))?;
 
     host.mount(mountpoint)
-        .map_err(|e| anyhow!("failed to mount at '{mountpoint}': {e:?}"))?;
+        .map_err(|e| MountError::MountPointUnavailable {
+            mountpoint: mountpoint.to_string(),
+            detail: format!("{e:?}"),
+        })?;
     if let Err(e) = host.start() {
         // Mount already attached the volume to the OS; without this it
         // would be left stuck (drive letter reserved, nothing servicing
         // I/O) until the whole worker process exits.
         host.unmount();
-        return Err(anyhow!("failed to start WinFsp dispatcher: {e:?}"));
+        return Err(MountError::Dispatcher(format!("{e:?}")));
     }
 
     on_mounted();

@@ -18,13 +18,34 @@ use secrecy::SecretBox;
 
 use crate::registry::{self, PasswordMode, VolumeConfig, VolumeSecret};
 use crate::worker::{self, StopOutcome};
-use crate::{size, status};
+use crate::{MountErrorCode, size, status};
 
 mod create_form;
 mod mount_prompt;
 
 use create_form::CreateForm;
 use mount_prompt::{MountField, PasswordPrompt};
+
+/// What a finished background action hands back to `poll_action_result`.
+enum ActionResult {
+    /// Shown as the module's status message.
+    Message(String),
+    /// The worker reported a wrong mount password: reopen the prompt
+    /// (password field focused, `message` shown in it) instead of only
+    /// flashing an error the user has to start the whole mount over from.
+    RetryMountPassword {
+        volume_id: String,
+        display_name: String,
+        mountpoint: String,
+        message: String,
+    },
+}
+
+impl From<String> for ActionResult {
+    fn from(msg: String) -> Self {
+        ActionResult::Message(msg)
+    }
+}
 
 struct VolumeRow {
     cfg: VolumeConfig,
@@ -49,7 +70,7 @@ pub struct VolumeManagerModule {
     /// `migration_result`, required here for the same reason: `draw()`
     /// only gets `&MokuTheme`, not `&mut AppContext`, so a background task
     /// can't raise a toast directly.
-    action_result: Arc<Mutex<Option<String>>>,
+    action_result: Arc<Mutex<Option<ActionResult>>>,
     /// True while a `start_*` background task is in flight, cleared when
     /// its result is picked up by `poll_action_result`. Every `start_*`
     /// method checks this first and refuses to spawn a second task while
@@ -134,13 +155,30 @@ impl VolumeManagerModule {
 
     fn poll_action_result(&mut self) -> bool {
         let result = self.action_result.lock().unwrap().take();
-        if let Some(msg) = result {
-            self.busy = false;
-            self.show_message(msg);
-            true
-        } else {
-            false
+        let Some(result) = result else {
+            return false;
+        };
+        self.busy = false;
+        match result {
+            ActionResult::Message(msg) => self.show_message(msg),
+            ActionResult::RetryMountPassword {
+                volume_id,
+                display_name,
+                mountpoint,
+                message,
+            } => {
+                self.prompt = Some(PasswordPrompt {
+                    volume_id,
+                    display_name,
+                    mountpoint,
+                    focus: MountField::Password,
+                    input: zeroize::Zeroizing::new(String::new()),
+                    use_app_key: false,
+                    error: Some(message),
+                });
+            }
         }
+        true
     }
 
     fn start_mount(
@@ -156,14 +194,27 @@ impl VolumeManagerModule {
         self.busy = true;
         let slot = Arc::clone(&self.action_result);
         tokio::spawn(async move {
-            let msg = match worker::spawn_mount_process(&volume_id, &mountpoint, &password).await {
-                Ok(worker::MountOutcome::Ready { pid }) => {
-                    format!("Mounted '{display_name}' at {mountpoint} (worker PID: {pid}).")
-                }
-                Ok(worker::MountOutcome::Failed { message }) => format!("Mount failed: {message}"),
-                Err(e) => format!("Mount failed: {e:#}"),
-            };
-            *slot.lock().unwrap() = Some(msg);
+            let result: ActionResult =
+                match worker::spawn_mount_process(&volume_id, &mountpoint, &password).await {
+                    Ok(worker::MountOutcome::Ready { pid }) => {
+                        format!("Mounted '{display_name}' at {mountpoint} (worker PID: {pid}).")
+                            .into()
+                    }
+                    Ok(worker::MountOutcome::Failed {
+                        code: MountErrorCode::WrongPassword,
+                        message,
+                    }) => ActionResult::RetryMountPassword {
+                        volume_id,
+                        display_name,
+                        mountpoint,
+                        message,
+                    },
+                    Ok(worker::MountOutcome::Failed { message, .. }) => {
+                        format!("Mount failed: {message}").into()
+                    }
+                    Err(e) => format!("Mount failed: {e:#}").into(),
+                };
+            *slot.lock().unwrap() = Some(result);
         });
         self.show_message("Mounting...");
     }
@@ -191,12 +242,12 @@ impl VolumeManagerModule {
                     Ok(worker::MountOutcome::Ready { pid }) => {
                         format!("Mounted '{display_name}' at {mountpoint} (worker PID: {pid}).")
                     }
-                    Ok(worker::MountOutcome::Failed { message }) => {
+                    Ok(worker::MountOutcome::Failed { message, .. }) => {
                         format!("Mount failed: {message}")
                     }
                     Err(e) => format!("Mount failed: {e:#}"),
                 };
-            *slot.lock().unwrap() = Some(msg);
+            *slot.lock().unwrap() = Some(msg.into());
         });
         self.show_message("Mounting...");
     }
@@ -212,7 +263,7 @@ impl VolumeManagerModule {
                 Ok(cfg) => format!("Created '{}' (id: {}).", cfg.display_name, cfg.id),
                 Err(e) => format!("Create failed: {e:#}"),
             };
-            *slot.lock().unwrap() = Some(msg);
+            *slot.lock().unwrap() = Some(msg.into());
         });
         self.show_message("Creating...");
     }
@@ -233,7 +284,7 @@ impl VolumeManagerModule {
                 Ok(StopOutcome::Forced) => format!("Unmounted '{display_name}' (forced)."),
                 Err(e) => format!("Unmount failed: {e:#}"),
             };
-            *slot.lock().unwrap() = Some(msg);
+            *slot.lock().unwrap() = Some(msg.into());
         });
         self.show_message("Unmounting...");
     }
@@ -267,7 +318,7 @@ impl VolumeManagerModule {
                     Err(e) => format!("Delete failed: {e:#}"),
                 },
             };
-            *slot.lock().unwrap() = Some(msg);
+            *slot.lock().unwrap() = Some(msg.into());
         });
         self.show_message("Deleting...");
     }
@@ -444,6 +495,7 @@ impl TuiModule for VolumeManagerModule {
                                 focus: MountField::Mountpoint,
                                 input: zeroize::Zeroizing::new(String::new()),
                                 use_app_key: fast_path,
+                                error: None,
                             });
                         }
                     }
@@ -627,12 +679,49 @@ mod tests {
     fn test_poll_action_result_clears_busy_flag() {
         let mut module = VolumeManagerModule::new();
         module.busy = true;
-        *module.action_result.lock().unwrap() = Some("done".to_string());
+        *module.action_result.lock().unwrap() = Some("done".to_string().into());
         module.poll_action_result();
         assert!(
             !module.busy,
             "picking up a finished action's result must clear busy so the next one can start"
         );
+    }
+
+    #[test]
+    fn test_wrong_mount_password_reopens_the_prompt_with_the_error() {
+        let mut module = VolumeManagerModule::new();
+        module.busy = true;
+        *module.action_result.lock().unwrap() = Some(ActionResult::RetryMountPassword {
+            volume_id: "vol-1".to_string(),
+            display_name: "Notes".to_string(),
+            mountpoint: "M:".to_string(),
+            message: "wrong password for volume 'Notes'".to_string(),
+        });
+        assert!(module.poll_action_result());
+        assert!(!module.busy);
+        let prompt = module.prompt.as_ref().expect("the mount prompt must reopen");
+        assert_eq!(prompt.volume_id, "vol-1");
+        assert_eq!(prompt.mountpoint, "M:");
+        assert_eq!(prompt.focus, MountField::Password);
+        assert!(!prompt.use_app_key);
+        assert!(prompt.input.is_empty());
+        assert_eq!(prompt.error.as_deref(), Some("wrong password for volume 'Notes'"));
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                module.draw_prompt(f, f.area(), &MokuTheme::default(), prompt);
+            })
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("wrong password for volume"), "the error must be shown in the prompt");
     }
 
     #[tokio::test]

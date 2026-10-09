@@ -218,7 +218,7 @@ async fn mount(name: &str, mountpoint: Option<&str>) -> Result<()> {
                 cfg.display_name, resolved_mountpoint, pid
             );
         }
-        MountOutcome::Failed { message } => bail!("Mount failed: {message}"),
+        MountOutcome::Failed { message, .. } => bail!("Mount failed: {message}"),
     }
     Ok(())
 }

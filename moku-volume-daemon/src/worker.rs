@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 
 use crate::registry;
 use crate::status;
+use crate::{MountErrorCode, VolumeError};
 
 /// Printed by `run` (from inside `mount_and_wait`'s `on_mounted` callback)
 /// on the worker's stdout once WinFsp confirms the mount is actually live
@@ -16,6 +17,26 @@ use crate::status;
 /// line before declaring success, instead of the previous fire-and-forget
 /// "spawned, therefore succeeded" assumption.
 const MOUNT_READY_SENTINEL: &str = "MOKU_MOUNT_READY";
+
+/// Printed by `run` on the worker's stdout when the mount fails, as
+/// `MOKU_MOUNT_ERR <code>\t<message>` (code: `MountErrorCode::as_str`,
+/// message: the full cause chain on one line). The parent turns it into
+/// `MountOutcome::Failed { code, message }`, so it can react to the class
+/// of failure (re-ask for a wrong password) instead of guessing from the
+/// last stderr line.
+const MOUNT_ERROR_PREFIX: &str = "MOKU_MOUNT_ERR";
+
+fn mount_error_line(code: MountErrorCode, message: &str) -> String {
+    let one_line = message.replace(['\n', '\r', '\t'], " ");
+    format!("{MOUNT_ERROR_PREFIX} {}\t{one_line}", code.as_str())
+}
+
+/// Parses a `MOKU_MOUNT_ERR` line; `None` for any other line.
+fn parse_mount_error_line(line: &str) -> Option<(MountErrorCode, String)> {
+    let rest = line.trim_end().strip_prefix(MOUNT_ERROR_PREFIX)?.strip_prefix(' ')?;
+    let (code, message) = rest.split_once('\t').unwrap_or((rest, ""));
+    Some((MountErrorCode::parse(code), message.to_string()))
+}
 
 /// Reads the mount secret from stdin (piped by the parent process, see
 /// `spawn_mount_process`/`spawn_mount_process_with_volume_key` below)
@@ -68,7 +89,25 @@ fn parse_mount_secret(buf: &[u8]) -> Result<registry::MountSecret> {
 /// opens the engine, mounts it at `mountpoint`, and blocks until the
 /// process is asked to stop — via Ctrl+C, the control channel
 /// (`crate::control`), or (as a last resort) a hard kill.
+///
+/// On failure it also reports the error's class to the parent on stdout
+/// (`MOKU_MOUNT_ERR`, see `mount_error_line`) before returning it.
 pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
+    match run_inner(volume_id, mountpoint).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            println!(
+                "{}",
+                mount_error_line(e.code(), &moku_sys::util::error_chain(&e))
+            );
+            // Best-effort: if stdout is gone, so is the parent waiting on it.
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            Err(e.into())
+        }
+    }
+}
+
+async fn run_inner(volume_id: &str, mountpoint: &str) -> std::result::Result<(), VolumeError> {
     let secret = read_mount_secret_from_stdin()?;
     let volume_dir = registry::volume_dir(volume_id)?;
     let cfg = registry::load_config(&volume_dir).await?;
@@ -77,12 +116,10 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     // mount of the same volume fails right here, instead of after the
     // multi-second Argon2 password derivation.
     let lock = moku_volume_fs::VolumeLock::acquire(&volume_dir).map_err(|e| match e {
-        moku_volume_fs::VolumeFsError::Locked => anyhow!(
-            "volume '{}' is already mounted (or in use by another moku process)",
-            cfg.display_name
-        ),
-        other => anyhow::Error::new(other)
-            .context(format!("failed to lock volume '{}'", cfg.display_name)),
+        moku_volume_fs::VolumeFsError::Locked => {
+            VolumeError::AlreadyMounted(cfg.display_name.clone())
+        }
+        other => VolumeError::Fs(other),
     })?;
 
     let master_key = registry::resolve_volume_master_key(&volume_dir, &cfg, secret).await?;
@@ -106,12 +143,8 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     )?);
 
     if previous_session_unclean {
-        engine
-            .reconcile_usage()
-            .context("failed to reconcile usage after an unclean previous session")?;
-        engine
-            .flush_usage()
-            .context("failed to persist reconciled usage")?;
+        engine.reconcile_usage()?;
+        engine.flush_usage()?;
     }
 
     let (stop_tx, stop_rx) = std::sync::mpsc::channel();
@@ -163,7 +196,7 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     // spawn_blocking just keeps the (otherwise idle) tokio worker threads
     // free rather than changing behavior.
     let mount_engine = std::sync::Arc::clone(&engine);
-    let result: Result<()> = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         moku_volume_mount::mount_and_wait(mount_engine, &mountpoint, stop_rx, on_mounted)
     })
     .await
@@ -181,7 +214,7 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
     }
 
     crate::pid::remove(volume_id);
-    result
+    Ok(result?)
 }
 
 /// What `spawn_mount_process` learned about the worker it just spawned.
@@ -195,10 +228,14 @@ pub async fn run(volume_id: &str, mountpoint: &str) -> Result<()> {
 pub enum MountOutcome {
     /// WinFsp confirmed the mount is live (`MOUNT_READY_SENTINEL` seen).
     Ready { pid: u32 },
-    /// The worker exited before reporting ready — `message` is its last
-    /// stderr line (the real `anyhow::Error` text from `mount_and_wait`),
-    /// or a generic fallback if it produced no output at all.
-    Failed { message: String },
+    /// The worker exited before reporting ready. `code` and `message`
+    /// come from its `MOKU_MOUNT_ERR` line; a worker that died without one
+    /// (crash, older binary) is `MountErrorCode::Unknown` with its last
+    /// stderr line, or a generic fallback if it printed nothing.
+    Failed {
+        code: MountErrorCode,
+        message: String,
+    },
 }
 
 /// One line/event read off the spawned worker's stdout, stderr, or its
@@ -332,23 +369,35 @@ async fn run_and_wait_for_outcome(
 ) -> Result<MountOutcome> {
     let (pid, mut rx) = spawn_mount_process_inner(volume_id, mountpoint, stdin_payload)?;
     let mut last_stderr_line: Option<String> = None;
+    let mut reported: Option<(MountErrorCode, String)> = None;
 
     loop {
         match rx.recv().await {
             Some(WorkerEvent::Stdout(l)) if l.trim() == MOUNT_READY_SENTINEL => {
                 return Ok(MountOutcome::Ready { pid });
             }
-            Some(WorkerEvent::Stdout(_)) => {}
+            Some(WorkerEvent::Stdout(l)) => {
+                if let Some(err) = parse_mount_error_line(&l) {
+                    reported = Some(err);
+                }
+            }
             Some(WorkerEvent::Stderr(l)) => last_stderr_line = Some(l),
             Some(WorkerEvent::Exited(status)) => {
+                if let Some((code, message)) = reported {
+                    return Ok(MountOutcome::Failed { code, message });
+                }
                 let message = last_stderr_line.clone().unwrap_or_else(|| match status {
                     Ok(s) => format!("mount worker exited ({s}) with no error output"),
                     Err(e) => format!("failed to wait for mount worker: {e}"),
                 });
-                return Ok(MountOutcome::Failed { message });
+                return Ok(MountOutcome::Failed {
+                    code: MountErrorCode::Unknown,
+                    message,
+                });
             }
             None => {
                 return Ok(MountOutcome::Failed {
+                    code: MountErrorCode::Unknown,
                     message: "mount worker's status channel closed unexpectedly".to_string(),
                 });
             }
@@ -462,6 +511,33 @@ pub async fn stop_mount_process(volume_id: &str) -> Result<StopOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_mount_error_line_round_trips_code_and_message() {
+        let line = mount_error_line(MountErrorCode::WrongPassword, "wrong moku vault password");
+        assert_eq!(line, "MOKU_MOUNT_ERR wrong_password\twrong moku vault password");
+        assert_eq!(
+            parse_mount_error_line(&line),
+            Some((MountErrorCode::WrongPassword, "wrong moku vault password".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_mount_error_line_keeps_a_multiline_message_on_one_line() {
+        let line = mount_error_line(MountErrorCode::Other, "a\nb\tc");
+        assert_eq!(line.lines().count(), 1);
+        assert_eq!(parse_mount_error_line(&line).unwrap().1, "a b c");
+    }
+
+    #[test]
+    fn test_parse_mount_error_line_ignores_other_lines_and_unknown_codes() {
+        assert_eq!(parse_mount_error_line("MOKU_MOUNT_READY"), None);
+        assert_eq!(parse_mount_error_line("some log output"), None);
+        assert_eq!(
+            parse_mount_error_line("MOKU_MOUNT_ERR from_the_future\tx"),
+            Some((MountErrorCode::Unknown, "x".to_string()))
+        );
+    }
 
     #[test]
     fn test_parse_mount_secret_tags() {
