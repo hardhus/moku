@@ -12,8 +12,8 @@ use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use moku_core::{
-    AppContext, ModuleId, MokuConfig, Router, SecurityManager, StorageManager, ToastManager,
-    TuiRegistry, VaultSession, keys_match,
+    AppContext, ModuleId, MokuConfig, MokuTheme, Router, SecurityManager, StorageManager,
+    ToastManager, TuiRegistry, VaultSession, keys_match,
 };
 
 /// Below this many versions behind, a key-scheme upgrade is applied
@@ -178,7 +178,7 @@ pub async fn run(
             terminal.draw(|f| {
                 let cfg_guard = ctx.config.load();
                 let cfg: &MokuConfig = &cfg_guard;
-                let theme = cfg.get_active_theme();
+                let theme = MokuTheme::from_config(cfg);
                 let area = f.area();
 
                 match state {

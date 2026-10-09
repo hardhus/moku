@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
 
-use moku_core::{Command, MokuConfig, resolve_event};
+use moku_core::{Command, MokuConfig, MokuTheme, resolve_event};
 
 #[derive(Deserialize, Default, PartialEq, Debug)]
 #[serde(default)]
@@ -35,7 +35,7 @@ fn test_complex_config_and_theme_integration() {
     let config: MokuConfig = toml::from_str(raw_toml).expect("TOML parse error");
 
     // 1. THEME INTEGRATION TEST: Is HEX -> RGB conversion correct?
-    let theme = config.get_active_theme();
+    let theme = MokuTheme::from_config(&config);
     assert_eq!(theme.base_fg, ratatui::style::Color::Rgb(255, 0, 255));
     assert_eq!(theme.base_bg, ratatui::style::Color::Black);
 

@@ -11,7 +11,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use moku_core::{AppContext, Command, MokuConfig, resolve_event};
+use moku_core::{AppContext, Command, MokuConfig, MokuTheme, resolve_event};
 
 use super::SettingsTab;
 
@@ -215,7 +215,7 @@ impl SettingsTab for CommitTab {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, config: &MokuConfig) -> Result<()> {
-        let theme = config.get_active_theme();
+        let theme = MokuTheme::from_config(config);
         let settings: CommitModuleSettings = config.resolve_module_config("commit");
         let editing_index = self.editing.is_some().then_some(self.state.selected()).flatten();
 

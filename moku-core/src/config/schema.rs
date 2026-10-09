@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{MokuTheme, theme::ThemeColors};
+use super::ThemeColors;
 
 /// Main configuration structure holding all settings.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -74,15 +74,6 @@ impl MokuConfig {
             .and_then(|v| v.get("keys"))
             .cloned()
             .and_then(|k| k.try_into().ok())
-    }
-
-    pub fn get_active_theme(&self) -> MokuTheme {
-        let theme_name = &self.general.theme;
-        if let Some(colors) = self.themes.get(theme_name) {
-            MokuTheme::from_colors(colors)
-        } else {
-            MokuTheme::default()
-        }
     }
 }
 

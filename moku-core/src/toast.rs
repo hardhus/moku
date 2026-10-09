@@ -8,6 +8,7 @@ use ratatui::{
 };
 
 use crate::config::MokuConfig;
+use crate::theme::MokuTheme;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ToastType {
@@ -69,7 +70,7 @@ impl ToastManager {
     }
 
     pub fn draw(&self, f: &mut Frame, area: Rect, config: &MokuConfig) {
-        let theme = config.get_active_theme();
+        let theme = MokuTheme::from_config(config);
         let width = std::cmp::min(area.width, 40);
         let mut y_offset = 2;
 

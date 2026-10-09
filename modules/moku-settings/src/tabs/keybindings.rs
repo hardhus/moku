@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use moku_core::{AppContext, MokuConfig};
+use moku_core::{AppContext, MokuConfig, MokuTheme};
 
 use super::SettingsTab;
 
@@ -29,7 +29,7 @@ impl SettingsTab for KeybindingsTab {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, config: &MokuConfig) -> Result<()> {
-        let theme = config.get_active_theme();
+        let theme = MokuTheme::from_config(config);
 
         let block = Block::default()
             .borders(Borders::ALL)
