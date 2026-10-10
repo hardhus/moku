@@ -20,7 +20,7 @@ pub async fn load_entries(storage: &StorageManager) -> Result<Vec<SecretEntry>> 
 
 pub async fn save_entries(storage: &StorageManager, config: &MokuConfig, entries: &[SecretEntry]) -> Result<()> {
     let encrypt = moku_config::resolve_encryption(config, ModuleId::SECRETS.as_str(), true)?;
-    storage.save(ModuleId::SECRETS.as_str(), STORAGE_KEY, &entries.to_vec(), encrypt).await?;
+    storage.save(ModuleId::SECRETS.as_str(), STORAGE_KEY, entries, encrypt).await?;
     Ok(())
 }
 
@@ -71,7 +71,7 @@ fn csv_field(s: &str) -> String {
 fn csv_row(e: &SecretEntry) -> String {
     [
         csv_field(&e.name),
-        csv_field(&e.value),
+        csv_field(e.value.expose()),
         csv_field(e.category.as_deref().unwrap_or("")),
         csv_field(e.username.as_deref().unwrap_or("")),
         csv_field(e.url.as_deref().unwrap_or("")),
@@ -185,7 +185,7 @@ mod tests {
         let bytes = export_encrypted(&entries, &"correct horse battery staple".into()).await.unwrap();
         let imported = import_encrypted(&bytes, &"correct horse battery staple".into()).await.unwrap();
         assert_eq!(imported.len(), 2);
-        assert_eq!(imported[1].value.as_str(), "sekrit");
+        assert_eq!(imported[1].value.expose(), "sekrit");
     }
 
     #[tokio::test]

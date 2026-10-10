@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 
 use moku_core::{CliContext, CliModule, ModuleId, ModuleMeta};
+use moku_crypto::SecretString;
 
 use crate::engine::{self, PlainFormat};
 use crate::generator::{self, CharsetOptions, DicewareOptions, Wordlist};
@@ -214,18 +215,14 @@ impl CliModule for SecretsCliModule {
                 }
                 let value = if generate {
                     let opts = CharsetOptions::default();
-                    let pw = generator::generate_charset_password(&opts)?;
-                    println!("Generated value: {pw}");
+                    let pw = SecretString::from(generator::generate_charset_password(&opts)?);
+                    println!("Generated value: {}", pw.expose());
                     pw
                 } else {
-                    rpassword::prompt_password("Value: ")
-                        .map_err(|e| anyhow!("Failed to read value: {e}"))?
+                    moku_vault::cli::read_password("Value: ")?
                 };
                 let totp_seed = if totp {
-                    Some(
-                        rpassword::prompt_password("TOTP seed (base32): ")
-                            .map_err(|e| anyhow!("Failed to read TOTP seed: {e}"))?,
-                    )
+                    Some(moku_vault::cli::read_password("TOTP seed (base32): ")?)
                 } else {
                     None
                 };
@@ -272,9 +269,9 @@ impl CliModule for SecretsCliModule {
                 println!(
                     "Value:    {}",
                     if reveal {
-                        entry.value.to_string()
+                        entry.value.expose().to_string()
                     } else {
-                        "•".repeat(entry.value.chars().count())
+                        "•".repeat(entry.value.expose().chars().count())
                     }
                 );
                 if let Some(notes) = &entry.notes {
@@ -289,7 +286,7 @@ impl CliModule for SecretsCliModule {
                     .totp_seed
                     .as_ref()
                     .ok_or_else(|| anyhow!("'{name}' has no TOTP seed configured"))?;
-                println!("{}", engine::totp_code_now(seed)?);
+                println!("{}", engine::totp_code_now(seed.expose())?);
             }
             Some(SecretsCmd::Remove { name }) => {
                 let mut entries = engine::load_entries(storage).await?;
@@ -351,7 +348,7 @@ async fn ensure_unlocked(ctx: &CliContext) -> Result<()> {
     Ok(())
 }
 
-fn prompt_new_export_password() -> Result<moku_crypto::SecretString> {
+fn prompt_new_export_password() -> Result<SecretString> {
     Ok(moku_vault::cli::prompt_new_password(
         "New export password: ",
         "Confirm export password: ",

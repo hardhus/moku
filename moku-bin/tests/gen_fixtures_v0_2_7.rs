@@ -28,7 +28,6 @@ use moku_vault::{SecurityManager, VaultSession};
 use moku_volume_daemon::PasswordMode;
 use moku_volume_daemon::registry::{VolumeConfig, derive_default_volume_master_key};
 use moku_volume_fs::{VirtualPath, VolumeEngine, derive_volume_keys};
-use zeroize::Zeroizing;
 
 pub const VAULT_PASSWORD: &str = "foo-test-password";
 pub const CUSTOM_VOLUME_PASSWORD: &str = "bar-volume-password";
@@ -107,11 +106,11 @@ fn secret(id: &str, name: &str, value: &str, totp: Option<&str>) -> SecretEntry 
     SecretEntry {
         id: id.into(),
         name: name.into(),
-        value: Zeroizing::new(value.into()),
+        value: value.into(),
         category: Some("foo".into()),
         username: Some("foo-user".into()),
         url: Some("https://example.com".into()),
-        totp_seed: totp.map(Into::into),
+        totp_seed: totp.map(moku_crypto::SecretString::from),
         notes: None,
         created_at: TS,
         updated_at: TS,

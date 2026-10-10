@@ -203,7 +203,7 @@ impl StorageManager {
         self.db_cache.write().await.remove(module_id);
     }
 
-    pub async fn save<T: Serialize + Send + Sync + 'static>(
+    pub async fn save<T: Serialize + Send + Sync + ?Sized + 'static>(
         &self,
         module_id: &str,
         key: &str,
@@ -219,7 +219,7 @@ impl StorageManager {
     /// migration path (`migrate_module_encryption`) passes `false` for
     /// every individual key and flushes once after the whole batch instead
     /// of once per key.
-    async fn save_impl<T: Serialize + Send + Sync + 'static>(
+    async fn save_impl<T: Serialize + Send + Sync + ?Sized + 'static>(
         &self,
         module_id: &str,
         key: &str,

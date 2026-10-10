@@ -21,8 +21,11 @@ async fn k9_msxp_v1_fixture_imports() {
         .unwrap();
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["foo-api", "bar-login"]);
-    assert_eq!(entries[0].value.as_str(), "bar-secret-value");
-    assert_eq!(entries[1].totp_seed.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+    assert_eq!(entries[0].value.expose(), "bar-secret-value");
+    assert_eq!(
+        entries[1].totp_seed.as_ref().map(|s| s.expose()),
+        Some("JBSWY3DPEHPK3PXP")
+    );
 }
 
 #[tokio::test]

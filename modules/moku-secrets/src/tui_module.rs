@@ -10,7 +10,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
-use zeroize::Zeroizing;
+use moku_crypto::SecretString;
 
 use moku_core::{
     AppContext, Command, ModuleId, ModuleMeta, ModuleStatus, MokuTheme, TuiModule, resolve_event,
@@ -36,9 +36,9 @@ enum AddField {
 struct AddState {
     focus: AddField,
     name: String,
-    /// Zeroized on drop — this is the secret itself while it's being
+    /// Wiped on drop — this is the secret itself while it's being
     /// typed, not just a display string.
-    value: Zeroizing<String>,
+    value: SecretString,
     error: Option<String>,
 }
 
@@ -51,24 +51,25 @@ enum ExportKind {
 
 /// Which field of the export form has focus — `Format` isn't a text field
 /// (`←`/`→`/`Space` cycle it, same as `CreateForm`'s `Mode`); `Password`
-/// only matters (and is only reachable via `Tab`) when `kind ==
-/// Encrypted`.
+/// and `Confirm` only matter (and are only reachable via `Tab`) when
+/// `kind == Encrypted`.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum ExportField {
     Format,
     Path,
     Password,
+    Confirm,
 }
 
 struct ExportState {
     focus: ExportField,
     kind: ExportKind,
     path: String,
-    /// Zeroized on drop — a fresh backup password, typed once (no
-    /// confirmation field: unlike a vault's own password this only
-    /// protects a single throwaway export file, so a typo just means a
-    /// bad backup rather than a locked-out vault).
-    password: Zeroizing<String>,
+    /// Wiped on drop. A brand-new password for the export file, so it is
+    /// asked twice: a typo would otherwise produce a backup nobody can
+    /// open, and there is nothing else to check it against.
+    password: SecretString,
+    confirm: SecretString,
     error: Option<String>,
 }
 
@@ -221,8 +222,7 @@ impl SecretsModule {
                     add.error = Some("Value cannot be empty.".to_string());
                 } else {
                     keep_open = false;
-                    self.entries
-                        .push(SecretEntry::new(name.clone(), add.value.to_string()));
+                    self.entries.push(SecretEntry::new(name.clone(), add.value.take()));
                     self.state.select(Some(self.entries.len() - 1));
                     self.save(ctx).await;
                     self.show_message(format!("Added '{name}'"));
@@ -233,7 +233,7 @@ impl SecretsModule {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && add.focus == AddField::Value =>
             {
                 match generator::generate_charset_password(&CharsetOptions::default()) {
-                    Ok(pw) => add.value = Zeroizing::new(pw),
+                    Ok(pw) => add.value = SecretString::from(pw),
                     Err(e) => add.error = Some(format!("Generate failed: {e}")),
                 }
             }
@@ -275,7 +275,8 @@ impl SecretsModule {
                     ExportField::Format => ExportField::Path,
                     ExportField::Path if export.kind == ExportKind::Encrypted => ExportField::Password,
                     ExportField::Path => ExportField::Format,
-                    ExportField::Password => ExportField::Format,
+                    ExportField::Password => ExportField::Confirm,
+                    ExportField::Confirm => ExportField::Format,
                 };
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
@@ -291,6 +292,15 @@ impl SecretsModule {
             KeyCode::Enter => {
                 if export.path.trim().is_empty() {
                     export.error = Some("Path cannot be empty.".to_string());
+                } else if export.kind == ExportKind::Encrypted && export.password.is_empty() {
+                    export.error = Some("Password cannot be empty.".to_string());
+                } else if export.kind == ExportKind::Encrypted
+                    && export.password.expose() != export.confirm.expose()
+                {
+                    export.error = Some("Passwords didn't match. Type them again.".to_string());
+                    export.password.zeroize();
+                    export.confirm.zeroize();
+                    export.focus = ExportField::Password;
                 } else {
                     self.finish_export().await;
                 }
@@ -300,6 +310,7 @@ impl SecretsModule {
                     ExportField::Format => {}
                     ExportField::Path => export.path.push(c),
                     ExportField::Password => export.password.push(c),
+                    ExportField::Confirm => export.confirm.push(c),
                 }
                 export.error = None;
             }
@@ -311,6 +322,9 @@ impl SecretsModule {
                     }
                     ExportField::Password => {
                         export.password.pop();
+                    }
+                    ExportField::Confirm => {
+                        export.confirm.pop();
                     }
                 }
                 export.error = None;
@@ -334,7 +348,7 @@ impl SecretsModule {
                 Err(e) => Err(e),
             },
             ExportKind::Encrypted => {
-                match engine::export_encrypted(&self.entries, &moku_crypto::SecretString::from(export.password.as_str())).await {
+                match engine::export_encrypted(&self.entries, &export.password).await {
                     Ok(bytes) => tokio::fs::write(&export.path, bytes).await.map_err(Into::into),
                     Err(e) => Err(e),
                 }
@@ -415,7 +429,7 @@ impl SecretsModule {
         };
         let marker = |focused: bool| if focused { ">" } else { " " };
 
-        let masked_value: String = add.value.chars().map(|_| '•').collect();
+        let masked_value: String = add.value.expose().chars().map(|_| '•').collect();
         let mut lines = vec![
             Line::styled(
                 format!("{} Name:  {}", marker(add.focus == AddField::Name), add.name),
@@ -451,7 +465,8 @@ impl SecretsModule {
         let Some(export) = &self.export else { return };
         let chunks = Layout::vertical([
             Constraint::Percentage(35),
-            Constraint::Length(5),
+            // Borders + format, path, password, confirm and an error line.
+            Constraint::Length(7),
             Constraint::Length(2),
             Constraint::Percentage(35),
         ])
@@ -493,7 +508,8 @@ impl SecretsModule {
             ),
         ];
         if export.kind == ExportKind::Encrypted {
-            let masked_password: String = export.password.chars().map(|_| '•').collect();
+            let masked_password: String = export.password.expose().chars().map(|_| '•').collect();
+            let masked_confirm: String = export.confirm.expose().chars().map(|_| '•').collect();
             lines.push(Line::styled(
                 format!(
                     "{} Password: {}",
@@ -501,6 +517,14 @@ impl SecretsModule {
                     masked_password
                 ),
                 field_style(export.focus == ExportField::Password),
+            ));
+            lines.push(Line::styled(
+                format!(
+                    "{} Confirm:  {}",
+                    marker(export.focus == ExportField::Confirm),
+                    masked_confirm
+                ),
+                field_style(export.focus == ExportField::Confirm),
             ));
         }
         if let Some(err) = &export.error {
@@ -609,7 +633,7 @@ impl TuiModule for SecretsModule {
                 self.add = Some(AddState {
                     focus: AddField::Name,
                     name: String::new(),
-                    value: Zeroizing::new(String::new()),
+                    value: SecretString::with_capacity(128),
                     error: None,
                 });
             }
@@ -624,7 +648,8 @@ impl TuiModule for SecretsModule {
                     focus: ExportField::Format,
                     kind: ExportKind::Encrypted,
                     path: String::new(),
-                    password: Zeroizing::new(String::new()),
+                    password: SecretString::with_capacity(128),
+                    confirm: SecretString::with_capacity(128),
                     error: None,
                 });
             }
@@ -698,16 +723,16 @@ impl TuiModule for SecretsModule {
         frame.render_stateful_widget(list, panes[0], &mut self.state);
 
         let detail = if let Some(entry) = self.selected() {
-            let masked = "•".repeat(entry.value.chars().count());
+            let masked = "•".repeat(entry.value.expose().chars().count());
             let value_line = if self.reveal {
-                entry.value.as_str()
+                entry.value.expose()
             } else {
                 masked.as_str()
             };
             let totp_line = entry
                 .totp_seed
                 .as_ref()
-                .map(|seed| match engine::totp_code_now(seed) {
+                .map(|seed| match engine::totp_code_now(seed.expose()) {
                     Ok(code) => format!("TOTP:     {code}"),
                     Err(e) => format!("TOTP:     error ({e})"),
                 })
@@ -1012,7 +1037,7 @@ mod add_export_form_tests {
         module.add = Some(AddState {
             focus: AddField::Name,
             name: String::new(),
-            value: Zeroizing::new(String::new()),
+            value: SecretString::new(),
             error: None,
         });
         module
@@ -1024,7 +1049,8 @@ mod add_export_form_tests {
             focus: ExportField::Format,
             kind: ExportKind::Encrypted,
             path: String::new(),
-            password: Zeroizing::new(String::new()),
+            password: SecretString::new(),
+            confirm: SecretString::new(),
             error: None,
         });
         module
@@ -1052,7 +1078,7 @@ mod add_export_form_tests {
 
         module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
         module.handle_event(&key(KeyCode::Char('h')), &mut ctx).await.unwrap();
-        assert_eq!(module.add.as_ref().unwrap().value.as_str(), "h");
+        assert_eq!(module.add.as_ref().unwrap().value.expose(), "h");
     }
 
     #[tokio::test]
@@ -1082,7 +1108,7 @@ mod add_export_form_tests {
         {
             let add = module.add.as_mut().unwrap();
             add.name = "github".to_string();
-            add.value = Zeroizing::new("hunter2".to_string());
+            add.value = SecretString::from("hunter2");
         }
         let mut ctx = create_test_context().await;
 
@@ -1090,7 +1116,7 @@ mod add_export_form_tests {
         assert!(module.add.is_none(), "valid fields should submit and close the form");
         assert_eq!(module.entries.len(), 1);
         assert_eq!(module.entries[0].name, "github");
-        assert_eq!(module.entries[0].value.as_str(), "hunter2");
+        assert_eq!(module.entries[0].value.expose(), "hunter2");
     }
 
     #[tokio::test]
@@ -1105,7 +1131,7 @@ mod add_export_form_tests {
     #[test]
     fn test_add_render_shows_masked_value_not_plaintext() {
         let mut module = new_add_module();
-        module.add.as_mut().unwrap().value = Zeroizing::new("hunter2".to_string());
+        module.add.as_mut().unwrap().value = SecretString::from("hunter2");
 
         let (width, height) = (60u16, 20u16);
         let backend = TestBackend::new(width, height);
@@ -1136,7 +1162,60 @@ mod add_export_form_tests {
         module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
         assert_eq!(module.export.as_ref().unwrap().focus, ExportField::Password);
         module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
+        assert_eq!(module.export.as_ref().unwrap().focus, ExportField::Confirm);
+        module.handle_event(&key(KeyCode::Tab), &mut ctx).await.unwrap();
         assert_eq!(module.export.as_ref().unwrap().focus, ExportField::Format);
+    }
+
+    /// A new export password is asked twice: a typo would otherwise
+    /// produce a backup nobody can open.
+    #[tokio::test]
+    async fn test_export_encrypted_mismatched_confirmation_is_rejected() {
+        let mut module = new_export_module();
+        let mut ctx = create_test_context().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("backup.msxp");
+        {
+            let export = module.export.as_mut().unwrap();
+            export.path = out.display().to_string();
+            export.password = SecretString::from("hunter2");
+            export.confirm = SecretString::from("hunter3");
+        }
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+
+        let export = module.export.as_ref().expect("form should stay open");
+        assert!(export.error.as_ref().unwrap().contains("match"));
+        assert!(export.password.is_empty() && export.confirm.is_empty());
+        assert_eq!(export.focus, ExportField::Password);
+        assert!(!out.exists(), "nothing may be written on a mismatch");
+    }
+
+    #[tokio::test]
+    async fn test_export_encrypted_empty_password_is_rejected() {
+        let mut module = new_export_module();
+        let mut ctx = create_test_context().await;
+        module.export.as_mut().unwrap().path = "unused.msxp".to_string();
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+        let export = module.export.as_ref().expect("form should stay open");
+        assert!(export.error.as_ref().unwrap().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn test_export_encrypted_matching_confirmation_writes_the_file() {
+        let mut module = new_export_module();
+        let mut ctx = create_test_context().await;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("backup.msxp");
+        {
+            let export = module.export.as_mut().unwrap();
+            export.path = out.display().to_string();
+            export.password = SecretString::from("hunter2");
+            export.confirm = SecretString::from("hunter2");
+        }
+        module.handle_event(&key(KeyCode::Enter), &mut ctx).await.unwrap();
+        assert!(module.export.is_none());
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(engine::import_encrypted(&bytes, &"hunter2".into()).await.unwrap().is_empty());
     }
 
     #[tokio::test]

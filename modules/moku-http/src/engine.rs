@@ -51,7 +51,9 @@ pub async fn resolve_secret_refs(raw_source: &str, storage: &StorageManager, var
     for name in names {
         let entry = moku_secrets::engine::find_by_name(&entries, &name)
             .ok_or_else(|| anyhow!("secrets.{name} is referenced but no such secret exists"))?;
-        vars.insert(format!("secrets.{name}"), entry.value.to_string());
+        // Known gap (audit P7 note): `vars` holds the resolved value as a
+        // plain `String` until the request is built.
+        vars.insert(format!("secrets.{name}"), entry.value.expose().to_string());
     }
     Ok(())
 }
