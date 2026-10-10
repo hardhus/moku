@@ -2616,6 +2616,7 @@ dependencies = [
  "futures",
  "moku-config",
  "moku-core",
+ "moku-migrate",
  "moku-notify",
  "moku-rss",
  "moku-store",

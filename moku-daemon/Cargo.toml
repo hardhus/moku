@@ -11,6 +11,7 @@ path = "src/lib.rs"
 moku-vault.workspace = true
 moku-sys.workspace = true
 moku-store.workspace = true
+moku-migrate.workspace = true
 moku-config.workspace = true
 moku-core.workspace = true
 anyhow.workspace = true

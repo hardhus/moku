@@ -42,11 +42,38 @@ fn record_tick_result(
     }
 }
 
+/// Whether the daemon may run on `data_dir` (audit P4): only on the
+/// current data format (or a fresh directory). On an older one it would
+/// hold the module DBs open while the user upgrades, and its runtime
+/// can't read older formats anyway; a newer one belongs to a newer moku
+/// (KN-4.5). The TUI and `moku data upgrade` do the upgrade.
+pub fn check_data_format(data_dir: &std::path::Path) -> Result<()> {
+    use moku_migrate::DataState;
+    match moku_migrate::detect_format(data_dir)? {
+        DataState::Fresh | DataState::Current { .. } => Ok(()),
+        DataState::Behind { from, .. } => anyhow::bail!(
+            "the data directory is in data format {from}, older than this moku's {}; \
+             open moku (or run `moku data upgrade`) to upgrade it, then start the daemon",
+            moku_migrate::CURRENT_DATA_FORMAT
+        ),
+        DataState::Newer { found } => Err(moku_migrate::MigrateError::NewerFormat {
+            found,
+            supported: moku_migrate::CURRENT_DATA_FORMAT,
+        }
+        .into()),
+    }
+}
+
 /// Run the background service daemon.
 pub async fn run_worker() -> Result<()> {
     let _guard = crate::logging::init()?;
     if crate::status::is_running() {
         anyhow::bail!("Daemon is already running.");
+    }
+    // Logged, since a daemon started at logon has nowhere else to say it.
+    if let Err(e) = check_data_format(&moku_sys::dirs::get_data_dir()?) {
+        tracing::error!("not starting: {e:#}");
+        return Err(e);
     }
     crate::pid::write()?;
 
@@ -133,6 +160,27 @@ pub async fn run_worker() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_daemon_runs_only_on_the_current_data_format() {
+        let fresh = tempfile::tempdir().unwrap();
+        assert!(check_data_format(fresh.path()).is_ok());
+
+        let current = tempfile::tempdir().unwrap();
+        std::fs::write(current.path().join("FORMAT"), "data_format = 1
+").unwrap();
+        assert!(check_data_format(current.path()).is_ok());
+
+        let behind = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(behind.path().join("vault")).unwrap();
+        let err = check_data_format(behind.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("data format v0"), "{err:#}");
+
+        let newer = tempfile::tempdir().unwrap();
+        std::fs::write(newer.path().join("FORMAT"), "data_format = 9
+").unwrap();
+        assert!(check_data_format(newer.path()).is_err());
+    }
 
     #[test]
     fn test_record_first_tick_success_inserts_entry() {

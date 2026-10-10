@@ -58,6 +58,16 @@ async fn main() -> Result<()> {
                     }
                     return Ok(());
                 }
+                // The worker checks this too (and logs it); checking here
+                // as well lets a manual start say why it didn't start.
+                let data_dir = moku_sys::dirs::get_data_dir().map_err(|e| eyre!(e))?;
+                if let Err(e) = moku_daemon::worker::check_data_format(&data_dir) {
+                    if !from_autostart {
+                        eprintln!("Not starting the daemon: {e:#}");
+                        std::process::exit(1);
+                    }
+                    return Ok(());
+                }
                 let exe = std::env::current_exe().map_err(|e| eyre!(e))?;
                 let mut cmd = std::process::Command::new(&exe);
                 cmd.arg("daemon").arg("run");
