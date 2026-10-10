@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use toml_edit::DocumentMut;
 
 use crate::edit;
+use crate::migrate;
 use crate::schema::{CURRENT_CONFIG_VERSION, deserialize_at};
 use crate::{ConfigError, ConfigIssue, MokuConfig};
 
@@ -165,6 +166,28 @@ impl ConfigHandle {
                     format!(
                         "not valid TOML ({parse_error}); using the defaults, and changes won't be saved this session{copy}"
                     ),
+                    issues,
+                );
+            }
+        };
+
+        // An older config_version runs the config chain first (empty
+        // today, so this never fires yet: see migrate.rs). A failed
+        // upgrade writes nothing and opens the file read-only.
+        let (doc, table) = match migrate::upgrade_file(&path, &doc, migrate::file_version(&table)) {
+            Ok(None) => (doc, table),
+            Ok(Some(text)) => match (text.parse::<DocumentMut>(), toml::from_str::<toml::Table>(&text)) {
+                (Ok(doc), Ok(table)) => (doc, table),
+                _ => {
+                    return read_only(
+                        "the upgraded config.toml doesn't parse; using the defaults".to_string(),
+                        issues,
+                    );
+                }
+            },
+            Err(reason) => {
+                return read_only(
+                    format!("{reason}; using the defaults, and changes won't be saved this session"),
                     issues,
                 );
             }
