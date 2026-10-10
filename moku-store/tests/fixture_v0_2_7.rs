@@ -71,7 +71,7 @@ async fn v0_2_7_datadir_has_the_intended_format_mix() {
 }
 
 #[tokio::test]
-async fn v0_2_7_datadir_opens_and_loads_every_record() {
+async fn v0_2_7_datadir_opens_and_loads_its_current_format_records() {
     let tmp = tempfile::tempdir().unwrap();
     let datadir = tmp.path().join("datadir");
     copy_dir(&fixture_root().join("datadir"), &datadir);
@@ -87,22 +87,16 @@ async fn v0_2_7_datadir_opens_and_loads_every_record() {
         .await
         .unwrap();
 
-    assert_eq!(storage.data_dir_key_scheme_version().await, 0);
-
-    let todo: Value = storage.load("todo", "items").await.unwrap();
-    let titles: Vec<&str> = todo
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| t["title"].as_str().unwrap())
-        .collect();
-    assert_eq!(titles, ["foo task", "bar subtask", "baz task"]);
-    assert_eq!(todo[1]["parent_id"], "0000000000000001");
-
-    let secrets: Value = storage.load("secrets", "entries").await.unwrap();
-    assert_eq!(secrets[0]["name"], "foo-api");
-    assert_eq!(secrets[0]["value"], "bar-secret-value");
-    assert_eq!(secrets[1]["totp_seed"], "JBSWY3DPEHPK3PXP");
+    // The runtime reads only the current format: the format-0 records
+    // (todo, secrets: raw root key) wait for moku-migrate's upgrade, which
+    // moku-migrate/tests/fixture_v0_2_7.rs checks loads them afterwards.
+    for (module, key) in [("todo", "items"), ("secrets", "entries")] {
+        let loaded = storage.load::<Value>(module, key).await;
+        assert!(
+            matches!(loaded, Err(moku_store::StoreError::NeedsUpgrade { .. })),
+            "{module}/{key}: {loaded:?}"
+        );
+    }
 
     let bookmarks: Value = storage
         .load("bookmark", "bookmarks_encrypted")

@@ -5,7 +5,8 @@ use moku_crypto::CryptoError;
 use moku_sys::dirs::DirsError;
 
 /// Why a storage operation failed. Each variant is a case a caller can
-/// act on differently: `Locked` (unlock first), `InUseByOtherProcess`
+/// act on differently: `Locked` (unlock first), `NeedsUpgrade` (run the
+/// data-format upgrade), `InUseByOtherProcess`
 /// (close the other moku), `Tampered`/`Corrupt`/`SchemaMismatch`/
 /// `MissingBlob` (data is stored but can't be read; never treat it as
 /// empty), versus plain I/O or backend failures.
@@ -50,12 +51,13 @@ pub enum StoreError {
         #[source]
         source: io::Error,
     },
-    #[error("migrating record '{key}' in module '{module}' failed: {message}")]
-    Transform {
-        module: String,
-        key: String,
-        message: String,
-    },
+    /// An encrypted record still in an older data format (format 0, raw
+    /// root key). The runtime doesn't read old formats; moku-migrate's
+    /// upgrade converts it.
+    #[error(
+        "record '{key}' in module '{module}' is in an older data format; upgrade the data (accept the update prompt, or run `moku data upgrade`)"
+    )]
+    NeedsUpgrade { module: String, key: String },
     #[error("failed to {what} at {}", path.display())]
     Io {
         what: &'static str,

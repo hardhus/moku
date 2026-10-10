@@ -1,4 +1,5 @@
 use super::*;
+use moku_crypto::RootKey;
 use moku_vault::{SecurityManager, VaultSession};
 use tempfile::tempdir;
 
@@ -382,22 +383,12 @@ async fn test_migrate_encrypted_to_plaintext_readable_after_relock() {
     assert_eq!(a, "one");
 }
 
-/// Simulates a record written before per-module HKDF subkeys existed
-/// (directly encrypted under the raw master key, `key_scheme: V0`, no
-/// `save()` call involved) — `load()` must still transparently read
-/// it correctly, with zero action required, forever.
-#[tokio::test]
-async fn test_v0_key_scheme_record_still_loads() {
-    let temp = tempdir().unwrap();
-    let session = unlocked_session().await;
-    let manager =
-        StorageManager::new_with_root(Arc::clone(&session), temp.path().to_path_buf())
-            .await
-            .unwrap();
-
+/// Writes an encrypted record the way data format 0 did: sealed under the
+/// raw root key, tagged `V0`, straight into sled (no `save()`).
+async fn insert_v0_record(manager: &StorageManager, session: &VaultSession, module: &str, key: &str) {
     let raw_bytes = serde_json::to_vec(&"legacy value".to_string()).unwrap();
     let ciphertext = session
-        .with(|master| format_v1::seal_gcm_no_aad(master, &raw_bytes))
+        .with(|root| format_v1::seal_gcm_no_aad(root, &raw_bytes))
         .unwrap()
         .unwrap();
     let envelope = StorageEnvelope {
@@ -408,14 +399,48 @@ async fn test_v0_key_scheme_record_still_loads() {
         hash: None,
         key_scheme: KeyScheme::V0,
     };
-    let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
-
-    let db = manager.get_or_open_db("mod1").await.unwrap();
-    db.insert("a", envelope_bytes).unwrap();
+    let db = manager.get_or_open_db(module).await.unwrap();
+    db.insert(key, serde_json::to_vec(&envelope).unwrap()).unwrap();
     db.flush().unwrap();
+}
 
-    let loaded: String = manager.load("mod1", "a").await.unwrap();
-    assert_eq!(loaded, "legacy value");
+/// The runtime only reads the current format: an encrypted V0 record is
+/// `NeedsUpgrade` (never decrypted with the root key, never "empty").
+/// Converting it is moku-migrate's hop 0 -> 1 (tested there).
+#[tokio::test]
+async fn test_v0_encrypted_record_needs_upgrade() {
+    let temp = tempdir().unwrap();
+    let session = unlocked_session().await;
+    let manager =
+        StorageManager::new_with_root(Arc::clone(&session), temp.path().to_path_buf())
+            .await
+            .unwrap();
+    insert_v0_record(&manager, &session, "mod1", "a").await;
+
+    let loaded = manager.load::<String>("mod1", "a").await;
+    assert!(matches!(loaded, Err(StoreError::NeedsUpgrade { .. })), "got {loaded:?}");
+    let loaded = manager.load_opt::<String>("mod1", "a").await;
+    assert!(matches!(loaded, Err(StoreError::NeedsUpgrade { .. })), "got {loaded:?}");
+}
+
+/// Plaintext records have always been tagged `V0` ("Legacy"); that tag
+/// means "no key" there and keeps loading.
+#[tokio::test]
+async fn test_plaintext_record_with_legacy_tag_loads() {
+    let temp = tempdir().unwrap();
+    let manager = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
+        .await
+        .unwrap();
+    manager
+        .save("rss", "feeds", &"plain".to_string(), false)
+        .await
+        .unwrap();
+
+    let db = manager.get_or_open_db("rss").await.unwrap();
+    let envelope: StorageEnvelope = serde_json::from_slice(&db.get("feeds").unwrap().unwrap()).unwrap();
+    assert_eq!(envelope.key_scheme, KeyScheme::V0);
+    let loaded: String = manager.load("rss", "feeds").await.unwrap();
+    assert_eq!(loaded, "plain");
 }
 
 /// Every new encrypted write must land on `CURRENT_KEY_SCHEME`, not an
@@ -452,201 +477,48 @@ async fn test_per_module_key_differs_from_master_and_cannot_cross_decrypt() {
     assert!(format_v1::open_gcm_no_aad(&derived, &ciphertext).is_err());
 }
 
-/// `migrate_module_encryption` is purely about the encrypted/plaintext
-/// toggle now — it must NOT silently upgrade an already-`Encrypted`
-/// record's key scheme as a side effect (that responsibility moved
-/// entirely to `migrate_key_scheme_to_latest`, tested below).
+/// The encrypted/plaintext toggle doesn't read old formats either: a V0
+/// record it would have to decrypt is reported, not converted or lost.
 #[tokio::test]
-async fn test_migrate_module_encryption_no_longer_touches_key_scheme() {
+async fn test_migrate_module_encryption_reports_v0_records() {
     let temp = tempdir().unwrap();
     let session = unlocked_session().await;
     let manager =
         StorageManager::new_with_root(Arc::clone(&session), temp.path().to_path_buf())
             .await
             .unwrap();
-
-    let raw_bytes = serde_json::to_vec(&"legacy value".to_string()).unwrap();
-    let ciphertext = session
-        .with(|master| format_v1::seal_gcm_no_aad(master, &raw_bytes))
-        .unwrap()
-        .unwrap();
-    let envelope = StorageEnvelope {
-        schema_version: 1,
-        status: EncryptionStatus::Encrypted,
-        storage_type: StorageType::Embedded,
-        payload: ciphertext,
-        hash: None,
-        key_scheme: KeyScheme::V0,
-    };
-    let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
-    let db = manager.get_or_open_db("mod1").await.unwrap();
-    db.insert("a", envelope_bytes).unwrap();
-    db.flush().unwrap();
+    insert_v0_record(&manager, &session, "mod1", "a").await;
 
     let report = manager
-        .migrate_module_encryption("mod1", true)
+        .migrate_module_encryption("mod1", false)
         .await
         .unwrap();
-    assert_eq!(
-        report.migrated, 0,
-        "EncryptionStatus already matched target, nothing for this pass to do"
-    );
-    assert_eq!(report.skipped, 1);
-
-    let db = manager.get_or_open_db("mod1").await.unwrap();
-    let raw = db.get("a").unwrap().unwrap();
-    let envelope: StorageEnvelope = serde_json::from_slice(&raw).unwrap();
-    assert_eq!(
-        envelope.key_scheme,
-        KeyScheme::V0,
-        "key scheme must be untouched by the encrypt/plaintext toggle"
-    );
-}
-
-/// The actual key-scheme upgrade mechanism: `migrate_key_scheme_to_
-/// latest` upgrades a `V0` `Encrypted` record straight to
-/// `CURRENT_KEY_SCHEME`, preserves the data, and is idempotent.
-#[tokio::test]
-async fn test_migrate_key_scheme_to_latest_upgrades_v0_to_current() {
-    let temp = tempdir().unwrap();
-    let session = unlocked_session().await;
-    let manager =
-        StorageManager::new_with_root(Arc::clone(&session), temp.path().to_path_buf())
-            .await
-            .unwrap();
-
-    let raw_bytes = serde_json::to_vec(&"legacy value".to_string()).unwrap();
-    let ciphertext = session
-        .with(|master| format_v1::seal_gcm_no_aad(master, &raw_bytes))
-        .unwrap()
-        .unwrap();
-    let envelope = StorageEnvelope {
-        schema_version: 1,
-        status: EncryptionStatus::Encrypted,
-        storage_type: StorageType::Embedded,
-        payload: ciphertext,
-        hash: None,
-        key_scheme: KeyScheme::V0,
-    };
-    let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
-    let db = manager.get_or_open_db("mod1").await.unwrap();
-    db.insert("a", envelope_bytes).unwrap();
-    db.flush().unwrap();
-
-    let report = manager.migrate_key_scheme_to_latest("mod1").await.unwrap();
-    assert_eq!(report.migrated, 1);
-    assert_eq!(report.skipped, 0);
-
-    let db = manager.get_or_open_db("mod1").await.unwrap();
-    let raw = db.get("a").unwrap().unwrap();
-    let envelope: StorageEnvelope = serde_json::from_slice(&raw).unwrap();
-    assert_eq!(envelope.key_scheme, CURRENT_KEY_SCHEME);
-
-    let loaded: String = manager.load("mod1", "a").await.unwrap();
-    assert_eq!(loaded, "legacy value");
-
-    // Idempotent: running it again on already-upgraded data is a no-op.
-    let report2 = manager.migrate_key_scheme_to_latest("mod1").await.unwrap();
-    assert_eq!(report2.migrated, 0);
-    assert_eq!(report2.skipped, 1);
-}
-
-#[tokio::test]
-async fn test_migrate_key_scheme_to_latest_requires_unlocked_vault() {
-    let temp = tempdir().unwrap();
-    let manager = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
-        .await
-        .unwrap();
-
-    let result = manager.migrate_key_scheme_to_latest("mod1").await;
-    assert!(matches!(result, Err(StoreError::Locked)), "got {result:?}");
-}
-
-#[tokio::test]
-async fn test_migrate_key_scheme_to_latest_skips_plaintext_records() {
-    let temp = tempdir().unwrap();
-    let manager =
-        StorageManager::new_with_root(unlocked_session().await, temp.path().to_path_buf())
-            .await
-            .unwrap();
-
-    manager
-        .save("mod1", "a", &"one".to_string(), false)
-        .await
-        .unwrap();
-
-    let report = manager.migrate_key_scheme_to_latest("mod1").await.unwrap();
     assert_eq!(report.migrated, 0);
-    assert_eq!(report.skipped, 1);
-}
+    assert_eq!(report.errors.len(), 1);
+    assert!(matches!(report.errors[0].1, StoreError::NeedsUpgrade { .. }));
 
-/// A brand-new data directory has no pre-existing records, so it
-/// starts life already marked on the latest key scheme.
-#[tokio::test]
-async fn test_fresh_vault_root_marks_current_key_scheme() {
-    let temp = tempdir().unwrap();
-    let manager = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        manager.data_dir_key_scheme_version().await,
-        CURRENT_KEY_SCHEME.version()
-    );
-}
-
-/// A `vault_root` that already existed before this marker file was
-/// introduced has no marker to read — that must read as version `0`,
-/// exactly `KeyScheme::default()`'s meaning.
-#[tokio::test]
-async fn test_missing_marker_reads_as_version_zero() {
-    let temp = tempdir().unwrap();
-    std::fs::create_dir_all(temp.path().join("vault")).unwrap();
-
-    let manager = StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
-        .await
-        .unwrap();
-
-    assert_eq!(manager.data_dir_key_scheme_version().await, 0);
-}
-
-/// `migrate_all_key_schemes` only advances the data directory's
-/// marker once every listed module's migration finishes cleanly.
-#[tokio::test]
-async fn test_migrate_all_key_schemes_advances_marker_on_full_success() {
-    let temp = tempdir().unwrap();
-    std::fs::create_dir_all(temp.path().join("vault")).unwrap();
-    let session = unlocked_session().await;
-    let manager =
-        StorageManager::new_with_root(Arc::clone(&session), temp.path().to_path_buf())
-            .await
-            .unwrap();
-    assert_eq!(manager.data_dir_key_scheme_version().await, 0);
-
-    let raw_bytes = serde_json::to_vec(&"legacy value".to_string()).unwrap();
-    let ciphertext = session
-        .with(|master| format_v1::seal_gcm_no_aad(master, &raw_bytes))
-        .unwrap()
-        .unwrap();
-    let envelope = StorageEnvelope {
-        schema_version: 1,
-        status: EncryptionStatus::Encrypted,
-        storage_type: StorageType::Embedded,
-        payload: ciphertext,
-        hash: None,
-        key_scheme: KeyScheme::V0,
-    };
-    let envelope_bytes = serde_json::to_vec(&envelope).unwrap();
     let db = manager.get_or_open_db("mod1").await.unwrap();
-    db.insert("a", envelope_bytes).unwrap();
-    db.flush().unwrap();
+    let envelope: StorageEnvelope = serde_json::from_slice(&db.get("a").unwrap().unwrap()).unwrap();
+    assert_eq!(envelope.key_scheme, KeyScheme::V0, "the record is untouched");
+}
 
-    let reports = manager.migrate_all_key_schemes(&["mod1"]).await.unwrap();
-    assert_eq!(reports.len(), 1);
-    assert_eq!(reports[0].0, "mod1");
-    assert_eq!(reports[0].1.migrated, 1);
+/// A brand-new `vault/` still gets the pre-FORMAT marker (value 1) for
+/// moku-bin 0.2.1-0.2.11; an existing one is left alone.
+#[tokio::test]
+async fn test_fresh_vault_root_writes_the_legacy_marker() {
+    let temp = tempdir().unwrap();
+    StorageManager::new_with_root(locked_session(), temp.path().to_path_buf())
+        .await
+        .unwrap();
     assert_eq!(
-        manager.data_dir_key_scheme_version().await,
-        CURRENT_KEY_SCHEME.version()
+        std::fs::read_to_string(temp.path().join("vault/.key_scheme_version")).unwrap(),
+        "1"
     );
+
+    let existing = tempdir().unwrap();
+    std::fs::create_dir_all(existing.path().join("vault")).unwrap();
+    StorageManager::new_with_root(locked_session(), existing.path().to_path_buf())
+        .await
+        .unwrap();
+    assert!(!existing.path().join("vault/.key_scheme_version").exists());
 }

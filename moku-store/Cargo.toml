@@ -3,10 +3,11 @@ name = "moku-store"
 version = "0.1.0"
 edition = "2024"
 
-# Module data storage: the per-module sled databases, the storage envelope
-# (encrypted/plaintext, key scheme, external blobs) and the key-scheme
-# migration chain. Encrypts with moku-crypto under per-module subkeys of
-# the key held by moku-vault's session. No UI dependency.
+# Module data storage: the per-module sled databases and the storage
+# envelope (encrypted/plaintext, key-scheme tag, external blobs). Encrypts
+# with moku-crypto under per-module subkeys of the key held by
+# moku-vault's session, and reads only the current data format (older
+# ones are moku-migrate's). No UI dependency.
 
 [dependencies]
 moku-crypto.workspace = true

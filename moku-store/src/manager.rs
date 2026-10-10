@@ -7,55 +7,28 @@ use tokio::fs;
 use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
-use moku_crypto::{CryptoError, Key, ModuleStorageKey, RootKey, format_v1, module_storage_key};
+use moku_crypto::{CryptoError, Key, ModuleStorageKey, format_v1, module_storage_key};
 use moku_sys::dirs;
 use moku_vault::VaultSession;
 
 use crate::StoreError;
 use crate::envelope::{
     CURRENT_KEY_SCHEME, CURRENT_SCHEMA_VERSION, EncryptionStatus, KeyScheme, StorageEnvelope,
-    StorageType, data_transform_for_hop,
+    StorageType,
 };
 
 type Result<T> = std::result::Result<T, StoreError>;
 
-/// The key an envelope is (to be) encrypted with, by `KeyScheme`.
-enum RecordKey {
-    /// `V0`: the raw root key itself (read only; nothing writes V0).
-    V0(Key<RootKey>),
-    /// `V1`: the module's HKDF subkey.
-    V1(Key<ModuleStorageKey>),
-}
-
-impl RecordKey {
-    // Envelopes are still the pre-P3 format (P6 replaces it).
-    fn seal(&self, plaintext: &[u8]) -> std::result::Result<Vec<u8>, CryptoError> {
-        match self {
-            RecordKey::V0(k) => format_v1::seal_gcm_no_aad(k, plaintext),
-            RecordKey::V1(k) => format_v1::seal_gcm_no_aad(k, plaintext),
-        }
-    }
-
-    fn open(&self, data: &[u8]) -> std::result::Result<Zeroizing<Vec<u8>>, CryptoError> {
-        match self {
-            RecordKey::V0(k) => format_v1::open_gcm_no_aad(k, data),
-            RecordKey::V1(k) => format_v1::open_gcm_no_aad(k, data),
-        }
-    }
-}
-
 const EXTERNAL_STORAGE_THRESHOLD: usize = 50 * 1024;
 
-/// Data-directory-level record of which `KeyScheme` version the vault is
-/// on — independent of any in-app config or per-record envelope tag, so
-/// a bare copy of the data directory (a backup, a move to another
-/// machine) is enough on its own to know its version without opening a
-/// single sled DB. Lives at the vault root, sibling to every module's
-/// own subdirectory.
+/// The pre-`FORMAT` key-scheme marker. A fresh `vault/` still gets one
+/// (value 1) so moku-bin 0.2.1-0.2.11 opened on it see an up-to-date
+/// directory; nothing in this crate reads it (moku-migrate infers the
+/// format of a directory without `FORMAT` from it).
 const KEY_SCHEME_MARKER_FILENAME: &str = ".key_scheme_version";
 
-/// Result of `StorageManager::migrate_module_encryption` /
-/// `migrate_key_scheme_to_latest`: per-record failures are collected
+/// Result of `StorageManager::migrate_module_encryption`: per-record
+/// failures are collected
 /// (record key + typed error) instead of aborting the whole module.
 #[derive(Debug, Default)]
 pub struct MigrationReport {
@@ -92,14 +65,11 @@ impl StorageManager {
             db_cache: RwLock::new(HashMap::new()),
         };
         if is_fresh {
-            // A brand-new data directory has no pre-existing records, so
-            // it starts life already on the latest key scheme — nothing
-            // for `migrate_key_scheme_to_latest` to ever do here. An
-            // already-existing `vault_root` (from before this marker
-            // file existed) is left untouched: `data_dir_key_scheme_
-            // version` correctly reads that as version 0.
+            // A brand-new data directory has no pre-existing records: it
+            // starts on the latest key scheme. An existing `vault_root` is
+            // left untouched.
             manager
-                .write_key_scheme_marker(CURRENT_KEY_SCHEME.version())
+                .write_key_scheme_marker()
                 .await?;
         }
         Ok(manager)
@@ -109,22 +79,10 @@ impl StorageManager {
         self.vault_root.join(KEY_SCHEME_MARKER_FILENAME)
     }
 
-    async fn write_key_scheme_marker(&self, version: u16) -> Result<()> {
+    async fn write_key_scheme_marker(&self) -> Result<()> {
         let path = self.key_scheme_marker_path();
-        moku_sys::util::atomic_write_async(path, version.to_string().into_bytes()).await?;
+        moku_sys::util::atomic_write_async(path, b"1".to_vec()).await?;
         Ok(())
-    }
-
-    /// Reads the data directory's own record of which `KeyScheme` version
-    /// it's on. Missing file means "predates this marker" — i.e. version
-    /// `0`, exactly `KeyScheme::default()`'s meaning. Never touches sled
-    /// or the vault lock state — safe to call before the vault is
-    /// unlocked, purely to decide whether to prompt for a migration.
-    pub async fn data_dir_key_scheme_version(&self) -> u16 {
-        match fs::read_to_string(self.key_scheme_marker_path()).await {
-            Ok(s) => s.trim().parse().unwrap_or(0),
-            Err(_) => 0,
-        }
     }
 
     async fn get_or_open_db(&self, module_id: &str) -> Result<sled::Db> {
@@ -155,40 +113,13 @@ impl StorageManager {
         Ok(opened)
     }
 
-    /// Maps a `KeyScheme` to how its key is actually computed from the
-    /// unlocked vault master key — the one place that knows this, so
-    /// both the write path (always `CURRENT_KEY_SCHEME`) and the read
-    /// path (whatever scheme an existing envelope recorded) share it;
-    /// adding a future `V2` means adding one match arm here.
-    fn resolve_key_for_scheme(
-        &self,
-        module_id: &str,
-        scheme: KeyScheme,
-    ) -> Result<RecordKey> {
-        // The root key is only borrowed long enough to derive (or, for a
-        // V0 read, copy) the record key.
+    /// The module's storage key, `module_storage_key(root, module_id)`
+    /// (`KeyScheme::V1`), used for every read and write. The root key is
+    /// only borrowed long enough to derive it.
+    fn module_key(&self, module_id: &str) -> Result<Key<ModuleStorageKey>> {
         self.session
-            .with(|root| match scheme {
-                KeyScheme::V0 => RecordKey::V0(root.duplicate()),
-                KeyScheme::V1 => RecordKey::V1(module_storage_key(root, module_id)),
-            })
+            .with(|root| module_storage_key(root, module_id))
             .map_err(|_| StoreError::Locked)
-    }
-
-    /// Derives the write key for `module_id` — always under
-    /// `CURRENT_KEY_SCHEME`, never an older scheme. Every new write uses
-    /// this, unconditionally.
-    fn resolve_write_key(&self, module_id: &str) -> Result<RecordKey> {
-        self.resolve_key_for_scheme(module_id, CURRENT_KEY_SCHEME)
-    }
-
-    /// Resolves the key to *decrypt* an existing envelope with, based on
-    /// which scheme it was written under — a `V0` envelope (every record
-    /// written before per-module subkeys existed, and forever if a user
-    /// never explicitly migrates) still decrypts with the raw master
-    /// key, exactly as before; `V1` envelopes use the derived subkey.
-    fn resolve_read_key(&self, module_id: &str, scheme: KeyScheme) -> Result<RecordKey> {
-        self.resolve_key_for_scheme(module_id, scheme)
     }
 
     /// Drops the cached handle for `module_id`, releasing sled's exclusive
@@ -242,7 +173,7 @@ impl StorageManager {
         // Every new write uses the derived per-module subkey — never the
         // raw master key directly (see moku_crypto::module_storage_key).
         let session_key = if is_encryption_enabled {
-            Some(self.resolve_write_key(module_id)?)
+            Some(self.module_key(module_id)?)
         } else {
             None
         };
@@ -252,7 +183,8 @@ impl StorageManager {
 
         let (final_payload, storage_type) = tokio::task::spawn_blocking(move || {
             let (processed_payload, status) = if let Some(k) = session_key {
-                (k.seal(&raw_bytes)?, EncryptionStatus::Encrypted)
+                // Envelopes are still the pre-P3 format (P6 replaces it).
+                (format_v1::seal_gcm_no_aad(&k, &raw_bytes)?, EncryptionStatus::Encrypted)
             } else {
                 (raw_bytes.to_vec(), EncryptionStatus::Plaintext)
             };
@@ -370,9 +302,8 @@ impl StorageManager {
     }
 
     /// Decrypts (if needed) and deserializes an already-fetched envelope's
-    /// raw payload, picking the key by `envelope.key_scheme` — a `V0`
-    /// envelope (every record written before per-module subkeys existed)
-    /// still decrypts with the raw master key, exactly as before.
+    /// raw payload. An encrypted `V0` envelope (data format 0, raw root
+    /// key) is `NeedsUpgrade`: only moku-migrate reads that format.
     async fn decrypt_payload<T: DeserializeOwned>(
         &self,
         module_id: &str,
@@ -381,14 +312,20 @@ impl StorageManager {
         raw_data: Vec<u8>,
     ) -> Result<T> {
         let session_key = if envelope.status == EncryptionStatus::Encrypted {
-            Some(self.resolve_read_key(module_id, envelope.key_scheme)?)
+            if envelope.key_scheme != CURRENT_KEY_SCHEME {
+                return Err(StoreError::NeedsUpgrade {
+                    module: module_id.to_string(),
+                    key: key.to_string(),
+                });
+            }
+            Some(self.module_key(module_id)?)
         } else {
             None
         };
 
         let decrypted = tokio::task::spawn_blocking(move || {
             if let Some(k) = session_key {
-                k.open(&raw_data)
+                format_v1::open_gcm_no_aad(&k, &raw_data)
             } else {
                 Ok(Zeroizing::new(raw_data))
             }
@@ -489,8 +426,7 @@ impl StorageManager {
     }
 
     /// Lists every key currently stored for `module_id`, via a
-    /// `spawn_blocking` sled scan — shared by both migration passes below
-    /// so they don't each reimplement the same scan.
+    /// `spawn_blocking` sled scan.
     async fn list_keys(&self, module_id: &str) -> Result<(sled::Db, Vec<String>)> {
         let db = self.get_or_open_db(module_id).await?;
         let keys: Vec<String> = tokio::task::spawn_blocking({
@@ -510,8 +446,8 @@ impl StorageManager {
     /// `EncryptionStatus` matches `target_encrypted`. Records already in
     /// the target state are left untouched — idempotent, safe to call
     /// repeatedly (e.g. after a config change, to reconcile drift). Purely
-    /// about the encrypted/plaintext toggle — never touches `key_scheme`;
-    /// see `migrate_key_scheme_to_latest` for that, a separate concern.
+    /// about the encrypted/plaintext toggle, a user preference; the data
+    /// format (key scheme) is moku-migrate's.
     pub async fn migrate_module_encryption(
         &self,
         module_id: &str,
@@ -568,91 +504,6 @@ impl StorageManager {
         self.save_impl(module_id, key, &value, target_encrypted, false)
             .await?;
         Ok(true)
-    }
-
-    /// Re-encrypts every `Encrypted` record under `module_id` that's
-    /// still on an older `KeyScheme` than `CURRENT_KEY_SCHEME`, walking
-    /// straight to the latest scheme regardless of how many versions
-    /// behind it is — a caller never needs to know or care about
-    /// intermediate hops. Independent of `migrate_module_encryption`'s
-    /// encrypted/plaintext toggle: this only ever moves an already-
-    /// encrypted record forward to a newer key scheme. Idempotent — a
-    /// record already on `CURRENT_KEY_SCHEME` is left untouched.
-    pub async fn migrate_key_scheme_to_latest(&self, module_id: &str) -> Result<MigrationReport> {
-        if !self.session.is_unlocked() {
-            return Err(StoreError::Locked);
-        }
-
-        let (db, keys) = self.list_keys(module_id).await?;
-        let mut report = MigrationReport {
-            migrated: 0,
-            skipped: 0,
-            errors: Vec::new(),
-        };
-
-        for key in keys {
-            match self.migrate_one_key_scheme(module_id, &key).await {
-                Ok(true) => report.migrated += 1,
-                Ok(false) => report.skipped += 1,
-                Err(e) => report.errors.push((key, e)),
-            }
-        }
-
-        tokio::task::spawn_blocking(move || db.flush()).await??;
-
-        Ok(report)
-    }
-
-    /// Returns `Ok(true)` if `key` was upgraded to `CURRENT_KEY_SCHEME`,
-    /// `Ok(false)` if it's `Plaintext` (key scheme is meaningless there)
-    /// or already on the latest scheme.
-    async fn migrate_one_key_scheme(&self, module_id: &str, key: &str) -> Result<bool> {
-        let (envelope, raw_data) = self.fetch_envelope(module_id, key).await?;
-        if envelope.status != EncryptionStatus::Encrypted
-            || envelope.key_scheme.version() >= CURRENT_KEY_SCHEME.version()
-        {
-            return Ok(false);
-        }
-
-        let mut value: serde_json::Value = self
-            .decrypt_payload(module_id, key, &envelope, raw_data)
-            .await?;
-        for from_version in envelope.key_scheme.version()..CURRENT_KEY_SCHEME.version() {
-            if let Some(transform) = data_transform_for_hop(from_version) {
-                value = transform(value).map_err(|message| StoreError::Transform {
-                    module: module_id.to_string(),
-                    key: key.to_string(),
-                    message,
-                })?;
-            }
-        }
-        self.save_impl(module_id, key, &value, true, false).await?;
-        Ok(true)
-    }
-
-    /// Runs `migrate_key_scheme_to_latest` for every module id in
-    /// `module_ids` and, only if all of them finish with zero errors,
-    /// advances the data directory's `.key_scheme_version` marker to
-    /// `CURRENT_KEY_SCHEME` — a partially-failed migration is never
-    /// marked as fully done, so the next launch will retry it.
-    pub async fn migrate_all_key_schemes(
-        &self,
-        module_ids: &[&str],
-    ) -> Result<Vec<(String, MigrationReport)>> {
-        let mut reports = Vec::with_capacity(module_ids.len());
-        let mut all_ok = true;
-        for &module_id in module_ids {
-            let report = self.migrate_key_scheme_to_latest(module_id).await?;
-            if !report.errors.is_empty() {
-                all_ok = false;
-            }
-            reports.push((module_id.to_string(), report));
-        }
-        if all_ok {
-            self.write_key_scheme_marker(CURRENT_KEY_SCHEME.version())
-                .await?;
-        }
-        Ok(reports)
     }
 
     async fn prepare_module_paths(&self, module_id: &str) -> Result<(PathBuf, PathBuf)> {
