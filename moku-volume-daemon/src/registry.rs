@@ -200,8 +200,29 @@ const INDEX_LOCK_FILE: &str = "index.lock";
 /// unreadable or corrupt file is an `Err`. It is never silently treated
 /// as empty, because the next write would then permanently drop every
 /// registered volume's location.
+///
+/// Takes the same locks as `update_index` (the in-process `INDEX_LOCK`
+/// and a shared lock on `index.lock`): on Windows a reader holding
+/// index.json open makes a concurrent `atomic_write` fail to rename over
+/// it ("failed to replace the file"), so a listing in the TUI could break
+/// a CLI create/import at the same moment.
 fn read_index() -> Result<HashMap<String, PathBuf>> {
-    read_index_at(&volumes_root()?)
+    let root = volumes_root()?;
+    if !root.exists() {
+        return Ok(HashMap::new());
+    }
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(root.join(INDEX_LOCK_FILE))
+        .context("failed to open the volume index lock")?;
+    lock_file
+        .lock_shared()
+        .context("failed to lock the volume index")?;
+    read_index_at(&root)
 }
 
 fn read_index_at(root: &Path) -> Result<HashMap<String, PathBuf>> {
