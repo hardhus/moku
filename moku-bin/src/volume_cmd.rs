@@ -99,7 +99,8 @@ pub async fn handle(sub: &VolumeCommands) -> Result<()> {
         }
         VolumeCommands::List => {
             let volumes = registry::list_volumes().await?;
-            if volumes.is_empty() {
+            let offline = registry::offline_volumes();
+            if volumes.is_empty() && offline.is_empty() {
                 println!(
                     "No encrypted volumes yet. To create one: moku volume create <name> --size 10GB"
                 );
@@ -119,6 +120,12 @@ pub async fn handle(sub: &VolumeCommands) -> Result<()> {
                     size::format_size(v.size_limit_bytes),
                     if mounted { "mounted" } else { "not mounted" },
                     dir
+                );
+            }
+            for (id, dir) in &offline {
+                println!(
+                    "- {id}  [offline: folder not reachable]\n    {}\n    (plug its drive back in, or `moku volume delete {id}` to forget it)",
+                    dir.display()
                 );
             }
             Ok(())
@@ -231,8 +238,35 @@ async fn unmount(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// An offline volume (folder not reachable) can't be deleted, only
+/// removed from moku's list; its files, if any, are left alone.
+async fn forget_offline(id: &str, dir: &std::path::Path, yes: bool) -> Result<()> {
+    if !yes {
+        let answer = prompt_line(&format!(
+            "'{id}' is offline ({} isn't reachable). Remove it from moku's list? Its files, if any, are not touched. [y/N]: ",
+            dir.display()
+        ))?;
+        if !matches!(answer.as_str(), "y" | "Y" | "yes" | "Yes" | "YES") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+    registry::delete_volume(id).await?;
+    println!("Removed '{id}' from the volume list.");
+    Ok(())
+}
+
 async fn delete(name: &str, yes: bool) -> Result<()> {
-    let cfg = registry::find_volume(name).await?;
+    let cfg = match registry::find_volume(name).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let Some((id, dir)) = registry::offline_volumes().into_iter().find(|(id, _)| id == name)
+            else {
+                return Err(e);
+            };
+            return forget_offline(&id, &dir, yes).await;
+        }
+    };
 
     if !yes {
         let answer = prompt_line(&format!(

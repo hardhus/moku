@@ -54,6 +54,9 @@ struct VolumeRow {
 
 pub struct VolumeManagerModule {
     rows: Vec<VolumeRow>,
+    /// Registered volumes whose folder isn't reachable (unplugged drive,
+    /// deleted folder): shown, never dropped (`registry::offline_volumes`).
+    offline: Vec<(String, std::path::PathBuf)>,
     state: ListState,
     message: Option<(String, Instant)>,
     prompt: Option<PasswordPrompt>,
@@ -88,6 +91,7 @@ impl VolumeManagerModule {
         state.select(Some(0));
         Self {
             rows: Vec::new(),
+            offline: Vec::new(),
             state,
             message: None,
             prompt: None,
@@ -100,6 +104,7 @@ impl VolumeManagerModule {
 
     async fn refresh(&mut self) {
         let volumes = registry::list_volumes().await.unwrap_or_default();
+        self.offline = registry::offline_volumes();
         self.rows = volumes
             .into_iter()
             .map(|cfg| {
@@ -547,7 +552,19 @@ impl TuiModule for VolumeManagerModule {
             return;
         }
 
-        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
+        // Offline volumes get their own small block under the list, so the
+        // list's selection only ever lands on volumes that can be acted on.
+        let offline_height = if self.offline.is_empty() {
+            0
+        } else {
+            self.offline.len().min(4) as u16 + 2
+        };
+        let chunks = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(offline_height),
+            Constraint::Length(3),
+        ])
+        .split(area);
 
         let items: Vec<ListItem> = if self.rows.is_empty() {
             vec![ListItem::new(
@@ -593,6 +610,23 @@ impl TuiModule for VolumeManagerModule {
 
         frame.render_stateful_widget(list, chunks[0], &mut self.state);
 
+        if !self.offline.is_empty() {
+            let lines: Vec<String> = self
+                .offline
+                .iter()
+                .map(|(id, dir)| format!("{id}  ({})", dir.display()))
+                .collect();
+            let offline = Paragraph::new(lines.join("\n"))
+                .style(Style::default().fg(theme.warning).bg(theme.base_bg))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Offline: folder not reachable (`moku volume delete <id>` forgets one) ")
+                        .border_style(Style::default().fg(theme.border)),
+                );
+            frame.render_widget(offline, chunks[1]);
+        }
+
         let help = self
             .message
             .as_ref()
@@ -608,7 +642,7 @@ impl TuiModule for VolumeManagerModule {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.border)),
             );
-        frame.render_widget(help_widget, chunks[1]);
+        frame.render_widget(help_widget, chunks[2]);
     }
 }
 
@@ -720,6 +754,27 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(screen.contains("wrong password for volume"), "the error must be shown in the prompt");
+    }
+
+    #[test]
+    fn test_offline_volumes_are_shown_apart_from_the_list() {
+        let mut module = VolumeManagerModule::new();
+        module.offline = vec![("usb-notes".to_string(), std::path::PathBuf::from("E:/usb-notes"))];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 20)).unwrap();
+        terminal
+            .draw(|f| module.draw(f, f.area(), &MokuTheme::default()))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("Offline: folder not reachable"));
+        assert!(screen.contains("usb-notes"));
+        assert!(screen.contains("No encrypted volumes yet"), "the offline one is not a list row");
     }
 
     #[tokio::test]

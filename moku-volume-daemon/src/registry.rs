@@ -249,42 +249,19 @@ fn update_index_at(root: &Path, mutate: impl FnOnce(&mut HashMap<String, PathBuf
     save_index_at(root, &index)
 }
 
-/// Loads the index and forgets any entry whose directory is *completely
-/// gone* — e.g. deleted by hand with `rm -rf` instead of `volume delete`,
-/// which previously left a permanent ghost: `unique_id` saw the old id as
-/// still taken forever, so recreating a volume under the same name kept
-/// accumulating `-2`, `-3`, ... suffixes instead of ever reusing the
-/// original. Deliberately checks `Path::exists()` rather than trying to
-/// load `volume.json` — a directory that exists but is temporarily
-/// unreadable (a not-currently-mounted removable/network drive, say)
-/// should never be pruned just because it can't be read *right now*; only
-/// outright absence is treated as "really deleted". Used by both
-/// `list_volumes` (so listings don't show ghosts) and `unique_id` (so a
-/// name freed up by deleting its old directory is immediately reusable).
-fn pruned_index() -> HashMap<String, PathBuf> {
-    let index = load_index();
-    let mut alive = HashMap::new();
-    let mut stale = Vec::new();
-    for (id, dir) in index {
-        if dir.exists() {
-            alive.insert(id, dir);
-        } else {
-            stale.push(id);
-        }
-    }
-    if !stale.is_empty() {
-        // Pruning is housekeeping: if it can't be written now, the ghosts
-        // are still filtered out of `alive` below, and pruning is retried
-        // on the next call.
-        if let Err(e) = update_index(|index| {
-            for id in &stale {
-                index.remove(id);
-            }
-        }) {
-            eprintln!("warning: failed to prune stale volume index entries: {e:#}");
-        }
-    }
-    alive
+/// Index entries whose directory isn't reachable right now: a volume on
+/// an unplugged drive or an unreachable network share, or one whose folder
+/// was deleted by hand. They can't be told apart from here, so such an
+/// entry is never dropped automatically (audit KN-4.6: dropping it made a
+/// volume on a removable drive vanish from moku for good the first time
+/// it was listed while unplugged). `delete_volume` forgets one explicitly.
+pub fn offline_volumes() -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = load_index()
+        .into_iter()
+        .filter(|(_, dir)| !dir.exists())
+        .collect();
+    out.sort();
+    out
 }
 
 fn slugify(name: &str) -> String {
@@ -311,7 +288,8 @@ fn slugify(name: &str) -> String {
 /// `volumes_root()` (covers ids taken by pre-index volumes).
 fn unique_id(name: &str, base: &Path) -> Result<String> {
     let stem = slugify(name);
-    let index = pruned_index();
+    // Offline entries keep their id: the volume may come back.
+    let index = load_index();
     let root = volumes_root()?;
     let mut candidate = stem.clone();
     let mut n = 2;
@@ -453,11 +431,10 @@ pub async fn list_volumes() -> Result<Vec<VolumeConfig>> {
     let mut out = Vec::new();
 
     // Index-registered volumes first (created anywhere via `create_volume`,
-    // including the new CWD default and `--path`). `pruned_index` already
-    // dropped entries whose directory is completely gone; a directory
-    // that exists but fails to load (corrupt/unreadable) is still just
-    // skipped here, same as before.
-    for (id, dir) in pruned_index() {
+    // including the new CWD default and `--path`). An entry whose directory
+    // isn't reachable is skipped here and listed by `offline_volumes`; one
+    // that exists but fails to load (corrupt/unreadable) is skipped too.
+    for (id, dir) in load_index() {
         if let Ok(cfg) = load_config(&dir).await {
             seen_ids.insert(id);
             out.push(cfg);
@@ -506,11 +483,17 @@ pub async fn resize_volume(name_or_id: &str, new_size_bytes: u64) -> Result<Volu
 /// mounted — deleting a live-mounted volume's backing files out from
 /// under WinFsp is unsafe, so callers (the CLI/TUI delete commands) are
 /// responsible for unmounting first.
+///
+/// For an offline volume (directory not reachable, see `offline_volumes`)
+/// only the index entry is removed; whatever is on the unplugged drive is
+/// left alone.
 pub async fn delete_volume(id: &str) -> Result<()> {
     let dir = volume_dir(id)?;
-    tokio::fs::remove_dir_all(&dir)
-        .await
-        .with_context(|| format!("failed to delete {}", dir.display()))?;
+    if dir.exists() {
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .with_context(|| format!("failed to delete {}", dir.display()))?;
+    }
     update_index(|index| {
         index.remove(id);
     })?;
@@ -636,48 +619,35 @@ mod tests {
         assert_eq!(names, vec![INDEX_FILE.to_string(), INDEX_LOCK_FILE.to_string()]);
     }
 
-    #[test]
-    fn test_pruned_index_removes_entries_whose_directory_is_completely_gone() {
-        let id = "claude-prune-test-gone-1a2b";
+    /// KN-4.6: an unreachable directory (an unplugged drive looks exactly
+    /// like a deleted folder) never drops its index entry by itself.
+    #[tokio::test]
+    async fn test_unreachable_volume_stays_registered_as_offline() {
+        let id = "claude-offline-test-1a2b";
         let dir = tempfile::tempdir().unwrap();
         let vol_dir = dir.path().join("vol");
-        std::fs::create_dir_all(&vol_dir).unwrap();
+        write_fake_volume_json(&vol_dir, id);
         update_index(|index| {
             index.insert(id.to_string(), vol_dir.clone());
         })
         .unwrap();
+        assert!(!offline_volumes().iter().any(|(i, _)| i == id));
 
-        std::fs::remove_dir_all(&vol_dir).unwrap(); // simulate `rm -rf` by hand
+        std::fs::remove_dir_all(&vol_dir).unwrap(); // "unplug" it
 
-        let pruned = pruned_index();
-        assert!(
-            !pruned.contains_key(id),
-            "a completely deleted directory's index entry must be forgotten"
-        );
-    }
+        assert!(!list_volumes().await.unwrap().iter().any(|v| v.id == id));
+        assert!(offline_volumes().iter().any(|(i, d)| i == id && d == &vol_dir));
+        assert!(load_index().contains_key(id), "listing must not forget it");
 
-    #[test]
-    fn test_pruned_index_keeps_entries_whose_directory_still_exists() {
-        let id = "claude-prune-test-alive-3c4d";
-        let dir = tempfile::tempdir().unwrap();
-        let vol_dir = dir.path().join("vol");
-        std::fs::create_dir_all(&vol_dir).unwrap();
-        update_index(|index| {
-            index.insert(id.to_string(), vol_dir.clone());
-        })
-        .unwrap();
-
-        let pruned = pruned_index();
-        assert!(
-            pruned.contains_key(id),
-            "a still-existing directory must not be pruned"
-        );
+        // Plugged back in: it is a normal volume again.
+        write_fake_volume_json(&vol_dir, id);
+        assert!(list_volumes().await.unwrap().iter().any(|v| v.id == id));
 
         remove_index_entry(id);
     }
 
     #[tokio::test]
-    async fn test_unique_id_reuses_a_name_after_its_directory_was_deleted_by_hand() {
+    async fn test_offline_name_is_kept_until_the_volume_is_deleted() {
         let base = tempfile::tempdir().unwrap();
         let name = "claude-reuse-test-5e6f";
 
@@ -691,25 +661,34 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.id, name);
 
-        // The user's exact scenario: delete the directory by hand (not via
-        // `volume delete`), leaving the index entry orphaned.
+        // Unreachable (or deleted by hand): its id stays taken, since the
+        // volume may come back.
         std::fs::remove_dir_all(base.path().join(&cfg.id)).unwrap();
-
+        let other = tempfile::tempdir().unwrap();
         let cfg2 = create_volume(
             name,
             1024,
             VolumeSecret::Password("pw".into()),
-            Some(base.path().to_path_buf()),
+            Some(other.path().to_path_buf()),
         )
         .await
         .unwrap();
-        assert_eq!(
-            cfg2.id, name,
-            "a name freed up by deleting its directory by hand must be reusable immediately, not suffixed with -2"
-        );
+        assert_eq!(cfg2.id, format!("{name}-2"));
 
-        let _ = std::fs::remove_dir_all(base.path().join(&cfg2.id));
-        remove_index_entry(&cfg2.id);
+        // Deleting the offline one only forgets it; then the name is free.
+        delete_volume(&cfg.id).await.unwrap();
+        assert!(!load_index().contains_key(&cfg.id));
+        delete_volume(&cfg2.id).await.unwrap();
+        let cfg3 = create_volume(
+            name,
+            1024,
+            VolumeSecret::Password("pw".into()),
+            Some(other.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cfg3.id, name);
+        delete_volume(&cfg3.id).await.unwrap();
     }
 
     #[tokio::test]
