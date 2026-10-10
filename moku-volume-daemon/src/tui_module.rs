@@ -687,6 +687,7 @@ mod tests {
                 size_limit_bytes: 1024,
                 password_mode: PasswordMode::Custom,
                 created_at: 0,
+                format: 0,
             },
             used_bytes: 0,
             mounted,

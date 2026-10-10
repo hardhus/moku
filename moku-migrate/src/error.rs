@@ -40,6 +40,15 @@ pub enum MigrateError {
         found: DataFormat,
         supported: DataFormat,
     },
+    #[error(
+        "volume {} is in volume format v{found}, newer than this moku supports (v{supported}); use a newer moku",
+        path.display()
+    )]
+    NewerVolumeFormat {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+    },
     #[error("no migration path from data format {from}")]
     NoPath { from: DataFormat },
     #[error("data format step \"{hop}\" failed")]

@@ -296,6 +296,7 @@ async fn generate_v0_2_7_fixtures() {
         size_limit_bytes: 64 * 1024 * 1024,
         password_mode: PasswordMode::Default,
         created_at: TS,
+        format: 0,
     };
     write_volume_config(&default_dir, &default_cfg).await;
     let vm = derive_default_volume_master_key(&master, &default_cfg.id);
@@ -320,6 +321,7 @@ async fn generate_v0_2_7_fixtures() {
         size_limit_bytes: 64 * 1024 * 1024,
         password_mode: PasswordMode::Custom,
         created_at: TS,
+        format: 0,
     };
     write_volume_config(&custom_dir, &custom_cfg).await;
     let custom_master = SecurityManager::new_with_root(custom_dir.clone())

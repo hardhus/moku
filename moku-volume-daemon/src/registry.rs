@@ -152,6 +152,16 @@ pub struct VolumeConfig {
     pub size_limit_bytes: u64,
     pub password_mode: PasswordMode,
     pub created_at: u64,
+    /// The volume's format (moku-migrate's volume chain). Missing = 0,
+    /// every volume before 0.2.12; the mount worker upgrades it under the
+    /// volume lock. Not written when 0, so a format-0 `volume.json` keeps
+    /// its exact shape.
+    #[serde(default, skip_serializing_if = "is_format_zero")]
+    pub format: u32,
+}
+
+fn is_format_zero(format: &u32) -> bool {
+    *format == 0
 }
 
 pub fn volumes_root() -> Result<PathBuf> {
@@ -383,6 +393,7 @@ pub async fn create_volume(
         size_limit_bytes,
         password_mode,
         created_at: now(),
+        format: moku_migrate::volume::CURRENT_VOLUME_FORMAT,
     };
     save_config(&dir, &config).await?;
 
@@ -729,6 +740,7 @@ mod tests {
             size_limit_bytes: 1024,
             password_mode: PasswordMode::Custom,
             created_at: 0,
+            format: moku_migrate::volume::CURRENT_VOLUME_FORMAT,
         };
         std::fs::write(
             dir.join(VOLUME_FILE),
@@ -796,6 +808,7 @@ mod tests {
             size_limit_bytes: 1024,
             password_mode: mode,
             created_at: 0,
+            format: 0,
         }
     }
 

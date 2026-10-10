@@ -31,7 +31,7 @@
 //!   `format::components_of`, and add the fixture test.
 //!
 //! Volumes carry their own, separate counter (`volume.json`'s `format`),
-//! upgraded lazily per volume at mount time.
+//! upgraded lazily per volume at mount time: see [`volume`].
 
 mod backup;
 mod detect;
@@ -40,6 +40,7 @@ mod format;
 mod hop;
 mod hops;
 mod runner;
+pub mod volume;
 
 pub use backup::{BACKUPS_DIR, BackupInfo, create_backup, list_backups};
 pub use detect::{DataState, detect_format, stamp_if_needed};

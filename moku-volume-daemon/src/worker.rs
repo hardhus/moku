@@ -114,6 +114,25 @@ async fn run_inner(volume_id: &str, mountpoint: &str) -> std::result::Result<(),
         other => VolumeError::Fs(other),
     })?;
 
+    // The volume format chain runs here, lazily, per volume: under the
+    // lock (no other opener) and before any key is derived (audit P4).
+    let cfg = match moku_migrate::volume::upgrade_volume(&volume_dir) {
+        Ok(None) => cfg,
+        Ok(Some(_)) => registry::load_config(&volume_dir).await?,
+        Err(moku_migrate::MigrateError::NewerVolumeFormat { found, supported, .. }) => {
+            return Err(VolumeError::NewerFormat {
+                name: cfg.display_name.clone(),
+                found,
+                supported,
+            });
+        }
+        Err(e) => {
+            return Err(anyhow::Error::from(e)
+                .context(format!("couldn't upgrade volume '{}'", cfg.display_name))
+                .into());
+        }
+    };
+
     let master_key = registry::resolve_volume_master_key(&volume_dir, &cfg, secret).await?;
     let keys = derive_volume_keys(&master_key);
 

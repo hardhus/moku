@@ -7,6 +7,7 @@ edition = "2024"
 moku-vault.workspace = true
 moku-sys.workspace = true
 moku-crypto.workspace = true
+moku-migrate.workspace = true
 moku-core.workspace = true
 moku-volume-fs = { path = "../moku-volume-fs" }
 moku-volume-mount = { path = "../moku-volume-mount" }

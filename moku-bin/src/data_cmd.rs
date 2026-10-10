@@ -17,13 +17,13 @@ use crate::volume_cmd::prompt_line;
 
 pub async fn handle(sub: &DataCommands, data_dir: &Path) -> Result<()> {
     match sub {
-        DataCommands::Status => status(data_dir),
+        DataCommands::Status => status(data_dir).await,
         DataCommands::Upgrade => upgrade(data_dir).await,
         DataCommands::Backups => backups(data_dir),
     }
 }
 
-fn status(data_dir: &Path) -> Result<()> {
+async fn status(data_dir: &Path) -> Result<()> {
     println!("Data directory: {}", data_dir.display());
     let state = match moku_migrate::detect_format(data_dir) {
         Ok(state) => state,
@@ -60,7 +60,33 @@ fn status(data_dir: &Path) -> Result<()> {
     if inferred {
         println!("({FORMAT_FILE} not written yet; inferred from vault/.key_scheme_version)");
     }
+    volumes().await;
     backups(data_dir)
+}
+
+/// Volumes carry their own format, upgraded when each is next mounted.
+async fn volumes() {
+    let Ok(list) = moku_volume_daemon::registry::list_volumes().await else {
+        return;
+    };
+    if list.is_empty() {
+        return;
+    }
+    println!(
+        "Volumes (format upgraded on their next mount; this moku uses v{}):",
+        moku_migrate::volume::CURRENT_VOLUME_FORMAT
+    );
+    for v in list {
+        let format = moku_volume_daemon::registry::volume_dir(&v.id)
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|dir| {
+                moku_migrate::volume::volume_format(&dir).map_err(|e| format!("{:#}", anyhow::Error::from(e)))
+            });
+        match format {
+            Ok(f) => println!("  {} ({}): v{f}", v.display_name, v.id),
+            Err(e) => println!("  {} ({}): unreadable ({e})", v.display_name, v.id),
+        }
+    }
 }
 
 fn backups(data_dir: &Path) -> Result<()> {

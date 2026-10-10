@@ -19,6 +19,14 @@ pub enum VolumeError {
     NeedsOwnPassword(String),
     #[error("volume '{0}' is already mounted (or in use by another moku process)")]
     AlreadyMounted(String),
+    /// The volume's `volume.json` is in a newer volume format than this
+    /// moku supports (KN-4.5 for volumes): it is not opened.
+    #[error("volume '{name}' is in volume format v{found}, newer than this moku supports (v{supported}); use a newer moku")]
+    NewerFormat {
+        name: String,
+        found: u32,
+        supported: u32,
+    },
     #[error(transparent)]
     Vault(#[from] VaultError),
     #[error(transparent)]
@@ -37,6 +45,7 @@ impl VolumeError {
             VolumeError::WrongPassword(_) => MountErrorCode::WrongPassword,
             VolumeError::NeedsOwnPassword(_) => MountErrorCode::NeedsOwnPassword,
             VolumeError::AlreadyMounted(_) => MountErrorCode::AlreadyMounted,
+            VolumeError::NewerFormat { .. } => MountErrorCode::NewerFormat,
             VolumeError::Mount(MountError::BackendMissing(_)) => MountErrorCode::BackendMissing,
             VolumeError::Mount(MountError::MountPointUnavailable { .. }) => {
                 MountErrorCode::MountPointUnavailable
@@ -67,6 +76,8 @@ pub enum MountErrorCode {
     BackendMissing,
     MountPointUnavailable,
     Corrupt,
+    /// The volume is in a newer volume format (added in 0.2.12).
+    NewerFormat,
     Other,
     /// No code was reported (a worker that crashed or predates the
     /// protocol), or one this binary doesn't know.
@@ -82,6 +93,7 @@ impl MountErrorCode {
             MountErrorCode::BackendMissing => "backend_missing",
             MountErrorCode::MountPointUnavailable => "mount_point_unavailable",
             MountErrorCode::Corrupt => "corrupt",
+            MountErrorCode::NewerFormat => "newer_format",
             MountErrorCode::Other => "other",
             MountErrorCode::Unknown => "unknown",
         }
@@ -95,8 +107,36 @@ impl MountErrorCode {
             "backend_missing" => MountErrorCode::BackendMissing,
             "mount_point_unavailable" => MountErrorCode::MountPointUnavailable,
             "corrupt" => MountErrorCode::Corrupt,
+            "newer_format" => MountErrorCode::NewerFormat,
             "other" => MountErrorCode::Other,
             _ => MountErrorCode::Unknown,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The codes are a wire format: every known one round-trips, and the
+    /// strings of the pre-0.2.12 codes never change.
+    #[test]
+    fn test_mount_error_codes_round_trip() {
+        let all = [
+            MountErrorCode::WrongPassword,
+            MountErrorCode::NeedsOwnPassword,
+            MountErrorCode::AlreadyMounted,
+            MountErrorCode::BackendMissing,
+            MountErrorCode::MountPointUnavailable,
+            MountErrorCode::Corrupt,
+            MountErrorCode::NewerFormat,
+            MountErrorCode::Other,
+        ];
+        for code in all {
+            assert_eq!(MountErrorCode::parse(code.as_str()), code);
+        }
+        assert_eq!(MountErrorCode::Corrupt.as_str(), "corrupt");
+        assert_eq!(MountErrorCode::NewerFormat.as_str(), "newer_format");
+        assert_eq!(MountErrorCode::parse("from_the_future"), MountErrorCode::Unknown);
     }
 }

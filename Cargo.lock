@@ -2949,6 +2949,7 @@ dependencies = [
  "moku-config",
  "moku-core",
  "moku-crypto",
+ "moku-migrate",
  "moku-store",
  "moku-sys",
  "moku-vault",
