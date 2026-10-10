@@ -16,8 +16,8 @@ pulls in ratatui, crossterm or sled (check with `cargo tree -p <crate>
 | Crate | Owns | Depends on |
 |---|---|---|
 | `moku-sys` | `dirs`, `util::{atomic_write(_async), truncate_at_char_boundary, open_url, error_chain}` | — |
-| `moku-crypto` | `SafeKey`, `CryptoError`, `encrypt`/`decrypt` (AES-GCM), `generate_salt`, `argon2id_key`, `derive_module_storage_key` | — (**no file IO, no tokio**, by design) |
-| `moku-vault` | `SecurityManager` (meta.json, init/unlock, async `derive_key`), `VaultSession`, `cli::{ensure_unlocked, prompt_new_password}`, `VaultError` | crypto, sys |
+| `moku-crypto` | `Key<P>` + roles, `SecretString`, `KeyCell`, `kdf` (`password_key`, `KdfParams`), `purpose` (HKDF), `seal`/`open` + `Aad`/`Alg`, `format_v1`, `BlockAead`/`NameSiv`, `keyslot`, `random`, `CryptoError` (since P3) | — (**no file IO, no tokio, no serde**, by design) |
+| `moku-vault` | `SecurityManager` (meta.json, init/unlock, async `derive_key`), `VaultSession` (`KeyCell<RootKey>`), `cli::{ensure_unlocked, read_password, prompt_new_password}`, `VaultError` | crypto, sys |
 | `moku-config` | `MokuConfig` + sections, `ThemeColors`, `ConfigHandle`, `ConfigIssue`/`ConfigError`, `resolve_encryption` | sys |
 | `moku-store` | `StorageManager`, envelope/`KeyScheme`, `StoreError`, `MigrationReport` | crypto, vault, sys |
 | `moku-core` | module traits, `AppContext`/`CliContext`/`DaemonContext`, registry, router, keys, `MokuTheme`, toasts, widgets | config, vault, store, sys |
@@ -28,9 +28,9 @@ mention, which are today's `moku-volume-*`.
 
 Import items from the crate that owns them (`moku_vault::SecurityManager`,
 `moku_store::StorageManager`, `moku_config::MokuConfig`, ...); `moku-core`
-re-exports none of them. Crypto primitives go in `moku-crypto` (P3
-redesigns them there as `Key<P>`/`seal`/`open`); anything that touches
-key material on disk or needs a runtime goes in `moku-vault`.
+re-exports none of them. Crypto primitives go in `moku-crypto`, and only
+there (see "Security / crypto conventions"); anything that touches key
+material on disk or needs a runtime goes in `moku-vault`.
 
 ## Errors (since P2)
 
@@ -111,38 +111,85 @@ key material on disk or needs a runtime goes in `moku-vault`.
 
 ## Security / crypto conventions
 
-- **Argon2id is the only password KDF.** Params are `Params::new(65536, 3, 4,
-  Some(32))` (64 MiB, 3 iterations, 4-way parallelism, 32-byte output),
-  `Algorithm::Argon2id`, `Version::V0x13` — see
-  `moku-crypto/src/password.rs` (`argon2id_key`). Reuse these exact params for any new
-  password-derived key; don't invent new ones per-feature.
+- **Only `moku-crypto` touches cryptographic primitives (since P3).** No
+  other crate may depend on `aes`, `aes-gcm`, `aes-siv`, `chacha20`,
+  `chacha20poly1305`, `poly1305`, `ghash`, `polyval`, `hkdf` or `argon2`,
+  or name `aes_gcm::`/`aes_siv::`/`chacha20poly1305::`/`hkdf::`/`argon2::`;
+  `moku-crypto/tests/crypto_crate_ban.rs` enforces it. Need something
+  new? Add it to `moku-crypto` with tests. This keeps the rules below
+  enforced by types and a dependency upgrade (P10) to one crate.
+- **Keys are `moku_crypto::Key<P, N = 32>`**, typed by role (`RootKey`,
+  `PasswordKey`, `Kek`, `ModuleStorageKey`, `VolumeMasterKey`,
+  `VolumeContentKey`, `VolumeNameKey` (N = 64), `ExportKey`,
+  `RecoverySecret`). Heap-boxed, wiped on drop, no `Clone`
+  (`duplicate()` is the visible copy), redacted `Debug`. `from_slice` only
+  for key bytes from a trusted channel (worker stdin, test vectors);
+  `expose()` only where the bytes must be handed on. Every `Key`
+  allocation goes through `alloc_key_box` in `key.rs` (P9 moves it to
+  locked memory).
+- **Argon2id is the only password KDF.** `moku_crypto::password_key(&SecretString,
+  salt, KdfParams)`, Argon2id v0x13, `kdf::DEFAULT_KDF` = 64 MiB, t = 3,
+  p = 4, 32-byte output (`moku-crypto/src/kdf.rs`). Reuse these params for
+  any new password-derived key; don't invent new ones per feature. New
+  formats record their `KdfParams` (MSXP v2, P5 keyslots) so they can be
+  raised later; formats that don't (meta.json v1, MSXP v1) imply
+  `DEFAULT_KDF`. It is synchronous: async callers use `spawn_blocking`.
 - **Never use a raw master/password-derived key directly as a cipher key.**
-  Derive independent subkeys via HKDF-SHA256 with a fixed, versioned
-  domain-separation `info` string per purpose, e.g.
-  `moku-vault-fs/content-key/v1` / `moku-vault-fs/name-key/v1`
-  (`moku-volume-fs/src/keys.rs`), per-volume via `moku-volume-daemon/src/
-  registry.rs`'s `derive_default_volume_master_key`, or per-module via
-  `moku-crypto/src/subkey.rs`'s `derive_module_storage_key` (info
-  string `moku-core/storage/<module_id>/v1` — see below). One
-  `Hkdf::new(None, master)` + one `hk.expand(info, &mut out)` call per
-  subkey. Bump the `/v1` suffix (not the string itself) if a derivation
-  ever needs to change incompatibly. The three volume info strings
-  (`moku-vault-fs/content-key/v1`, `moku-vault-fs/name-key/v1`,
-  `moku-vault-daemon/default-volume/v1/<id>`) intentionally still say
-  "vault": they predate the vault -> volume crate rename and are baked
-  into every existing volume's keys, so they stay byte-for-byte forever.
-  All four existing derivations (these three + `moku-core/storage/<m>/v1`)
-  are pinned by known-answer tests (`moku-crypto/tests/crypto_kat.rs`,
-  `moku-crypto/src/subkey.rs`, `moku-volume-fs/tests/crypto_kat.rs`,
-  `moku-volume-daemon/tests/crypto_kat.rs`). Never "update" a KAT's
-  expected value to match new code: a failing KAT means existing data
-  would no longer decrypt.
-- **`moku-core`'s general storage layer (`StorageManager::save`/`load`)
-  uses per-module HKDF subkeys, not the raw vault master key directly.**
+  Every HKDF derivation lives in `moku-crypto/src/purpose.rs`: one
+  `Purpose` variant per info string, and a **named function** per
+  derivation with role-typed input and output (`module_storage_key`,
+  `default_volume_master`, `volume_keys`, `secrets_export_key`; keyslot
+  KEKs in `keyslot.rs`). The generic `derive` is crate-private on purpose
+  (audit KN-3.2): a new derivation = a new variant + a named function + a
+  KAT, never an ad-hoc HKDF call. New info strings follow
+  `moku/<area>/<purpose>/v<N>` + length-prefixed (u16 BE) context fields.
+  Bump `v<N>` (never edit a string) if a derivation must change.
+  **The four pre-P3 strings are permanent, byte-for-byte**, odd shapes
+  included: `moku-core/storage/<module_id>/v1`,
+  `moku-vault-daemon/default-volume/v1/<id>`,
+  `moku-vault-fs/content-key/v1`, `moku-vault-fs/name-key/v1` (three say
+  "vault" because they predate the vault -> volume rename). Pinned by
+  known-answer tests: `moku-crypto/tests/{crypto_kat, purpose_kat}.rs`
+  (K1, K2, K7a, every info string, the new derivations),
+  `moku-volume-fs/tests/crypto_kat.rs` (K4, K6),
+  `moku-volume-daemon/tests/crypto_kat.rs` (K3, K5), plus the v0.2.7
+  fixtures. Never "update" a KAT's expected value to match new code: a
+  failing KAT means existing data would no longer decrypt.
+- **New ciphertext formats use `moku_crypto::seal`/`open`** with
+  XChaCha20-Poly1305 (audit KN-3.1). AAD is mandatory: an `Aad` is built
+  from a domain string plus length-prefixed context fields, and only
+  `AeadKey` roles are accepted (a root/password/volume-master key won't
+  compile). Output is self-describing, `alg || nonce || ct || tag`; `Alg`
+  ids are permanent (future cascade suites get new ids). Existing formats
+  stay as they are: MKV1 volume blocks (`BlockAead`, AES-GCM, keyed once
+  per opened volume) and names (`NameSiv`).
+- **`moku_crypto::format_v1` is the one deliberate exception**: the
+  pre-P3 `nonce || ct || tag` AES-GCM format without AAD, accepting a key
+  of any role, still written by storage envelopes and the vault canary
+  and read for V0 records and MSXP v1. Don't use it for anything new. P6
+  deletes the write path (store moves to `seal`) and moves the read path
+  into the migration crate; MSXP v1 import keeps a permanent reader. Its
+  explicitly named role adoptions (`adopt_password_key_as_root`,
+  `custom_volume_master`) exist because today's vault master *is* the
+  Argon2 output; don't add more.
+- **Zeroization claims are proven by tests, not assumed.**
+  `moku-crypto/tests/zeroize_on_free.rs` installs a checking allocator
+  and asserts that freed key boxes, cipher states, Argon2 memory and
+  plaintext buffers are all zero. Its `library_fact_*` tests record what
+  each RustCrypto crate wipes by itself at the locked version: argon2
+  0.5.3 doesn't wipe `hash_password_into`'s memory (so `password_key`
+  passes its own `Zeroizing` buffer) and polyval 0.6.2's autodetect
+  backend never drops its GHASH state (so every cipher moku-crypto builds
+  lives in `WipeOnDrop`). The `zeroize` features of aes, aes-gcm, ghash,
+  polyval, chacha20, poly1305 and argon2 must be enabled one by one (they
+  don't propagate). A dependency upgrade must keep this test green. Only
+  heap memory can be checked this way; that's one more reason keys live
+  in boxes.
+- **`moku-store`'s storage layer (`StorageManager::save`/`load`) uses
+  per-module HKDF subkeys, not the raw vault master key directly.**
   Every module's encrypted data (todo/bookmark/secrets/rss/...) is
-  encrypted under `derive_module_storage_key(master, module_id)`, never
-  the raw master key — closing the same "raw key as cipher key" gap the
-  bullet above already covered for `moku-volume-fs`/`moku-volume-daemon`.
+  encrypted under `module_storage_key(root, module_id)` (`KeyScheme::V1`);
+  only reading an old `V0` record still uses the root key itself.
 - **`StorageEnvelope.key_scheme` is a numbered migration chain, not a
   one-off flag.** `KeyScheme` (`moku-store/src/envelope.rs`) is
   `V0` (raw master key, `#[default]`/`#[serde(rename = "Legacy")]`) or
@@ -192,20 +239,29 @@ key material on disk or needs a runtime goes in `moku-vault`.
   there so `app_loop.rs` can reuse the same list directly instead of a
   third hand-kept copy) — the two are meant to stay in sync (TUI vs. CLI
   equivalents of the same migration action).
-- **Every secret value in memory is `secrecy::SecretBox<T>` where `T:
-  Zeroize`, or `zeroize::Zeroizing<T>` for a plain owned value like a
-  password `String` that isn't going through `SecretBox`'s access-control
-  API.** Never a plain `String`/`[u8; N]` for a password, key, or seed
-  that outlives a single local computation — this includes TUI input
-  buffers accumulating a password/secret keystroke-by-keystroke
-  (`moku-lock-screen`'s `input`, `moku-volume-daemon`'s `CreateForm`/
-  `PasswordPrompt` fields, `moku-secrets`'s `AddState.value`/
-  `ExportState.password`, `SecretEntry.value`) and byte buffers crossing a
-  process boundary (`moku-volume-daemon/src/worker.rs`'s mount-secret stdin
-  protocol). `SecurityManager::initialize_vault`/`unlock_vault` take
-  `Zeroizing<String>`, not `String` — wrap a freshly-read
-  `rpassword::prompt_password()` result in `Zeroizing::new(...)`
-  immediately, don't let it sit as a bare `String` even briefly.
+- **Every secret in memory has a wiping type (since P3, `secrecy` is
+  gone):** keys are `Key<P>`, passwords/seeds/secret values are
+  `moku_crypto::SecretString`, other plaintext byte buffers are
+  `zeroize::Zeroizing<Vec<u8>>`. Never a plain `String`/`[u8; N]` for a
+  password, key, or seed that outlives a single local computation — this
+  includes TUI input buffers accumulating a secret keystroke-by-keystroke
+  (`moku-lock-screen`'s `input`/`confirm`, `moku-volume-daemon`'s
+  `CreateForm`/`PasswordPrompt`, `moku-secrets`'s `AddState.value`/
+  `ExportState`, `SecretEntry.value`/`totp_seed`), the volume
+  `VolumeSecret`/`MountSecret` passwords, and byte buffers crossing a
+  process boundary (`moku-volume-daemon/src/worker.rs`'s stdin protocol).
+  `SecretString` has no `Clone`/`Display`; its `push` grows the buffer
+  itself and wipes the old one, `pop` overwrites, `take()` moves a form's
+  password on without copying, `duplicate()` is the visible copy. Start
+  input buffers with `SecretString::with_capacity(128)`. Read CLI
+  passwords with `moku_vault::cli::read_password` (straight into a
+  `SecretString`), never a bare `rpassword::prompt_password()` `String`.
+- **The vault's root key is only ever borrowed: `ctx.session.with(|root|
+  ..)`** (`VaultSession` keeps it in a `KeyCell`). Derive what you need
+  inside the closure (a module or volume key) and return it; no IO or
+  Argon2 inside. Nothing can hold the root key outside the session, so
+  `lock()` really zeroizes it (waiting for running `with` calls).
+  `VaultSession::current()` no longer exists.
 - **Secrets are never CLI flags/arguments.** Not `--password`, not
   `--totp-seed`, nothing that would show up in `ps`/Task Manager/shell
   history. Always prompt interactively via `rpassword::prompt_password`
@@ -213,11 +269,15 @@ key material on disk or needs a runtime goes in `moku-vault`.
   `Import`), or — for a spawned worker process needing a secret handed to it
   by its parent (e.g. `moku-volume-daemon`'s mount worker) — pass it over
   stdin with a small tagged protocol, never argv or an environment variable.
-- **Password-prompt UX rule**: verifying an existing password (login/mount)
-  asks once; setting a *new* password (create/change) asks twice
-  (password + confirmation), since a fresh password has nothing else to
-  check a typo against. Don't invent a third pattern. Implementations:
-  the lock screen's setup mode (password + Confirm fields),
+- **Password-prompt UX rule (sharpened 2026-10-10):** ask **twice**
+  (password + confirmation) whenever a typo would create something
+  protected by the wrong password — a new vault, volume or export file,
+  a password change — since there is nothing else to check it against.
+  Ask **once** when a typo can only fail with "wrong password" (unlock,
+  mount, import), or when an already-proven password is reused (`moku
+  secrets export-upgrade`). Don't invent a third pattern.
+  Implementations: the lock screen's setup mode, the volume create form,
+  the secrets export form (password + Confirm fields),
   `moku_vault::cli::prompt_new_password` for CLI.
 - **Shared delete-confirmation convention**: a destructive delete goes
   through `moku_core::keys::{is_delete_bypass, resolve_confirm_delete_key,
@@ -282,12 +342,11 @@ key material on disk or needs a runtime goes in `moku-vault`.
   is created only for a directory with no encrypted entries yet, and
   never over an existing one.
 - **The mount worker only ever gets one volume's key.** Stdin tag `0x02`
-  carries the derived `derive_default_volume_master_key` output; the TUI
-  derives it and drops the app key immediately. Tag `0x01` (app master
-  key) is still accepted for upgrade compatibility but never sent; it
-  goes away in P9. Never keep an app-key `Arc` in module state (a prompt
-  must read `ctx.session.current()` at the moment of use), or locking
-  can't wipe it.
+  carries the derived `Key<VolumeMasterKey>`; the TUI derives it inside
+  `ctx.session.with(..)`, so the app key never leaves the session. Tag
+  `0x01` (`MountSecret::AppKey`, app root key) is still accepted for
+  upgrade compatibility but never sent; it goes away in P9. Creating a
+  Default-mode volume needs no key at all (`VolumeSecret::AppVault`).
 - **CLI vault access goes through `moku_vault::cli`:**
   `ensure_unlocked` asks once and never creates a vault; first-time
   setup is the TUI's (or a future `moku vault init`).
@@ -417,6 +476,15 @@ key material on disk or needs a runtime goes in `moku-vault`.
   anything. Fixtures must only ever contain synthetic data
   (foo/bar/example.com, fixed test passwords). Never copy anything from
   a real data dir or `moku_dev`.
+- **`modules/moku-secrets/tests/fixtures/msxp-v2.msxp` is frozen the
+  same way** (P3): the first MSXP v2 export, produced once by an
+  `#[ignore]`d generator that refuses to overwrite it. Module test
+  fixtures are `-text` in `.gitattributes`.
+- **Export files (MSXP) are not data-dir formats.** They live wherever
+  the user put them, so the migration chain can't upgrade them: import
+  reads every MSXP version forever, export writes only the latest, and
+  `moku secrets export-upgrade` rewrites an old file on request
+  (`modules/moku-secrets/src/msxp.rs`).
 - The 0.3-foundations refactor plan and its per-phase status live in
   `audit/99-checklist.md` (+ `audit/checklist/P0..P10`). That folder is
   local and excluded via `.git/info/exclude`, never committed. This file
@@ -489,7 +557,8 @@ already-accepted):
   forward-looking note, not something to react to by swapping storage
   backends in a pass whose explicit goal was "same behavior, safer/
   cleaner code."
-- `VolumeSecret::Password`/`MountSecret::Password` (moku-volume-daemon,
+- (Closed in P3: both are `SecretString` now.)
+  `VolumeSecret::Password`/`MountSecret::Password` (moku-volume-daemon,
   worker.rs) still carry a plain `String`, not `Zeroizing<String>` — the
   same class of gap the crypto section's TUI-input-buffer fix addresses,
   but scoped out here since it cascades through the whole per-volume-vault
