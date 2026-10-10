@@ -52,6 +52,13 @@ pub enum Commands {
         #[command(subcommand)]
         sub: Option<DaemonCommands>,
     },
+    /// Data format: status, the one-time upgrade to this moku's format,
+    /// and the backups it takes. (Not `config migrate`, which only
+    /// switches a module between encrypted and plaintext storage.)
+    Data {
+        #[command(subcommand)]
+        sub: DataCommands,
+    },
     /// View or change per-module storage encryption settings.
     Config {
         #[command(subcommand)]
@@ -190,6 +197,22 @@ pub enum VolumeCommands {
 }
 
 #[derive(Subcommand, Clone, PartialEq, Debug)]
+pub enum DataCommands {
+    /// Show the data directory's format, any pending upgrade steps and
+    /// the backups taken so far. Needs no password.
+    Status,
+    /// Upgrade the data directory to this moku's data format, in one go
+    /// (every pending step in order). Backs up the data first, asks for
+    /// confirmation, and prompts for the vault password if a step needs
+    /// it. This is a one-time format change, not the encrypted/plaintext
+    /// toggle (`moku config migrate`).
+    Upgrade,
+    /// List the backups taken before upgrades (never deleted
+    /// automatically; remove old ones by hand).
+    Backups,
+}
+
+#[derive(Subcommand, Clone, PartialEq, Debug)]
 pub enum ConfigCommands {
     /// Show the effective (config-resolved) encryption setting for every
     /// module that supports it.
@@ -208,7 +231,8 @@ pub enum ConfigCommands {
     /// Re-run migration for one module (or all supported modules, if
     /// omitted) against its currently configured encryption setting,
     /// without changing config — useful to reconcile drift after editing
-    /// config.toml by hand.
+    /// config.toml by hand. This only switches records between encrypted
+    /// and plaintext; upgrading the data format is `moku data upgrade`.
     Migrate {
         /// Module id: todo, bookmark, or rss. All supported modules if omitted.
         module: Option<String>,
@@ -252,6 +276,8 @@ impl Cli {
             // matters for registry dispatch; SETTINGS is the closest
             // semantic match since it's a config-editing command.
             Some(Commands::Config { .. }) => ModuleId::SETTINGS,
+            // Same as Config: always intercepted early in main.rs.
+            Some(Commands::Data { .. }) => ModuleId::SETTINGS,
             // Same as Config: always intercepted early in main.rs.
             Some(Commands::Volume { .. }) => ModuleId::SETTINGS,
             Some(Commands::Notes { .. }) => ModuleId::NOTES,

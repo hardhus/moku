@@ -7,6 +7,7 @@ use color_eyre::eyre::eyre;
 mod app_loop;
 mod cli;
 mod config_cmd;
+mod data_cmd;
 mod data_upgrade;
 mod pomodoro_cmd;
 mod registry;
@@ -140,6 +141,18 @@ async fn main() -> Result<()> {
     // stops here (audit KN-4.5); an older one is upgraded from the TUI's
     // prompt (or `moku data upgrade`).
     let data_dir = moku_sys::dirs::get_data_dir().map_err(|e| eyre!(e))?;
+
+    // `moku data` works on any data directory, including one this build
+    // refuses to open (newer or unreadable FORMAT), so `status` can say
+    // why. It builds its own session; nothing else is needed.
+    if let Some(Commands::Data { sub }) = &cli.command {
+        if let Err(e) = data_cmd::handle(sub, &data_dir).await {
+            eprintln!("{e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let pending_upgrade = match data_upgrade::startup_check(&data_dir) {
         Ok(pending) => pending,
         Err(e) => {

@@ -10,7 +10,7 @@ use crate::cli::VolumeCommands;
 /// Reads one line of plain (unmasked) input, prompting first — for
 /// non-secret fields like a volume name or size where `rpassword` would be
 /// the wrong (and slower) tool. Never used for passwords.
-fn prompt_line(label: &str) -> Result<String> {
+pub(crate) fn prompt_line(label: &str) -> Result<String> {
     use std::io::Write;
     print!("{label}");
     std::io::stdout()
