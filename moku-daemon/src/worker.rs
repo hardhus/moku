@@ -167,8 +167,7 @@ mod tests {
         assert!(check_data_format(fresh.path()).is_ok());
 
         let current = tempfile::tempdir().unwrap();
-        std::fs::write(current.path().join("FORMAT"), "data_format = 1
-").unwrap();
+        std::fs::write(current.path().join("FORMAT"), "data_format = 1\n").unwrap();
         assert!(check_data_format(current.path()).is_ok());
 
         let behind = tempfile::tempdir().unwrap();
@@ -177,8 +176,7 @@ mod tests {
         assert!(format!("{err:#}").contains("data format v0"), "{err:#}");
 
         let newer = tempfile::tempdir().unwrap();
-        std::fs::write(newer.path().join("FORMAT"), "data_format = 9
-").unwrap();
+        std::fs::write(newer.path().join("FORMAT"), "data_format = 9\n").unwrap();
         assert!(check_data_format(newer.path()).is_err());
     }
 

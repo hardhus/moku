@@ -112,13 +112,17 @@ pub(crate) fn write_format(
     format: DataFormat,
     written_by: &str,
 ) -> Result<(), MigrateError> {
-    let body = toml::to_string(&FormatFile::new(format, written_by))
-        .expect("FormatFile always serializes: plain integers and strings");
+    let path = format_path(data_dir);
+    let body = toml::to_string(&FormatFile::new(format, written_by)).map_err(|e| MigrateError::Io {
+        what: "encode the FORMAT marker",
+        path: path.clone(),
+        source: io::Error::other(e),
+    })?;
     let text = format!(
         "# moku data directory format. Written by moku; do not edit.\n\
          # Only `data_format` is read; the other fields are informational.\n\n{body}"
     );
-    moku_sys::util::atomic_write(&format_path(data_dir), text.as_bytes())?;
+    moku_sys::util::atomic_write(&path, text.as_bytes())?;
     Ok(())
 }
 
