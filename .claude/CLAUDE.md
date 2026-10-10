@@ -19,7 +19,8 @@ pulls in ratatui, crossterm or sled (check with `cargo tree -p <crate>
 | `moku-crypto` | `Key<P>` + roles, `SecretString`, `KeyCell`, `kdf` (`password_key`, `KdfParams`), `purpose` (HKDF), `seal`/`open` + `Aad`/`Alg`, `format_v1`, `BlockAead`/`NameSiv`, `keyslot`, `random`, `CryptoError` (since P3) | — (**no file IO, no tokio, no serde**, by design) |
 | `moku-vault` | `SecurityManager` (meta.json, init/unlock, async `derive_key`), `VaultSession` (`KeyCell<RootKey>`), `cli::{ensure_unlocked, read_password, prompt_new_password}`, `VaultError` | crypto, sys |
 | `moku-config` | `MokuConfig` + sections, `ThemeColors`, `ConfigHandle`, `ConfigIssue`/`ConfigError`, `resolve_encryption` | sys |
-| `moku-store` | `StorageManager`, envelope/`KeyScheme`, `StoreError`, `MigrationReport` | crypto, vault, sys |
+| `moku-store` | `StorageManager`, envelope/`KeyScheme` tag, `StoreError`, `MigrationReport` (reads only the current data format) | crypto, vault, sys |
+| `moku-migrate` | `FORMAT` marker, `detect_format`, hop registry `HOPS`, `upgrade` + backups, `volume` chain; every reader of an old on-disk format (since P4) | crypto, vault, sys (**not** store: hops carry frozen copies of old types) |
 | `moku-core` | module traits, `AppContext`/`CliContext`/`DaemonContext`, registry, router, keys, `MokuTheme`, toasts, widgets | config, vault, store, sys |
 
 `moku-vault` is the app vault crate (new in P2). It is unrelated to the
@@ -88,6 +89,81 @@ material on disk or needs a runtime goes in `moku-vault`.
   a gate that only decides "does this need the vault" treats it as
   encrypted (`unwrap_or(true)`). Never fall back to plaintext.
 - Use `ModuleId::X.as_str()` for module ids, never a string literal.
+- **config.toml has its own format chain** (`moku-config/src/migrate.rs`,
+  since P4): `ConfigHop`s on the raw `toml_edit` document, counter
+  `config_version` (base 1 = a file without it). `ConfigHandle::open`
+  runs pending hops with a `config.toml.pre-v<N>-<ts>` copy first; a
+  failed hop writes nothing and opens read-only. The chain is empty
+  today; a config shape change adds a hop and bumps
+  `CURRENT_CONFIG_VERSION`.
+
+## Data format and migration (since P4)
+
+- **The data directory has one format number, and the runtime only knows
+  the latest one.** `<data_dir>/FORMAT` (TOML, next to `vault/`):
+  `data_format` decides, `written_by` / `components` are informational.
+  It's read without unlocking (`moku_migrate::detect_format`) and only
+  ever written with `atomic_write`. Without `FORMAT`, a `vault/` is a
+  pre-P4 directory whose format is inferred from the old
+  `vault/.key_scheme_version` (0 or 1; missing/garbage = 0); only
+  moku-migrate reads that file.
+- **All code that reads an old on-disk format lives in moku-migrate.**
+  Runtime crates read the current format and nothing else: `moku-store`
+  returns `StoreError::NeedsUpgrade` for an encrypted `KeyScheme::V0`
+  record instead of decrypting it. No dual read paths, no background
+  conversion; the only cost to an up-to-date user is reading `FORMAT`.
+- **A format change = one hop.** A new file in `moku-migrate/src/hops/`,
+  appended to `HOPS`, `CURRENT_DATA_FORMAT` bumped, its components in
+  `format::components_of`, and a test against a copy of
+  `test-fixtures/` (plus synthetic states the fixtures lack). Never a
+  one-off migration mechanism. A hop:
+  - is **frozen** once shipped (a later bug gets a new hop, never an
+    edit);
+  - declares **its own copies** of the old types it reads (see
+    `h0000_key_scheme_v1.rs`'s `Envelope`), never a runtime type;
+  - is **crash safe and idempotent**: builds beside the old data and
+    swaps atomically (e.g. External blob first via `atomic_write`, then
+    the envelope; a retry recognises a half-done record).
+- **`moku_migrate::upgrade`** re-detects the format, refuses a newer or
+  unreadable one, refuses `Locked` if a hop `needs_unlock`, refuses
+  `InUse` if any module DB's sled lock is held (probed with
+  `File::try_lock`, not `sled::open`, which would rewrite files before the
+  backup), backs up `vault/` (+ `FORMAT`) to
+  `backups/data-v<from>-<unix>/` (via a `.partial-` name; never deleted
+  automatically), then runs each hop and writes `FORMAT` right after it,
+  so a failure leaves the marker at that hop's `from`.
+- **What the format gates:**
+  - `main.rs` checks it before `StorageManager::new` (which creates
+    `vault/`): newer or unreadable `FORMAT` exits with the error (fail
+    closed, KN-4.5); fresh or current gets `FORMAT` stamped; behind is
+    handed to the TUI.
+  - TUI (`moku-bin/src/data_upgrade.rs`): after the first unlock a
+    full-pane prompt (steps, backup location, daemon note) always asks;
+    there is no silent path. Confirm stops the daemon
+    (`stop_daemon_and_wait`), `close_all_dbs()`, runs `upgrade` on
+    `spawn_blocking` with a progress screen (keys and auto-lock held off).
+    "Not now" persists nothing: every vault-gated module opens the prompt
+    instead of itself (`navigate` in `app_loop.rs`), the launcher and lock
+    screen never are, and the next launch asks again.
+  - CLI commands run on a behind directory with a stderr notice; old
+    records surface as `NeedsUpgrade`.
+  - The daemon runs only on a current (or fresh) format
+    (`moku_daemon::worker::check_data_format`).
+- **`moku data status | upgrade | backups`** is the data-format upgrade.
+  It is unrelated to `moku config migrate` / Settings → Storage
+  `m`/`Shift+M`, which only switch a module between encrypted and
+  plaintext (a user preference, not a format). Keep the two apart in
+  code and `--help`.
+- **`KeyScheme::V0` is a tag, not a migration step.** Every plaintext
+  record carries `"Legacy"`, so the variant stays; only its decryption is
+  gone from the runtime. The `serde(rename)`s pin `"Legacy"` /
+  `"PerModuleV1"` forever.
+- **Volumes have their own counter**, `volume.json`'s `format` (missing =
+  0, not written when 0), upgraded lazily per volume by the mount worker
+  right after `VolumeLock::acquire` and before any key is derived
+  (`moku_migrate::volume`). Never in the global upgrade: volumes can be
+  on unplugged drives, Custom ones have their own password. A newer
+  volume format is `VolumeError::NewerFormat` / wire code `newer_format`.
 - Tests build contexts with `ConfigHandle::detached(..)`, which never
   touches disk. Before P2, pomodoro tests wrote the real moku_dev
   config.toml.
@@ -188,57 +264,15 @@ material on disk or needs a runtime goes in `moku-vault`.
 - **`moku-store`'s storage layer (`StorageManager::save`/`load`) uses
   per-module HKDF subkeys, not the raw vault master key directly.**
   Every module's encrypted data (todo/bookmark/secrets/rss/...) is
-  encrypted under `module_storage_key(root, module_id)` (`KeyScheme::V1`);
-  only reading an old `V0` record still uses the root key itself.
-- **`StorageEnvelope.key_scheme` is a numbered migration chain, not a
-  one-off flag.** `KeyScheme` (`moku-store/src/envelope.rs`) is
-  `V0` (raw master key, `#[default]`/`#[serde(rename = "Legacy")]`) or
-  `V1` (per-module HKDF subkey, `#[serde(rename = "PerModuleV1")]`,
-  current) — the `serde(rename)`s pin the on-disk JSON tags to their
-  original strings forever, so every already-written record (including
-  already-migrated production data) keeps deserializing correctly no
-  matter what the Rust-side variant names become. `KeyScheme::version()`
-  and `CURRENT_KEY_SCHEME` give a plain `u16` ordinal instead of matching
-  every past variant everywhere that cares. Adding a future `V2` means:
-  (1) a new variant + its `version()` arm, (2) a `resolve_key_for_scheme`
-  match arm in `storage::manager`, (3) bumping `CURRENT_KEY_SCHEME`, and
-  (4) — only if `V2` changes the decrypted JSON shape, not just the key
-  derivation — a `match` arm in `envelope::data_transform_for_hop`.
-  `StorageManager::migrate_key_scheme_to_latest` (per module) /
-  `migrate_all_key_schemes` (every `ENCRYPTABLE_MODULES` module id, only
-  advances the marker below on full success) walk a record straight from
-  whatever version it's on to `CURRENT_KEY_SCHEME` — a caller never
-  needs to know or replay intermediate hops. This is a completely
-  separate concern from `migrate_module_encryption`'s encrypted/
-  plaintext config toggle — that method no longer touches `key_scheme`
-  as a side effect; re-keying only ever happens through the two methods
-  above.
-- **The data directory self-describes its own key-scheme version,
-  independent of any in-app config.** `StorageManager` writes a small
-  `.key_scheme_version` marker file at the vault root (sibling to every
-  module's own subdirectory) the moment a brand-new `vault_root` is
-  created — a fresh install starts life already on `CURRENT_KEY_SCHEME`,
-  nothing to ever migrate. `data_dir_key_scheme_version()` reads it (a
-  missing file reads as `0`, exactly `KeyScheme::default()`'s meaning)
-  and needs no unlock — it's a plain version number, not decrypted data
-  — so a bare copy/backup of the data directory alone is always enough
-  to know its version, with zero dependency on `config.toml` or which
-  machine it's opened on. `moku-bin/src/main.rs` reads it at startup;
-  `app_loop.rs`, the first time the vault is actually unlocked in that
-  run, either applies `migrate_all_key_schemes` silently and reports the
-  result via `ctx.show_info` (small gap, below
-  `SCHEMA_UPGRADE_PROMPT_THRESHOLD`) or shows a small full-pane confirm
-  overlay first (Enter/`y` upgrade now, Esc/`n` skip — asked again next
-  launch, nothing persisted) for a larger gap. The manual "migrate to
-  encrypted" action (Settings → Storage tab's `m`/`Shift+M`, or `moku
-  config migrate`) is unrelated and still only toggles encrypted vs.
-  plaintext — it never touches the key-scheme marker or version.
-  **Any new module added to `ENCRYPTABLE_MODULES`
-  (`modules/moku-settings/src/tabs/storage.rs`) must also be added to the
-  identical list in `moku-bin/src/config_cmd.rs`** (now `pub(crate)`
-  there so `app_loop.rs` can reuse the same list directly instead of a
-  third hand-kept copy) — the two are meant to stay in sync (TUI vs. CLI
-  equivalents of the same migration action).
+  encrypted and read under `module_storage_key(root, module_id)`
+  (`KeyScheme::V1`). Records still under the raw root key (data format
+  0) are moku-migrate's hop 0 -> 1, never read by the runtime (see "Data
+  format and migration").
+- **`ENCRYPTABLE_MODULES` exists twice** (`modules/moku-settings/src/
+  tabs/storage.rs` and `moku-bin/src/config_cmd.rs`, TUI vs. CLI of the
+  encrypted/plaintext toggle): a module added to one goes in the other.
+  Nothing else uses it; the data-format hops find module directories on
+  disk. P6 replaces both with a registry declaration.
 - **Every secret in memory has a wiping type (since P3, `secrecy` is
   gone):** keys are `Key<P>`, passwords/seeds/secret values are
   `moku_crypto::SecretString`, other plaintext byte buffers are
@@ -332,6 +366,12 @@ material on disk or needs a runtime goes in `moku-vault`.
     silently overwrote real data; see todo/secrets/bookmark/rss.
   - A `TuiModule::init` must not return `Err` for a data problem, since
     that tears down the whole app. Stay open read-only instead.
+- **An unreachable volume is never dropped from the index** (since P4,
+  KN-4.6). An unplugged drive and a folder deleted by hand look the same
+  (`!dir.exists()`), so such an entry stays registered and is listed by
+  `registry::offline_volumes()` (CLI `volume list`, TUI block under the
+  list); its id stays taken. Only `volume delete <id>` forgets it, and on
+  an offline volume that removes just the index entry.
 - **A volume is opened only under its `VolumeLock`.**
   `VolumeEngine::open_volume(.., lock)` requires one. Take it with
   `VolumeLock::acquire(volume_dir)` BEFORE deriving keys, so a second
@@ -583,7 +623,7 @@ worthy" means (a real release point, not every patch bump).
 Immediately after, `KeyScheme::Legacy`/`PerModuleV1` (the ad hoc,
 one-off migration built for the second pass) was generalized into the
 permanent `V0`/`V1`/`CURRENT_KEY_SCHEME` chain and `.key_scheme_version`
-data-directory marker described in the crypto section above — the
+data-directory marker then described in the crypto section — the
 explicit goal being that any future key-scheme or storage-format change
 only ever needs one new variant plus one migration hop, never a bespoke
 one-time mechanism again. `migrate_module_encryption`'s old
@@ -593,3 +633,8 @@ dedicated `migrate_key_scheme_to_latest`/`migrate_all_key_schemes`. This
 work stayed on `dev`, untagged, per the versioning convention above —
 `moku-bin` will get a `0.2.1` patch bump for it once flagged and
 confirmed.
+
+(Superseded in P4, 0.2.12: that chain became hop 0 -> 1 of moku-migrate's
+data-format chain, and `.key_scheme_version` is now only read there, to
+infer the format of a directory without `FORMAT`. See "Data format and
+migration".)
