@@ -111,9 +111,8 @@ impl StorageManager {
 
     async fn write_key_scheme_marker(&self, version: u16) -> Result<()> {
         let path = self.key_scheme_marker_path();
-        fs::write(&path, version.to_string())
-            .await
-            .map_err(StoreError::io("write the key-scheme version marker", path))
+        moku_sys::util::atomic_write_async(path, version.to_string().into_bytes()).await?;
+        Ok(())
     }
 
     /// Reads the data directory's own record of which `KeyScheme` version
@@ -201,6 +200,13 @@ impl StorageManager {
     /// DB" for as long as the first process keeps it cached.
     pub async fn close_db(&self, module_id: &str) {
         self.db_cache.write().await.remove(module_id);
+    }
+
+    /// Drops every cached DB handle, releasing all of this process's sled
+    /// locks. The data-format upgrade (`moku-migrate`) opens the module
+    /// DBs itself, so the TUI calls this right before running it.
+    pub async fn close_all_dbs(&self) {
+        self.db_cache.write().await.clear();
     }
 
     pub async fn save<T: Serialize + Send + Sync + ?Sized + 'static>(

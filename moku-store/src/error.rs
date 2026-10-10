@@ -63,6 +63,8 @@ pub enum StoreError {
         #[source]
         source: io::Error,
     },
+    #[error("failed to write a storage file")]
+    Write(#[from] moku_sys::util::AtomicWriteError),
     #[error("failed to encode a record")]
     Encode(#[source] serde_json::Error),
     #[error("storage backend error")]
