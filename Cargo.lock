@@ -2716,6 +2716,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "moku-migrate"
+version = "0.1.0"
+dependencies = [
+ "moku-crypto",
+ "moku-store",
+ "moku-sys",
+ "moku-vault",
+ "serde",
+ "serde_json",
+ "sled",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "zeroize",
+]
+
+[[package]]
 name = "moku-notify"
 version = "0.1.0"
 dependencies = [

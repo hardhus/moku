@@ -1,0 +1,31 @@
+[package]
+name = "moku-migrate"
+version = "0.1.0"
+edition = "2024"
+
+# The embedded, one-shot data-format migration chain (audit P4): the
+# data directory's `FORMAT` marker, version detection, the pre-upgrade
+# backup and the ordered hop registry. Every piece of code that reads an
+# old on-disk format lives here and only here; the runtime crates
+# (moku-store, moku-vault, ...) only know the latest format. No UI and
+# no async runtime: callers run `upgrade` on a blocking thread.
+#
+# Deliberately not depending on moku-store: each hop carries its own
+# frozen copy of the old format's types, so changing the runtime types
+# can never change what a hop reads.
+
+[dependencies]
+moku-crypto.workspace = true
+moku-sys.workspace = true
+moku-vault.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sled.workspace = true
+toml.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+moku-store.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
