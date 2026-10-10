@@ -7,6 +7,7 @@ use color_eyre::eyre::eyre;
 mod app_loop;
 mod cli;
 mod config_cmd;
+mod data_upgrade;
 mod pomodoro_cmd;
 mod registry;
 mod tui;
@@ -134,6 +135,19 @@ async fn main() -> Result<()> {
     init_errors()?;
     let _guard = init_logging()?;
 
+    // Before StorageManager::new, which creates vault/ and would make a
+    // fresh directory look like an old one. A newer or unreadable FORMAT
+    // stops here (audit KN-4.5); an older one is upgraded from the TUI's
+    // prompt (or `moku data upgrade`).
+    let data_dir = moku_sys::dirs::get_data_dir().map_err(|e| eyre!(e))?;
+    let pending_upgrade = match data_upgrade::startup_check(&data_dir) {
+        Ok(pending) => pending,
+        Err(e) => {
+            eprintln!("{e:#}");
+            std::process::exit(1);
+        }
+    };
+
     // Never fails: an unreadable/invalid config.toml runs read-only on the
     // defaults and is reported (stderr for CLI commands, a warning toast in
     // the TUI), never silently replaced.
@@ -158,6 +172,7 @@ async fn main() -> Result<()> {
         // panic/eyre-hook interaction (see tui::restore() in utils.rs)
         // when the terminal was never put into raw/alternate-screen mode.
         print_config_issues(&config);
+        print_upgrade_notice(pending_upgrade);
         if let Err(e) = config_cmd::handle(sub, &config, &session, &security, &storage).await {
             eprintln!("{e:#}");
             std::process::exit(1);
@@ -198,6 +213,7 @@ async fn main() -> Result<()> {
         };
 
         print_config_issues(&config);
+        print_upgrade_notice(pending_upgrade);
         let cli_ctx = CliContext {
             config: (*config.snapshot()).clone(),
             storage: Some(Arc::clone(&storage)),
@@ -215,14 +231,6 @@ async fn main() -> Result<()> {
 
     let registry = build_tui_registry(&config);
 
-    // No unlock needed — this just reads the data directory's own
-    // version marker (see StorageManager::data_dir_key_scheme_version)
-    // to decide whether app_loop should offer/perform a key-scheme
-    // upgrade once the vault actually gets unlocked.
-    let stored_key_scheme_version = storage.data_dir_key_scheme_version().await;
-    let schema_versions_behind =
-        moku_store::CURRENT_KEY_SCHEME.version().saturating_sub(stored_key_scheme_version);
-
     run(
         config,
         session,
@@ -230,9 +238,23 @@ async fn main() -> Result<()> {
         storage,
         registry,
         target,
-        schema_versions_behind,
+        data_upgrade::DataDirStatus {
+            dir: data_dir,
+            pending_upgrade,
+        },
     )
     .await
+}
+
+/// CLI commands work on a data directory that is behind, but encrypted
+/// records still in the old format refuse to load until it is upgraded.
+fn print_upgrade_notice(pending: Option<moku_migrate::DataFormat>) {
+    if let Some(from) = pending {
+        eprintln!(
+            "warning: the data directory is in data format {from} (this moku uses {});              run `moku data upgrade`",
+            moku_migrate::CURRENT_DATA_FORMAT
+        );
+    }
 }
 
 /// CLI commands have no toast area: config problems (an invalid section,

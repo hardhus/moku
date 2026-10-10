@@ -2469,6 +2469,7 @@ dependencies = [
  "moku-launcher",
  "moku-lock-screen",
  "moku-lua",
+ "moku-migrate",
  "moku-pomodoro",
  "moku-rss",
  "moku-satz",

@@ -62,6 +62,31 @@ pub fn stop_daemon() -> Result<()> {
     Ok(())
 }
 
+/// Stops the daemon without printing (for callers inside the TUI) and
+/// waits up to `timeout` for its process to be gone, so the files it held
+/// open (its sled DBs) are released when this returns `Ok(true)`.
+/// `Ok(false)`: it wasn't running.
+pub fn stop_daemon_and_wait(timeout: std::time::Duration) -> Result<bool> {
+    let Some(pid_val) = crate::pid::read() else {
+        return Ok(false);
+    };
+    let sys = refresh_single(pid_val);
+    let Some(process) = sys.process(Pid::from_u32(pid_val)) else {
+        crate::pid::remove();
+        return Ok(false);
+    };
+    process.kill();
+    let deadline = std::time::Instant::now() + timeout;
+    while pid_is_alive(pid_val) {
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("the daemon (PID {pid_val}) did not stop within {timeout:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    crate::pid::remove();
+    Ok(true)
+}
+
 #[cfg(test)]
 fn spawn_short_lived_process() -> std::process::Child {
     // A process that stays alive for a few seconds without needing a

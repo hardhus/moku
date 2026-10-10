@@ -21,11 +21,8 @@ use super::SettingsTab;
 /// (module id, ModuleMeta::encrypt_by_default()) — kept in sync with the
 /// overrides in moku-todo/moku-bookmark/moku-rss/moku-secrets (see Faz 5)
 /// and with moku-bin/src/config_cmd.rs's identical list for the CLI
-/// equivalent. `secrets` is included so `[m]`/`[Shift+M]` can also
-/// re-key it to the current per-module HKDF storage key scheme (see
-/// `moku-crypto/src/subkey.rs`) — without it here, a user's real
-/// secrets would never get an in-app trigger to migrate off the legacy
-/// raw-master-key scheme.
+/// equivalent. Only the encrypted/plaintext toggle uses it; the
+/// data-format upgrade (moku-migrate) is a separate mechanism.
 const ENCRYPTABLE_MODULES: &[(&str, bool)] =
     &[("todo", true), ("bookmark", true), ("rss", false), ("secrets", true)];
 

@@ -3,23 +3,15 @@ use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
+use crossterm::event::EventStream;
 use futures::StreamExt;
-use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::text::Text;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use moku_config::{ConfigHandle, MokuConfig};
 use moku_core::{AppContext, ModuleId, MokuTheme, Router, ToastManager, TuiRegistry, keys_match};
 use moku_store::StorageManager;
 use moku_vault::{SecurityManager, VaultSession};
 
-/// Below this many versions behind, a key-scheme upgrade is applied
-/// silently in the background right after unlock (small, cheap, no need
-/// to bother the user) — at or above it, `SchemaUpgradePrompt` asks
-/// first. Matches the user's own example threshold.
-const SCHEMA_UPGRADE_PROMPT_THRESHOLD: u16 = 2;
+use crate::data_upgrade::{self, DataDirStatus, UpgradeEvent, UpgradeScreen};
 
 #[derive(Clone, Copy)]
 enum AppState {
@@ -27,56 +19,6 @@ enum AppState {
     Locked { after_unlock: ModuleId },
 }
 
-/// Shown full-pane (replacing the router's normal draw, same convention
-/// as e.g. `moku-todo`'s delete-confirmation view) once the vault is
-/// unlocked and the data directory turns out to be `versions_behind`
-/// versions behind `CURRENT_KEY_SCHEME`. Enter/`y` runs the upgrade now;
-/// Esc/`n` dismisses it for this run only — nothing is persisted, so a
-/// declined upgrade is offered again on the next launch.
-struct SchemaUpgradePrompt {
-    versions_behind: u16,
-}
-
-/// `Some(true)` = confirm, `Some(false)` = cancel, `None` = keep waiting
-/// (any other key while the prompt is open).
-fn schema_prompt_response(ev: &Event) -> Option<bool> {
-    let Event::Key(key) = ev else { return None };
-    if key.kind != KeyEventKind::Press {
-        return None;
-    }
-    match key.code {
-        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
-        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => Some(false),
-        _ => None,
-    }
-}
-
-fn draw_schema_upgrade_prompt(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    theme: &moku_core::MokuTheme,
-    versions_behind: u16,
-) {
-    let text = Text::from(format!(
-        "Storage encryption scheme is {versions_behind} version(s) behind the latest.\n\n\
-         Upgrade the data directory to the current scheme now?\n\n\
-         [Enter/y] Upgrade now   [Esc/n] Not now (asked again next launch)"
-    ));
-    let block = Block::default()
-        .title(" Storage scheme upgrade available ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.warning));
-    let para = Paragraph::new(text)
-        .block(block)
-        .style(Style::default().fg(theme.base_fg).bg(theme.base_bg))
-        .wrap(Wrap { trim: true });
-    f.render_widget(para, area);
-}
-
-/// Runs `StorageManager::migrate_all_key_schemes` for every module in
-/// `module_ids` and turns the result into one human-readable summary
-/// line for a toast — shared by both the silent-auto-upgrade path and
-/// the confirm-prompt path below.
 /// Drives the currently-focused module's own opt-in redraw tick
 /// (`TuiModule::tick_interval`/`on_tick`) — pending forever (no wakeup at
 /// all) whenever that module doesn't currently want one, so an idle
@@ -92,24 +34,6 @@ async fn focus_tick_wait(interval: Option<&mut tokio::time::Interval>) {
     }
 }
 
-async fn run_key_scheme_migration(ctx: &AppContext, module_ids: &[&str]) -> anyhow::Result<String> {
-    let reports = ctx.storage.migrate_all_key_schemes(module_ids).await?;
-    let total_migrated: usize = reports.iter().map(|(_, r)| r.migrated).sum();
-    let total_errors: usize = reports.iter().map(|(_, r)| r.errors.len()).sum();
-    let detail = reports
-        .iter()
-        .map(|(module, r)| format!("{module}: {} migrated", r.migrated))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    if total_errors > 0 {
-        anyhow::bail!("{total_errors} record(s) failed to migrate ({detail})");
-    }
-    Ok(format!(
-        "Storage encryption scheme updated to the latest version ({total_migrated} record(s)) — {detail}"
-    ))
-}
-
 pub async fn run(
     config: Arc<ConfigHandle>,
     session: Arc<VaultSession>,
@@ -117,30 +41,34 @@ pub async fn run(
     storage: Arc<StorageManager>,
     mut registry: TuiRegistry,
     initial_target: ModuleId,
-    schema_versions_behind: u16,
+    data: DataDirStatus,
 ) -> Result<()> {
     let mut terminal = crate::tui::init()?;
     let mut toasts = ToastManager::new();
     let mut router = Router::new(ModuleId::LAUNCHER);
     let mut ctx = AppContext::new(config, session, security, storage);
 
-    let module_ids: Vec<&str> = crate::config_cmd::ENCRYPTABLE_MODULES
-        .iter()
-        .map(|(id, _)| *id)
-        .collect();
+    // Set at startup from the data directory's FORMAT (no unlock needed,
+    // see main.rs) and cleared once an upgrade succeeds. While it is set,
+    // the upgrade prompt is offered on the first unlock and every
+    // vault-gated module opens it instead of itself (audit KN-4.1).
+    let DataDirStatus {
+        dir: data_dir,
+        pending_upgrade,
+    } = data;
+    let mut pending_upgrade = pending_upgrade;
+    let mut upgrade_screen: Option<UpgradeScreen> = None;
 
-    // Set once at startup from the data directory's own marker (no
-    // unlock needed to read it — see `main.rs`); consumed the first time
-    // the vault actually gets unlocked, below. `None` once handled
-    // (either auto-applied or handed off to `schema_prompt`) so it's
-    // never re-evaluated on a later unlock within the same run.
-    let mut pending_key_scheme_gap: Option<u16> =
-        (schema_versions_behind > 0).then_some(schema_versions_behind);
-    let mut schema_prompt: Option<SchemaUpgradePrompt> = None;
-
-    let mut state = enter_module(&mut registry, &mut router, &mut ctx, initial_target)
-        .await
-        .map_err(|e| eyre!(e))?;
+    let mut state = navigate(
+        &mut registry,
+        &mut router,
+        &mut ctx,
+        initial_target,
+        pending_upgrade.is_some(),
+        &mut upgrade_screen,
+    )
+    .await
+    .map_err(|e| eyre!(e))?;
 
     let mut events = EventStream::new();
     let mut toast_tick = tokio::time::interval(Duration::from_millis(500));
@@ -186,13 +114,15 @@ pub async fn run(
                             m.draw(f, area, &theme);
                         }
                     }
-                    AppState::Unlocked => {
-                        if let Some(prompt) = &schema_prompt {
-                            draw_schema_upgrade_prompt(f, area, &theme, prompt.versions_behind);
-                        } else {
-                            router.draw(&mut registry, f, area, &theme);
+                    AppState::Unlocked => match (&upgrade_screen, pending_upgrade) {
+                        (Some(UpgradeScreen::Prompt { daemon_running, .. }), Some(from)) => {
+                            data_upgrade::draw_prompt(f, area, &theme, from, &data_dir, *daemon_running);
                         }
-                    }
+                        (Some(UpgradeScreen::Running { progress, .. }), _) => {
+                            data_upgrade::draw_running(f, area, &theme, &progress.borrow());
+                        }
+                        _ => router.draw(&mut registry, f, area, &theme),
+                    },
                 }
 
                 toasts.draw(f, area, cfg);
@@ -228,50 +158,79 @@ pub async fn run(
                         }
 
                         if !was_unlocked && ctx.session.is_unlocked() {
-                            state = enter_module(&mut registry, &mut router, &mut ctx, after_unlock)
+                            if pending_upgrade.is_some() {
+                                // First unlock with an upgrade pending: ask
+                                // before entering anything (the target
+                                // likely needs the upgraded data).
+                                upgrade_screen = Some(UpgradeScreen::Prompt {
+                                    after: after_unlock,
+                                    daemon_running: moku_daemon::status::is_running(),
+                                });
+                                state = AppState::Unlocked;
+                            } else {
+                                state = navigate(
+                                    &mut registry,
+                                    &mut router,
+                                    &mut ctx,
+                                    after_unlock,
+                                    pending_upgrade.is_some(),
+                                    &mut upgrade_screen,
+                                )
                                 .await
                                 .map_err(|e| eyre!(e))?;
-                            dirty = true;
-
-                            // First real unlock this run — decide what to
-                            // do with the version gap detected at startup
-                            // (see main.rs). A small gap is applied right
-                            // away and just announced; a larger one asks
-                            // first via `schema_prompt`.
-                            if let Some(gap) = pending_key_scheme_gap.take() {
-                                if gap >= SCHEMA_UPGRADE_PROMPT_THRESHOLD {
-                                    schema_prompt = Some(SchemaUpgradePrompt { versions_behind: gap });
-                                } else {
-                                    match run_key_scheme_migration(&ctx, &module_ids).await {
-                                        Ok(summary) => ctx.show_info(summary),
-                                        Err(e) => ctx.show_error(format!(
-                                            "Storage scheme upgrade failed: {e}"
-                                        )),
-                                    }
-                                }
                             }
+                            dirty = true;
                         }
                     }
                     AppState::Unlocked => {
-                        if let Some(prompt) = schema_prompt.take() {
-                            match schema_prompt_response(&ev) {
+                        if let Some(UpgradeScreen::Running { .. }) = &upgrade_screen {
+                            // Keys are ignored while the upgrade runs.
+                        } else if let Some(&UpgradeScreen::Prompt {
+                            after,
+                            daemon_running,
+                        }) = upgrade_screen.as_ref()
+                        {
+                            match data_upgrade::prompt_response(&ev) {
                                 Some(true) => {
-                                    match run_key_scheme_migration(&ctx, &module_ids).await {
-                                        Ok(summary) => ctx.show_info(summary),
-                                        Err(e) => ctx.show_error(format!(
-                                            "Storage scheme upgrade failed: {e}"
-                                        )),
+                                    let stopped = if daemon_running {
+                                        moku_daemon::status::stop_daemon_and_wait(Duration::from_secs(5))
+                                            .map(|_| ())
+                                    } else {
+                                        Ok(())
+                                    };
+                                    match stopped {
+                                        Ok(()) => {
+                                            // The upgrade opens the module DBs
+                                            // itself; release this process's
+                                            // sled locks first.
+                                            ctx.storage.close_all_dbs().await;
+                                            let (progress, task) = data_upgrade::start(
+                                                data_dir.clone(),
+                                                Arc::clone(&ctx.session),
+                                            );
+                                            upgrade_screen =
+                                                Some(UpgradeScreen::Running { after, progress, task });
+                                        }
+                                        Err(e) => {
+                                            ctx.show_error(format!("Couldn't stop the daemon: {e:#}"));
+                                        }
                                     }
                                     dirty = true;
                                 }
                                 Some(false) => {
+                                    upgrade_screen = None;
+                                    state = skip_upgrade(
+                                        &mut registry,
+                                        &mut router,
+                                        &mut ctx,
+                                        after,
+                                        &mut upgrade_screen,
+                                    )
+                                    .await
+                                    .map_err(|e| eyre!(e))?;
                                     dirty = true;
                                 }
-                                None => {
-                                    // Not a confirm/cancel key — keep the
-                                    // prompt open and ignore the keypress.
-                                    schema_prompt = Some(prompt);
-                                }
+                                None => {}
                             }
                         } else {
                             // Global lock hotkey, intercepted before normal
@@ -282,9 +241,16 @@ pub async fn run(
                                 && keys_match(*key, &lock_key)
                             {
                                 ctx.session.lock();
-                                state = enter_module(&mut registry, &mut router, &mut ctx, ModuleId::LAUNCHER)
-                                    .await
-                                    .map_err(|e| eyre!(e))?;
+                                state = navigate(
+                                    &mut registry,
+                                    &mut router,
+                                    &mut ctx,
+                                    ModuleId::LAUNCHER,
+                                    pending_upgrade.is_some(),
+                                    &mut upgrade_screen,
+                                )
+                                .await
+                                .map_err(|e| eyre!(e))?;
                                 dirty = true;
                             } else {
                                 dirty |= router
@@ -305,16 +271,70 @@ pub async fn run(
             }
             _ = auto_lock_tick.tick() => {
                 let timeout = ctx.config.load().storage.auto_lock_timeout;
+                // Never lock in the middle of a running upgrade: its hops
+                // borrow the root key.
+                let upgrading = matches!(upgrade_screen, Some(UpgradeScreen::Running { .. }));
                 if timeout > 0
+                    && !upgrading
                     && ctx.session.is_unlocked()
                     && last_activity.elapsed() >= Duration::from_secs(timeout)
                 {
                     ctx.session.lock();
-                    state = enter_module(&mut registry, &mut router, &mut ctx, ModuleId::LAUNCHER)
-                        .await
-                        .map_err(|e| eyre!(e))?;
+                    // An open prompt is moot once locked; it comes back on
+                    // the next unlock-gated entry.
+                    upgrade_screen = None;
+                    state = navigate(
+                        &mut registry,
+                        &mut router,
+                        &mut ctx,
+                        ModuleId::LAUNCHER,
+                        pending_upgrade.is_some(),
+                        &mut upgrade_screen,
+                    )
+                    .await
+                    .map_err(|e| eyre!(e))?;
                     dirty = true;
                 }
+            }
+            event = data_upgrade::next_event(&mut upgrade_screen) => {
+                match event {
+                    UpgradeEvent::Progress => {}
+                    UpgradeEvent::Done(result) => {
+                        let after = match upgrade_screen.take() {
+                            Some(UpgradeScreen::Running { after, .. }) => after,
+                            _ => ModuleId::LAUNCHER,
+                        };
+                        let target = match result {
+                            Ok(Ok(report)) => {
+                                pending_upgrade = None;
+                                ctx.show_info(report.summary());
+                                after
+                            }
+                            Ok(Err(e)) => {
+                                ctx.show_error(format!(
+                                    "Data format upgrade failed: {:#}",
+                                    anyhow::Error::from(e)
+                                ));
+                                ModuleId::LAUNCHER
+                            }
+                            Err(e) => {
+                                ctx.show_error(format!("Data format upgrade task failed: {e}"));
+                                ModuleId::LAUNCHER
+                            }
+                        };
+                        state = navigate(
+                            &mut registry,
+                            &mut router,
+                            &mut ctx,
+                            target,
+                            pending_upgrade.is_some(),
+                            &mut upgrade_screen,
+                        )
+                        .await
+                        .map_err(|e| eyre!(e))?;
+                    }
+                }
+                dirty = true;
             }
             _ = focus_tick_wait(focus_tick.as_mut()) => {
                 if let AppState::Unlocked = state
@@ -363,15 +383,85 @@ pub async fn run(
         }
 
         if let Some(target) = ctx.take_navigation() {
-            state = enter_module(&mut registry, &mut router, &mut ctx, target)
-                .await
-                .map_err(|e| eyre!(e))?;
+            state = navigate(
+                &mut registry,
+                &mut router,
+                &mut ctx,
+                target,
+                pending_upgrade.is_some(),
+                &mut upgrade_screen,
+            )
+            .await
+            .map_err(|e| eyre!(e))?;
             dirty = true;
         }
     }
 
     crate::tui::restore()?;
     Ok(())
+}
+
+/// `enter_module`, gated on a pending data-format upgrade (audit KN-4.1):
+/// with the vault unlocked, a module that needs it opens the upgrade
+/// prompt instead of itself (its data may still be in the old format),
+/// and stays on the current screen. Everything else is `enter_module`.
+async fn navigate(
+    registry: &mut TuiRegistry,
+    router: &mut Router,
+    ctx: &mut AppContext,
+    target: ModuleId,
+    upgrade_pending: bool,
+    upgrade_screen: &mut Option<UpgradeScreen>,
+) -> anyhow::Result<AppState> {
+    // The launcher is where a skipped prompt sends the user: never gated.
+    if upgrade_pending
+        && target != ModuleId::LOCK_SCREEN
+        && target != ModuleId::LAUNCHER
+        && ctx.session.is_unlocked()
+        && needs_vault(registry, ctx, target)
+    {
+        *upgrade_screen = Some(UpgradeScreen::Prompt {
+            after: target,
+            daemon_running: moku_daemon::status::is_running(),
+        });
+        return Ok(AppState::Unlocked);
+    }
+    enter_module(registry, router, ctx, target).await
+}
+
+/// "Not now" on the upgrade prompt: go where the user was heading, unless
+/// that module is itself gated on the upgrade, in which case back to the
+/// launcher with a warning (instead of reopening the prompt at once).
+async fn skip_upgrade(
+    registry: &mut TuiRegistry,
+    router: &mut Router,
+    ctx: &mut AppContext,
+    after: ModuleId,
+    upgrade_screen: &mut Option<UpgradeScreen>,
+) -> anyhow::Result<AppState> {
+    let target = if needs_vault(registry, ctx, after) {
+        ctx.show_warning(format!("{} needs the data format update first", after.title()));
+        ModuleId::LAUNCHER
+    } else {
+        after
+    };
+    navigate(registry, router, ctx, target, true, upgrade_screen).await
+}
+
+/// The module's own opinion on whether it owns encrypted storage at all
+/// (Launcher/Dashboard/Settings/etc. always say no — they don't call
+/// StorageManager::save, so gating their entry on vault unlock would be
+/// wrong regardless of config). Falls back to `true` if the module isn't
+/// registered (shouldn't normally happen), matching ModuleMeta's own
+/// default. An invalid `encrypt` override counts as encrypted (fail
+/// closed); the module's save path reports it.
+fn needs_vault(registry: &mut TuiRegistry, ctx: &AppContext, target: ModuleId) -> bool {
+    let module_default_encrypt = registry
+        .get_mut(target)
+        .map(|m| m.encrypt_by_default())
+        .unwrap_or(true);
+    moku_config::resolve_encryption(&ctx.config.load(), target.as_str(), module_default_encrypt)
+        .unwrap_or(true)
 }
 
 async fn enter_module(
@@ -402,23 +492,7 @@ async fn enter_module(
         });
     }
 
-    // The module's own opinion on whether it owns encrypted storage at all
-    // (Launcher/Dashboard/Settings/etc. always say no — they don't call
-    // StorageManager::save, so gating their entry on vault unlock would be
-    // wrong regardless of config). Falls back to `true` if the module
-    // isn't registered (shouldn't normally happen), matching ModuleMeta's
-    // own default.
-    let module_default_encrypt = registry
-        .get_mut(target)
-        .map(|m| m.encrypt_by_default())
-        .unwrap_or(true);
-    // An invalid `encrypt` override counts as encrypted (fail closed); the
-    // module's save path reports it.
-    let needs_vault =
-        moku_config::resolve_encryption(&ctx.config.load(), target.as_str(), module_default_encrypt)
-            .unwrap_or(true);
-
-    if needs_vault && !ctx.session.is_unlocked() {
+    if needs_vault(registry, ctx, target) && !ctx.session.is_unlocked() {
         if let Some(m) = registry.get_mut(ModuleId::LOCK_SCREEN) {
             m.init(ctx).await?;
         }
@@ -510,95 +584,74 @@ mod tests {
         AppContext::new(config, session, security, storage)
     }
 
-    fn make_key(code: crossterm::event::KeyCode, modifiers: crossterm::event::KeyModifiers) -> Event {
-        Event::Key(crossterm::event::KeyEvent {
-            code,
-            modifiers,
-            kind: KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::empty(),
-        })
+    fn todo_registry() -> TuiRegistry {
+        let mut registry = TuiRegistry::new();
+        registry.insert(Box::new(moku_todo::TodoModule::new()));
+        registry
     }
 
-    #[test]
-    fn test_schema_prompt_response_confirm_keys() {
-        use crossterm::event::{KeyCode, KeyModifiers};
-        assert_eq!(
-            schema_prompt_response(&make_key(KeyCode::Enter, KeyModifiers::empty())),
-            Some(true)
-        );
-        assert_eq!(
-            schema_prompt_response(&make_key(KeyCode::Char('y'), KeyModifiers::empty())),
-            Some(true)
-        );
-        assert_eq!(
-            schema_prompt_response(&make_key(KeyCode::Char('Y'), KeyModifiers::empty())),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn test_schema_prompt_response_cancel_keys() {
-        use crossterm::event::{KeyCode, KeyModifiers};
-        assert_eq!(
-            schema_prompt_response(&make_key(KeyCode::Esc, KeyModifiers::empty())),
-            Some(false)
-        );
-        assert_eq!(
-            schema_prompt_response(&make_key(KeyCode::Char('n'), KeyModifiers::empty())),
-            Some(false)
-        );
-        assert_eq!(
-            schema_prompt_response(&make_key(KeyCode::Char('N'), KeyModifiers::empty())),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn test_schema_prompt_response_other_keys_ignored() {
-        use crossterm::event::{KeyCode, KeyModifiers};
-        assert_eq!(
-            schema_prompt_response(&make_key(KeyCode::Char('x'), KeyModifiers::empty())),
-            None
-        );
-    }
-
+    /// KN-4.1: with an upgrade pending, an encrypted module opens the
+    /// upgrade prompt instead of itself.
     #[tokio::test]
-    async fn test_run_key_scheme_migration_errors_when_vault_locked() {
-        let ctx = create_test_context().await;
-        let result = run_key_scheme_migration(&ctx, &["mod1"]).await;
-        assert!(result.is_err());
-    }
+    async fn test_pending_upgrade_gates_encrypted_modules() {
+        let mut registry = todo_registry();
+        let mut router = Router::new(ModuleId::LAUNCHER);
+        let mut ctx = create_unlocked_test_context().await;
+        let mut screen = None;
 
-    #[test]
-    fn test_draw_schema_upgrade_prompt_renders_versions_behind() {
-        let backend = ratatui::backend::TestBackend::new(80, 20);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let theme = moku_core::MokuTheme::default();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                draw_schema_upgrade_prompt(f, area, &theme, 3);
-            })
-            .unwrap();
-        let content: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(content.contains("3 version"));
-        assert!(content.contains("Upgrade"));
-    }
-
-    #[tokio::test]
-    async fn test_run_key_scheme_migration_summarizes_zero_records() {
-        let ctx = create_unlocked_test_context().await;
-        let summary = run_key_scheme_migration(&ctx, &["mod1", "mod2"])
+        let state = navigate(&mut registry, &mut router, &mut ctx, ModuleId::TODO, true, &mut screen)
             .await
             .unwrap();
-        assert!(summary.contains("mod1: 0 migrated"));
-        assert!(summary.contains("mod2: 0 migrated"));
+        assert!(matches!(state, AppState::Unlocked));
+        assert!(matches!(
+            screen,
+            Some(UpgradeScreen::Prompt { after: ModuleId::TODO, .. })
+        ));
+        assert_eq!(router.focused(), ModuleId::LAUNCHER, "todo was not entered");
+    }
+
+    #[tokio::test]
+    async fn test_no_pending_upgrade_enters_the_module() {
+        let mut registry = todo_registry();
+        let mut router = Router::new(ModuleId::LAUNCHER);
+        let mut ctx = create_unlocked_test_context().await;
+        let mut screen = None;
+
+        navigate(&mut registry, &mut router, &mut ctx, ModuleId::TODO, false, &mut screen)
+            .await
+            .unwrap();
+        assert!(screen.is_none());
+        assert_eq!(router.focused(), ModuleId::TODO);
+    }
+
+    /// Locked: the lock screen comes first; the prompt follows the unlock.
+    #[tokio::test]
+    async fn test_pending_upgrade_with_locked_vault_goes_to_the_lock_screen() {
+        let mut registry = todo_registry();
+        let mut router = Router::new(ModuleId::LAUNCHER);
+        let mut ctx = create_test_context().await;
+        let mut screen = None;
+
+        let state = navigate(&mut registry, &mut router, &mut ctx, ModuleId::TODO, true, &mut screen)
+            .await
+            .unwrap();
+        assert!(matches!(state, AppState::Locked { after_unlock: ModuleId::TODO }));
+        assert!(screen.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_skipping_the_upgrade_for_a_gated_module_goes_to_the_launcher() {
+        let mut registry = todo_registry();
+        let mut router = Router::new(ModuleId::TODO);
+        let mut ctx = create_unlocked_test_context().await;
+        let mut screen = None;
+
+        skip_upgrade(&mut registry, &mut router, &mut ctx, ModuleId::TODO, &mut screen)
+            .await
+            .unwrap();
+        assert!(screen.is_none(), "the prompt is not reopened at once");
+        assert_eq!(router.focused(), ModuleId::LAUNCHER);
+        assert!(!ctx.drain_toasts().is_empty(), "the user is told why");
     }
 
     // Regression test for a real bug: the downcast used to type-erase

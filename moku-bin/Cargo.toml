@@ -15,6 +15,7 @@ lua-plugins = ["dep:moku-lua"]
 moku-vault.workspace = true
 moku-sys.workspace = true
 moku-store.workspace = true
+moku-migrate.workspace = true
 moku-config.workspace = true
 moku-core.workspace = true
 moku-lua = { path = "../moku-lua", optional = true }
