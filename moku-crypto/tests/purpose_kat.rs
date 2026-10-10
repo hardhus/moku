@@ -1,13 +1,15 @@
 //! Known-answer tests for `Purpose` and the named HKDF derivations.
 //!
 //! The expected outputs of the permanent derivations are the same K2–K4
-//! values pinned in 0.2.7 (crypto_kat.rs / subkey.rs here,
-//! moku-volume-daemon and moku-volume-fs tests), checked again through the
-//! P3 API. Never "update" an expected value to match new code: a failure
+//! values pinned in 0.2.7 (K2 lived in moku-crypto's subkey.rs, K3/K4 in
+//! moku-volume-daemon and moku-volume-fs tests), checked through the P3
+//! API. K2's only home is now here. Never "update" an expected value to match new code: a failure
 //! means existing data would no longer decrypt.
 
-use moku_crypto::purpose::{Purpose, SlotKind, default_volume_master, module_storage_key, volume_keys};
-use moku_crypto::{Key, RootKey, VolumeMasterKey};
+use moku_crypto::purpose::{
+    Purpose, SlotKind, default_volume_master, module_storage_key, secrets_export_key, volume_keys,
+};
+use moku_crypto::{Key, PasswordKey, RootKey, VolumeMasterKey};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -85,6 +87,16 @@ fn k4_volume_keys_via_purpose() {
         "0d6d3a721d2ccae933a2140f69955bed3328a896e14cef15a76d5be769c6f87e62816061a58339e38edac6498d17cf520e0f2a68d0de1eaaf037ce73402f9430"
     );
 }
+
+/// MSXP v2 export key, pinned from its first implementation (P3) and
+/// cross-checked against an independent HKDF (Python hmac/hashlib).
+#[test]
+fn secrets_export_key_known_answer() {
+    let pk = Key::<PasswordKey>::from_slice(&[0x07; 32]).unwrap();
+    assert_eq!(hex(secrets_export_key(&pk).expose()), SECRETS_EXPORT_EXPECTED);
+}
+const SECRETS_EXPORT_EXPECTED: &str =
+    "a3b76b4eac60fe7d573e52e578050ef711cab5f706864b8f10a577f3a7beed7d";
 
 /// RFC 5869 Test Case 1, straight against the hkdf crate: guards the
 /// library itself across upgrades (P10).

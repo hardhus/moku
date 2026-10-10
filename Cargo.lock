@@ -2821,6 +2821,7 @@ dependencies = [
  "moku-core",
  "moku-crypto",
  "moku-store",
+ "moku-sys",
  "moku-vault",
  "rand 0.8.8",
  "ratatui",

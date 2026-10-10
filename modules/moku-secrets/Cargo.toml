@@ -7,6 +7,7 @@ edition = "2024"
 moku-vault.workspace = true
 moku-store.workspace = true
 moku-crypto.workspace = true
+moku-sys.workspace = true
 moku-config.workspace = true
 moku-core.workspace = true
 anyhow.workspace = true

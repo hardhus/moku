@@ -22,7 +22,8 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 
 use crate::{
-    Key, KeyRole, ModuleStorageKey, RootKey, VolumeContentKey, VolumeMasterKey, VolumeNameKey,
+    ExportKey, Key, KeyRole, ModuleStorageKey, PasswordKey, RootKey, VolumeContentKey,
+    VolumeMasterKey, VolumeNameKey,
 };
 
 /// Which kind of keyslot a KEK opens (P5).
@@ -110,6 +111,12 @@ pub fn module_storage_key(root: &Key<RootKey>, module_id: &str) -> Key<ModuleSto
 /// that two volumes never share one.
 pub fn default_volume_master(root: &Key<RootKey>, volume_id: &str) -> Key<VolumeMasterKey> {
     derive(root.expose(), Purpose::DefaultVolumeV1 { volume_id })
+}
+
+/// The key of a secrets export file (MSXP v2), from the Argon2id output of
+/// the export password.
+pub fn secrets_export_key(password_key: &Key<PasswordKey>) -> Key<ExportKey> {
+    derive(password_key.expose(), Purpose::SecretsExportV2)
 }
 
 /// A volume's two data keys: AES-256-GCM content key and AES-256-SIV name

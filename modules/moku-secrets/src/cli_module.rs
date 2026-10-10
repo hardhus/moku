@@ -6,6 +6,7 @@ use moku_core::{CliContext, CliModule, ModuleId, ModuleMeta};
 use moku_crypto::SecretString;
 
 use crate::engine::{self, PlainFormat};
+use crate::msxp;
 use crate::generator::{self, CharsetOptions, DicewareOptions, Wordlist};
 use crate::model::SecretEntry;
 
@@ -113,6 +114,14 @@ enum SecretsCmd {
         #[arg(long, value_enum, default_value = "encrypted")]
         format: ImportFormatArg,
     },
+    /// Re-encrypt an old-format (v1) encrypted export in the current
+    /// format, under the same password. The input file is left as is.
+    ExportUpgrade {
+        file: String,
+        /// Where to write the upgraded export (must not exist yet).
+        #[arg(long)]
+        out: String,
+    },
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -146,10 +155,13 @@ impl CliModule for SecretsCliModule {
             );
         };
 
-        // `generate` never touches storage — everything else does, and
-        // entries are encrypted by default, so the vault needs to be
-        // unlocked before any of them can read or write.
-        if !matches!(parsed.cmd, Some(SecretsCmd::Generate { .. })) {
+        // `generate` and `export-upgrade` never touch storage — everything
+        // else does, and entries are encrypted by default, so the vault
+        // needs to be unlocked before any of them can read or write.
+        if !matches!(
+            parsed.cmd,
+            Some(SecretsCmd::Generate { .. } | SecretsCmd::ExportUpgrade { .. })
+        ) {
             ensure_unlocked(ctx).await?;
         }
 
@@ -317,7 +329,13 @@ impl CliModule for SecretsCliModule {
                     ImportFormatArg::Json => engine::import_plain_json(&data)?,
                     ImportFormatArg::Encrypted => {
                         let password = moku_vault::cli::read_password("Export password: ")?;
-                        engine::import_encrypted(&data, &password).await?
+                        let imported = msxp::import(&data, &password).await?;
+                        if imported.version == msxp::Version::V1 {
+                            println!(
+                                "ℹ️  {file} uses the old export format (v1). `moku secrets export-upgrade {file} --out <new file>` rewrites it in the current one."
+                            );
+                        }
+                        imported.entries
                     }
                 };
                 let mut entries = engine::load_entries(storage).await?;
@@ -330,6 +348,22 @@ impl CliModule for SecretsCliModule {
                 }
                 engine::save_entries(storage, &ctx.config, &entries).await?;
                 println!("✅ Imported {added} new entries (existing names were skipped).");
+            }
+            Some(SecretsCmd::ExportUpgrade { file, out }) => {
+                let out = std::path::PathBuf::from(out);
+                if out.exists() {
+                    bail!("{} already exists; choose another --out", out.display());
+                }
+                let data = std::fs::read(&file)?;
+                if msxp::version_of(&data)? == msxp::Version::V2 {
+                    bail!("{file} is already in the current export format");
+                }
+                // Asked once: the password is checked by opening the old
+                // file, and the new file reuses it (no new password is set).
+                let password = moku_vault::cli::read_password("Export password: ")?;
+                let upgraded = msxp::upgrade_v1(&data, &password).await?;
+                moku_sys::util::atomic_write_async(out.clone(), upgraded).await?;
+                println!("✅ Wrote {} in the current export format ({file} was not changed).", out.display());
             }
         }
         Ok(())

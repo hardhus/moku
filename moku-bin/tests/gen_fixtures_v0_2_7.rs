@@ -340,6 +340,8 @@ async fn generate_v0_2_7_fixtures() {
     drop(engine);
 
     // --- msxp: secrets encrypted export v1 -----------------------------------
+    // (Since P3 `export_encrypted` writes MSXP v2; the committed v1 file
+    // was produced by the 0.2.7 code. This generator is never re-run.)
     let msxp = moku_secrets::engine::export_encrypted(&secrets(), &EXPORT_PASSWORD.into())
         .await
         .unwrap();

@@ -77,11 +77,12 @@ fn declared_dependencies(manifest: &str) -> Vec<String> {
             }
             continue;
         }
-        if in_deps && !line.starts_with('#') {
-            if let Some((key, _)) = line.split_once('=') {
-                let key = key.trim();
-                deps.push(key.split('.').next().unwrap_or(key).trim_matches('"').to_string());
-            }
+        if in_deps
+            && !line.starts_with('#')
+            && let Some((key, _)) = line.split_once('=')
+        {
+            let key = key.trim();
+            deps.push(key.split('.').next().unwrap_or(key).trim_matches('"').to_string());
         }
     }
     deps

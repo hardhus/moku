@@ -1,10 +1,9 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use moku_config::MokuConfig;
 use moku_core::ModuleId;
 use moku_store::StorageManager;
-use moku_crypto::{Key, PasswordKey, SecretString, format_v1};
+use moku_crypto::SecretString;
 use totp_rs::{Algorithm, Secret, TOTP};
-use zeroize::Zeroizing;
 
 use crate::model::SecretEntry;
 
@@ -36,9 +35,6 @@ pub fn totp_code_now(seed_base32: &str) -> Result<String> {
 }
 
 // --- Export / Import ---
-
-const ENCRYPTED_MAGIC: &[u8; 4] = b"MSXP";
-const ENCRYPTED_VERSION: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlainFormat {
@@ -86,55 +82,15 @@ pub fn import_plain_json(data: &[u8]) -> Result<Vec<SecretEntry>> {
 
 /// Encrypts `entries` under a password chosen at export time — deliberately
 /// independent of moku's own vault password, so this backup remains usable
-/// even if the main vault is lost. Self-describing envelope (magic +
-/// version + salt + ciphertext) so it can be re-imported without any other
-/// context.
+/// even if the main vault is lost. Writes the current format (MSXP v2, see
+/// `crate::msxp`).
 pub async fn export_encrypted(entries: &[SecretEntry], password: &SecretString) -> Result<Vec<u8>> {
-    let salt = moku_crypto::kdf::generate_salt();
-    let key = msxp_v1_key(password, &salt).await?;
-    let plaintext = Zeroizing::new(serde_json::to_vec(entries)?);
-    let ciphertext = format_v1::seal_gcm_no_aad(&key, &plaintext)?;
-
-    let mut out = Vec::with_capacity(4 + 1 + 1 + salt.len() + ciphertext.len());
-    out.extend_from_slice(ENCRYPTED_MAGIC);
-    out.push(ENCRYPTED_VERSION);
-    out.push(salt.len() as u8);
-    out.extend_from_slice(&salt);
-    out.extend_from_slice(&ciphertext);
-    Ok(out)
+    crate::msxp::export(entries, password).await
 }
 
+/// Decrypts an export file of any supported MSXP version.
 pub async fn import_encrypted(data: &[u8], password: &SecretString) -> Result<Vec<SecretEntry>> {
-    if data.len() < 6 || &data[0..4] != ENCRYPTED_MAGIC {
-        bail!("not a moku-secrets encrypted export (bad magic)");
-    }
-    if data[4] != ENCRYPTED_VERSION {
-        bail!("unsupported export version: {}", data[4]);
-    }
-    let salt_len = data[5] as usize;
-    let salt_start = 6;
-    let salt_end = salt_start + salt_len;
-    if data.len() < salt_end {
-        bail!("truncated export file");
-    }
-    let salt = &data[salt_start..salt_end];
-    let ciphertext = &data[salt_end..];
-
-    let key = msxp_v1_key(password, salt).await?;
-    let plaintext = format_v1::open_gcm_no_aad(&key, ciphertext)
-        .map_err(|_| anyhow!("wrong password or corrupted export"))?;
-    serde_json::from_slice(&plaintext).context("decrypted export is not valid JSON")
-}
-
-/// MSXP v1 keys the AES-GCM cipher directly with the Argon2id output of
-/// the export password (default parameters, not recorded in the file).
-async fn msxp_v1_key(password: &SecretString, salt: &[u8]) -> Result<Key<PasswordKey>> {
-    let password = password.duplicate();
-    let salt = salt.to_vec();
-    Ok(tokio::task::spawn_blocking(move || {
-        moku_crypto::password_key(&password, &salt, moku_crypto::kdf::DEFAULT_KDF)
-    })
-    .await??)
+    Ok(crate::msxp::import(data, password).await?.entries)
 }
 
 #[cfg(test)]
