@@ -136,7 +136,7 @@ async fn v0_2_7_wrong_password_is_rejected() {
     );
 }
 
-/// K7b — a real `moku_crypto::encrypt` output (under the K1 key) from
+/// K7b — a real pre-P3 `encrypt` output (under the K1 key) from
 /// 0.2.7 still decrypts.
 #[tokio::test]
 async fn k7b_legacy_gcm_fixture_decrypts() {

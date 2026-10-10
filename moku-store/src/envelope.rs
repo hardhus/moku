@@ -44,7 +44,7 @@ pub enum KeyScheme {
     #[serde(rename = "Legacy")]
     V0,
     /// v1 — encrypted under `HKDF(master, "moku-core/storage/<module_id>/v1")`
-    /// (see `storage::keys::derive_module_storage_key`) — never the raw
+    /// (see `moku_crypto::module_storage_key`) — never the raw
     /// master key directly. Current scheme for every new write.
     #[serde(rename = "PerModuleV1")]
     V1,

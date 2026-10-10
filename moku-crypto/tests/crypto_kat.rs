@@ -8,15 +8,17 @@
 //! must never be "updated to match" a new implementation: if one of these
 //! fails, the change broke compatibility with data already on users' disks.
 //!
-//! The module-storage-key KAT (K2) lives next to its function in
-//! `src/subkey.rs`, together with the constants it also pins.
+//! The module-storage-key KAT (K2) and the other HKDF derivations (K3,
+//! K4 re-checked) live in `purpose_kat.rs`, which also pins every info
+//! string.
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
 };
-use moku_crypto::{SafeKey, argon2id_key, decrypt, encrypt};
-use secrecy::{ExposeSecret, SecretBox};
+use moku_crypto::format_v1::{open_gcm_no_aad, seal_gcm_no_aad};
+use moku_crypto::kdf::DEFAULT_KDF;
+use moku_crypto::{Key, RootKey, SecretString, password_key};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -26,22 +28,15 @@ fn hex(bytes: &[u8]) -> String {
 /// output, version 0x13.
 #[test]
 fn k1_argon2id_vault_key() {
-    let key = argon2id_key(b"correct horse", &[0x01; 16]).unwrap();
-    assert_eq!(hex(&key.expose_secret().0), K1_EXPECTED);
+    let pw = SecretString::from("correct horse");
+    let key = password_key(&pw, &[0x01; 16], DEFAULT_KDF).unwrap();
+    assert_eq!(hex(key.expose()), K1_EXPECTED);
 }
 const K1_EXPECTED: &str = "4471256fa58cf203c9c30f88acf8284cb765abf5fdb02f0e300f6bade11793d1";
 
-/// K1 through the P3 API: `password_key` with the default parameters.
-#[test]
-fn k1_argon2id_vault_key_via_password_key() {
-    let pw = moku_crypto::SecretString::from("correct horse".to_string());
-    let key = moku_crypto::password_key(&pw, &[0x01; 16], moku_crypto::kdf::DEFAULT_KDF).unwrap();
-    assert_eq!(hex(key.expose()), K1_EXPECTED);
-}
-
 /// K7a — the storage/canary ciphertext format: `nonce(12) || ct || tag(16)`,
 /// AES-256-GCM, no AAD. Built here with a fixed nonce so the exact bytes can
-/// be pinned, then opened with the production `decrypt`.
+/// be pinned, then opened with the production `format_v1::open_gcm_no_aad`.
 #[test]
 fn k7a_legacy_gcm_format_is_nonce_then_ciphertext_and_tag() {
     let key_bytes = [0x42u8; 32];
@@ -56,25 +51,26 @@ fn k7a_legacy_gcm_format_is_nonce_then_ciphertext_and_tag() {
     blob.extend_from_slice(&ct);
     assert_eq!(hex(&blob), K7A_EXPECTED);
 
-    let key = SecretBox::new(Box::new(SafeKey(key_bytes)));
-    let opened = decrypt(&blob, &key).unwrap();
-    assert_eq!(opened, plaintext);
+    let key = Key::<RootKey>::from_slice(&key_bytes).unwrap();
+    let opened = open_gcm_no_aad(&key, &blob).unwrap();
+    assert_eq!(&opened[..], plaintext);
 }
 const K7A_EXPECTED: &str =
     "24242424242424242424242473feab6c82a7b213568443c3d346f6de18382847f6e5c9d4c96977e0ff0e847beb";
 
-/// K7a (cont.) — whatever the production `encrypt` emits must round-trip and
-/// keep the same framing: 12-byte nonce prefix + ciphertext + 16-byte tag.
+/// K7a (cont.) — whatever the production `format_v1::seal_gcm_no_aad`
+/// emits must round-trip and keep the same framing: 12-byte nonce prefix +
+/// ciphertext + 16-byte tag.
 #[test]
 fn k7a_production_encrypt_keeps_the_same_framing() {
-    let key = SecretBox::new(Box::new(SafeKey([0x42u8; 32])));
+    let key = Key::<RootKey>::from_slice(&[0x42u8; 32]).unwrap();
     let plaintext = b"foo-kat-plaintext";
-    let blob = encrypt(plaintext, &key).unwrap();
+    let blob = seal_gcm_no_aad(&key, plaintext).unwrap();
     assert_eq!(blob.len(), 12 + plaintext.len() + 16);
-    assert_eq!(decrypt(&blob, &key).unwrap(), plaintext);
+    assert_eq!(&open_gcm_no_aad(&key, &blob).unwrap()[..], plaintext);
 }
 
-/// K7a through the P3 API: `format_v1` opens the pinned legacy blob.
+/// K7a from the pinned hex itself: `format_v1` opens it.
 #[test]
 fn k7a_format_v1_opens_the_pinned_blob() {
     let blob: Vec<u8> = (0..K7A_EXPECTED.len())

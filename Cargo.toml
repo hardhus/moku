@@ -55,7 +55,6 @@ sled = "0.34"
 # Cryptography
 argon2 = "0.5"
 zeroize = { version = "1", features = ["derive"] }
-secrecy = { version = "0.10", features = ["serde"] }
 aes-gcm = "0.10"
 # Only moku-crypto may depend on the crates below (and on argon2/aes-gcm
 # above); moku-crypto/tests/crypto_crate_ban.rs enforces it.
